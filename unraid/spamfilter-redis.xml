@@ -17,7 +17,7 @@
   </Overview>
   <Category>Productivity: Network:Other</Category>
   <WebUI/>
-  <TemplateURL/>
+  <TemplateURL>https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/main/unraid/spamfilter-redis.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/main/assets/icon.png</Icon>
   <ExtraParams>--log-opt max-size=50m --log-opt max-file=5</ExtraParams>
   <PostArgs>redis-server --appendonly yes --appendfsync everysec --save 300 10 --save 60 10000</PostArgs>
