@@ -124,6 +124,11 @@ class Account:
     learn_from_moves: bool
     auto_special_folders: bool
 
+    # Optional rspamd Bayes identity. If unset, falls back to acc.user so
+    # each IMAP account has its own per-recipient Bayes data. Set the same
+    # value across multiple accounts to pool their Bayes training.
+    bayes_user: str | None = None
+
     # Populated at runtime once IMAP delimiter is known.
     delimiter: str = "/"
     folder_map: dict[str, str] = field(default_factory=dict)
@@ -158,6 +163,8 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "junk_retention_days": 10,
     "trained_retention_days": 7,
     "learn_from_moves": True,
+    # Optional. If unset (None), per-account Bayes is keyed by acc.user.
+    "bayes_user": None,
     # When True, look up junk/trash folders via RFC 6154 SPECIAL-USE flags
     # on connect and override the configured names if the server advertises
     # them. Lets Apple Mail / Thunderbird / Outlook users keep their client-
@@ -239,6 +246,7 @@ def load_accounts(path: Path) -> list[Account]:
                 trained_retention_days=int(merged["trained_retention_days"]),
                 learn_from_moves=bool(merged["learn_from_moves"]),
                 auto_special_folders=bool(merged["auto_special_folders"]),
+                bayes_user=(str(merged["bayes_user"]) if merged.get("bayes_user") else None),
             )
         except KeyError as ex:
             raise SystemExit(f"account {entry.get('name')!r}: missing config key {ex.args[0]!r}") from ex
@@ -509,10 +517,20 @@ class Db:
 # ---------------------------------------------------------------------------
 
 
-def rspamd_scan(raw: bytes, recipient: str, max_score: float) -> float | None:
-    """POST to /checkv2. Return numeric score or None on any error."""
+def rspamd_scan(
+    raw: bytes, recipient: str, max_score: float, bayes_user: str | None = None
+) -> float | None:
+    """POST to /checkv2. Return numeric score or None on any error.
+
+    `bayes_user`, if given, is sent as the rspamd `User` header so the
+    classifier (with `users_enabled = true`) keys Bayes data under that
+    identity instead of the message recipient. Multiple accounts using the
+    same `bayes_user` share a Bayes namespace.
+    """
     try:
         headers = {"Rcpt": recipient, "From": recipient}
+        if bayes_user:
+            headers["User"] = bayes_user
         resp = requests.post(RSPAMD_SCAN_URL, data=raw, headers=headers, timeout=HTTP_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
@@ -527,11 +545,16 @@ def rspamd_scan(raw: bytes, recipient: str, max_score: float) -> float | None:
         return None
 
 
-def rspamd_learn(raw: bytes, kind: str) -> bool:
-    """POST to /learnspam or /learnham. Accept 200 and 208 (already learned)."""
+def rspamd_learn(raw: bytes, kind: str, user: str) -> bool:
+    """POST to /learnspam or /learnham. Accept 200 and 208 (already learned).
+
+    `user` is sent as the rspamd `User` header so per-user Bayes
+    (`users_enabled = true`) stores tokens under that identity. Must match
+    the value used during scan for the data to apply on future deliveries.
+    """
     assert kind in {"spam", "ham"}
     url = f"{RSPAMD_LEARN_URL}/learn{kind}"
-    headers = {"Password": RSPAMD_PASSWORD}
+    headers = {"Password": RSPAMD_PASSWORD, "User": user}
     try:
         resp = requests.post(url, data=raw, headers=headers, timeout=HTTP_TIMEOUT)
     except requests.RequestException:
@@ -727,7 +750,7 @@ def try_learn(
             return False
     if not check_rate(db, log,"learn", acc.max_learns_per_hour):
         return False
-    if not rspamd_learn(raw, kind):
+    if not rspamd_learn(raw, kind, user=acc.bayes_user or acc.user):
         log.warning("rspamd learn(%s) failed for %s", kind, msgid)
         db.log_event("learn_failed", msgid, detail=kind)
         return False
@@ -799,7 +822,9 @@ def scan_inbox(client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fm
             continue
 
         recipient = first_recipient(raw, acc.user)
-        score = rspamd_scan(raw, recipient, acc.reject_score_above)
+        score = rspamd_scan(
+            raw, recipient, acc.reject_score_above, bayes_user=acc.bayes_user or acc.user
+        )
         if score is None:
             log.warning("scan failed for %s (uid=%s) - keeping in inbox", msgid, uid)
             db.log_event("scan_failed", msgid)

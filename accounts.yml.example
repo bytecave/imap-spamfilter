@@ -26,6 +26,29 @@ accounts:
     user: you@your-domain.example
     password: "REPLACE_ME"
     # mode: shadow     # default; uncomment to set or change
+    # bayes_user: shared-pool   # optional; see below
+
+# Shared Bayes across multiple of your own accounts:
+#   With rspamd's `users_enabled = true` (this project's default) the Bayes
+#   classifier keys tokens by recipient, so each account trains its own
+#   filter. To pool training across several of YOUR accounts while keeping
+#   other users (family, roommates) isolated, set `bayes_user` to the same
+#   string on every account that should share data. Family accounts can
+#   omit the field and stay isolated under their own IMAP user.
+#
+#   accounts:
+#     - name: marcel_main
+#       user: marcel@verdult.de
+#       password: "..."
+#       bayes_user: marcel-pool      # shared
+#     - name: marcel_work
+#       user: work@verdult.de
+#       password: "..."
+#       bayes_user: marcel-pool      # shared (same value)
+#     - name: family_member
+#       user: kid@verdult.de
+#       password: "..."
+#       # no bayes_user -> isolated, keyed by kid@verdult.de
 
 # Optional: shared overrides for all accounts above. Most users don't need this.
 # Per-account values still take precedence.
