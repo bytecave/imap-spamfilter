@@ -45,6 +45,16 @@ if [ ! -f "$APP/accounts.yml" ]; then
   echo
 fi
 
+# 5. rspamd controller password (random, persistent). Both rspamd and the
+#    filter container read it from this file, so the user never sets it
+#    in the Unraid template.
+PW_FILE="$APP/state/controller.password"
+if [ ! -f "$PW_FILE" ]; then
+  echo "generating rspamd controller password"
+  openssl rand -base64 48 | tr -d '\n' > "$PW_FILE"
+  chmod 600 "$PW_FILE"
+fi
+
 echo "spamfilter bootstrap complete."
 echo "Next:"
 echo "  1. Edit $APP/accounts.yml (IMAP host, credentials)."

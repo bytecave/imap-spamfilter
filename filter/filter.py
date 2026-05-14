@@ -44,7 +44,20 @@ HEARTBEAT_PATH = STATE_DIR / "heartbeat"
 
 RSPAMD_SCAN_URL = os.environ.get("RSPAMD_SCAN_URL", "http://spamfilter-rspamd:11333/checkv2")
 RSPAMD_LEARN_URL = os.environ.get("RSPAMD_LEARN_URL", "http://spamfilter-rspamd:11334")
-RSPAMD_PASSWORD = os.environ.get("RSPAMD_PASSWORD", "")
+
+
+def _load_rspamd_password() -> str:
+    val = os.environ.get("RSPAMD_PASSWORD", "").strip()
+    if val:
+        return val
+    # Fallback: shared appdata file written by the Unraid bootstrap script.
+    pwfile = Path(os.environ.get("STATE_DIR", "/state")) / "controller.password"
+    if pwfile.is_file():
+        return pwfile.read_text().strip()
+    return ""
+
+
+RSPAMD_PASSWORD = _load_rspamd_password()
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 
 # Optional env overrides for accounts.yml `defaults` (Unraid template uses these
