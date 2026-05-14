@@ -15,10 +15,12 @@ APP_GID=100
 # 1. Docker network shared by all four containers
 docker network create spamnet 2>/dev/null || true
 
-# 2. Directory layout under appdata
+# 2. Directory layout under appdata. Only the dirs that the filter
+# container writes are chowned to nobody:users; redis/rspamd manage
+# their own data dirs with their internal uids.
 mkdir -p "$APP"/{redis,state,rspamd/data,rspamd/local.d}
-chown -R "$APP_UID:$APP_GID" "$APP"
-chmod -R u+rwX,g+rwX,o+rX "$APP"
+chown "$APP_UID:$APP_GID" "$APP/state"
+chmod 755 "$APP/state"
 
 # 3. rspamd local.d configs (download only what's missing)
 RSPAMD_FILES=(
