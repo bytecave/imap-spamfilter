@@ -4,8 +4,16 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+    # Only rebuild the image when files that actually go into it change.
+    # Tag pushes ignore this filter (release builds always run).
+    paths:
+      - 'filter/**'
+      - '.github/workflows/build.yml'
   pull_request:
     branches: [main]
+    paths:
+      - 'filter/**'
+      - '.github/workflows/build.yml'
   workflow_dispatch:
 
 permissions:
