@@ -39,11 +39,14 @@ done
 if [ ! -f "$APP/accounts.yml" ]; then
   echo "seeding accounts.yml from accounts.yml.example"
   curl -fsSL "$BASE/accounts.yml.example" -o "$APP/accounts.yml"
-  chmod 600 "$APP/accounts.yml"
   echo
   echo "  >>> EDIT $APP/accounts.yml before starting the spamfilter container"
   echo
 fi
+# 644 so the non-root user inside the filter container (uid 1000) can
+# read this through the bind mount. Appdata is already restricted at
+# the share level on the host.
+chmod 644 "$APP/accounts.yml"
 
 # 5. rspamd controller password (random, persistent). Both rspamd and the
 #    filter container read it from this file, so the user never sets it
