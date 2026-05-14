@@ -2,8 +2,9 @@
 # accounts.yml is gitignored. Keep it out of version control.
 
 defaults:
-  # IMAP connection
-  imap_host: imap.your-netcup-server.de   # verify with netcup CCP before deploying
+  # IMAP connection. imap_host can stay here if every account lives on the
+  # same server; otherwise put imap_host (and port/ssl if needed) inside
+  # the per-account block, where it overrides this default.
   imap_port: 993
   ssl: true
 
@@ -49,12 +50,14 @@ defaults:
 
 accounts:
   - name: marcel
+    imap_host: imap.your-netcup-server.de   # verify with netcup CCP before deploying
     user: marcel@yourdomain.de
     password: "REPLACE_ME"
     mode: shadow
 
   # - name: family-member
+  #   imap_host: imap.your-netcup-server.de
   #   user: someone@yourdomain.de
   #   password: "REPLACE_ME"
   #   mode: shadow
-  #   threshold: 9.0          # per-account overrides allowed
+  #   threshold: 9.0          # any default can be overridden per-account
