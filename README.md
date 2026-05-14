@@ -57,6 +57,7 @@ The script is idempotent and does all of the following:
 - Creates the `/mnt/user/appdata/spamfilter/{redis,state,rspamd/data,rspamd/local.d}` layout
 - Downloads the rspamd `local.d/*` configs from this repo (only if missing)
 - Seeds `accounts.yml` from `accounts.yml.example` (only if missing)
+- Generates a random rspamd controller password into `state/controller.password` (only if missing)
 
 Set the schedule to **"At First Array Start Only"** and click **Run Script**
 once to bootstrap immediately. It'll re-run on every array start, so the
@@ -68,37 +69,15 @@ If you'd rather not use User Scripts, run the same script over SSH:
 curl -fsSL https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/main/unraid/bootstrap.sh | bash
 ```
 
-Drop the rspamd config files into appdata. From a clone/download of this
-repo on the Unraid box:
+### 1. Edit `accounts.yml`
 
 ```bash
-cp -r rspamd/local.d/* /mnt/user/appdata/spamfilter/rspamd/local.d/
-cp accounts.yml.example /mnt/user/appdata/spamfilter/accounts.yml
-chmod 600 /mnt/user/appdata/spamfilter/accounts.yml
+nano /mnt/user/appdata/spamfilter/accounts.yml
 ```
 
-Edit `accounts.yml`:
-
-```bash
-vi /mnt/user/appdata/spamfilter/accounts.yml
-```
-
-Set `imap_host`, fill in each account's `user` / `password`, leave `mode: shadow`
-for the first week.
-
-Generate a long random rspamd controller password (keep it for the next step):
-
-```bash
-openssl rand -base64 48
-```
-
-### 1. Edit `rspamd/local.d/fuzzy_check.conf`
-
-Verify the current public encryption key at
-<https://rspamd.com/doc/modules/fuzzy_check.html> and replace
-`VERIFY_AT_RSPAMD_DOCS_BEFORE_DEPLOY` in
-`/mnt/user/appdata/spamfilter/rspamd/local.d/fuzzy_check.conf`. Without a
-valid key the fuzzy module silently fails open.
+Set `imap_host`, fill in each account's `user` / `password`, leave
+`mode: shadow` for the first week. This is the only file you have to
+edit by hand.
 
 ### 2. Install the four templates
 
@@ -107,11 +86,11 @@ local template), import each XML from this repo's `unraid/` directory:
 
 1. `unraid/redis.xml`    -> install (no prompts beyond the data path)
 2. `unraid/unbound.xml`  -> install
-3. `unraid/rspamd.xml`   -> paste the rspamd controller password into
-   `RSPAMD_PASSWORD`, install
-4. `unraid/spamfilter.xml` -> paste the SAME password into `RSPAMD_PASSWORD`,
-   set `DEFAULT_JUNK_RETENTION_DAYS` and `DEFAULT_TRAINED_RETENTION_DAYS` to
-   taste (defaults 10 / 7), install
+3. `unraid/rspamd.xml`   -> install (controller password is read from
+   the bootstrap-generated `state/controller.password` file)
+4. `unraid/spamfilter.xml` -> set `DEFAULT_JUNK_RETENTION_DAYS` and
+   `DEFAULT_TRAINED_RETENTION_DAYS` if you want non-defaults (defaults
+   10 / 7), install
 
 Each template defaults its paths under `/mnt/user/appdata/spamfilter/<service>`,
 matches typical Unraid conventions, and references `Network=spamnet`.
@@ -137,8 +116,12 @@ Expect:
 [marcel] connected, delimiter='.', mode=shadow
 ```
 
-Browse the rspamd web UI on `http://<unraid-ip>:11334` (password = the value
-you set in `RSPAMD_PASSWORD`).
+Browse the rspamd web UI on `http://<unraid-ip>:11334`. Login password is
+the auto-generated value:
+
+```bash
+cat /mnt/user/appdata/spamfilter/state/controller.password
+```
 
 ### 4. Bootstrap training (optional but recommended)
 
@@ -217,8 +200,7 @@ Items the spec did not pin. Confirm before trusting the filter in `move` mode.
 3. **`$Junk` / `$NotJunk` keyword spelling** - RFC 5788 names. Apple Mail
    and most modern clients set them literally. If your client uses a vendor
    variant, edit `JUNK_KEYWORD` / `NOTJUNK_KEYWORD` in `filter/filter.py`.
-4. **fuzzy.rspamd.com encryption key** - see step 1 of the Unraid install.
-5. **Filter container image** - prebuilt and pushed to
+4. **Filter container image** - prebuilt and pushed to
    `ghcr.io/marcelverdult/imap-spamfilter:latest` by the GitHub Actions
    workflow in `.github/workflows/build.yml` on every push to `main` and
    every `v*` tag. After the first push you must flip the GHCR package
