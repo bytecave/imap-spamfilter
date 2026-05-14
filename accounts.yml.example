@@ -5,9 +5,9 @@
 # else. You can omit the `defaults:` block entirely if you want to.
 #
 # accounts:
-#   - name: marcel
-#     imap_host: imap.your-netcup-server.de
-#     user: marcel@yourdomain.de
+#   - name: your_name
+#     imap_host: imap.your-mail-provider.example
+#     user: you@your-domain.example
 #     password: "REPLACE_ME"
 #
 # Required per account: name, imap_host, user, password.
@@ -29,9 +29,9 @@ defaults:
   # move_grace_seconds: 60
 
 accounts:
-  - name: marcel
-    imap_host: imap.your-netcup-server.de   # verify with netcup CCP before deploying
-    user: marcel@yourdomain.de
+  - name: your_name
+    imap_host: imap.your-mail-provider.example
+    user: you@your-domain.example
     password: "REPLACE_ME"
 
     # ----- Every built-in default is overridable per-account.
@@ -63,9 +63,9 @@ accounts:
                                     # set to false to use literal junk/trash names
 
   # ----- Second account on the same server, almost-default settings.
-  # - name: spouse
-  #   imap_host: imap.your-netcup-server.de
-  #   user: spouse@yourdomain.de
+  # - name: another_user
+  #   imap_host: imap.your-mail-provider.example
+  #   user: another@your-domain.example
   #   password: "REPLACE_ME"
   #   threshold: 9.0                # less aggressive than default
 

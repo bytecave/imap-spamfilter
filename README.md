@@ -1,10 +1,9 @@
 # imap-spamfilter
 
-Docker-based IMAP spam filter. Built for netcup mailboxes (works with any
-IMAP server that supports IDLE), designed to run 24/7 on Unraid (templates
-included) or any Linux host with Docker. Per-account modes, move-based
-Bayes training, never deletes mail. Multi-arch image (`linux/amd64`,
-`linux/arm64`).
+Docker-based IMAP spam filter for any IMAP server that supports IDLE.
+Designed to run 24/7 on Unraid (templates included) or any Linux host with
+Docker. Per-account modes, move-based Bayes training, never deletes mail.
+Multi-arch image (`linux/amd64`, `linux/arm64`).
 
 ## Architecture
 
@@ -32,7 +31,7 @@ Folder-based training (bootstrap and bulk corrections):
 - `Junk/Trained-Spam` is swept to Trash after `trained_retention_days` (default 7)
 
 Hard rules:
-- **Never deletes.** Only IMAP MOVE. Trash retention is netcup's job.
+- **Never deletes.** Only IMAP MOVE. Trash retention is the mail provider's job.
 - **Fails closed.** rspamd unreachable / parse error / folder missing => message stays put.
 - **No autolearn.** Bayes only learns from explicit user moves or the Train-Spam folder.
 
@@ -111,9 +110,9 @@ docker logs -f spamfilter
 Expect:
 
 ```
-[main]   loaded 1 account(s): marcel
-[marcel] connecting to imap.your-netcup-server.de:993 as marcel@yourdomain.de
-[marcel] connected, delimiter='.', mode=shadow
+[main]      loaded 1 account(s): your_name
+[your_name] connecting to imap.your-mail-provider.example:993 as you@your-domain.example
+[your_name] connected, delimiter='.', mode=shadow
 ```
 
 Browse the rspamd web UI on `http://<unraid-ip>:11334`. Login password is
@@ -130,8 +129,8 @@ temporary IMAP folder in your mail client (e.g. `Bootstrap-Spam`), drag
 known spam in, then:
 
 ```bash
-docker exec -it spamfilter python bootstrap_train.py marcel Bootstrap-Spam spam --dry-run
-docker exec -it spamfilter python bootstrap_train.py marcel Bootstrap-Spam spam --move-to Junk
+docker exec -it spamfilter python bootstrap_train.py your_name Bootstrap-Spam spam --dry-run
+docker exec -it spamfilter python bootstrap_train.py your_name Bootstrap-Spam spam --move-to Junk
 ```
 
 Repeat with `Bootstrap-Ham` and `ham`. Delete the bootstrap folders when
@@ -191,9 +190,9 @@ install path; don't run both against the same mailbox.
 
 Items the spec did not pin. Confirm before trusting the filter in `move` mode.
 
-1. **netcup IMAP hostname** - use the value shown in netcup CCP (often
-   `imap.your-customer-domain.de` or `<servername>.netcup.net`). Set in
-   `accounts.yml`.
+1. **IMAP hostname** - get from your mail provider's account/admin panel.
+   Set as `imap_host:` in `accounts.yml`. Verify by opening port 993 with
+   `openssl s_client -connect host:993` if unsure.
 2. **IMAP folder hierarchy delimiter** - auto-detected on connect, logged
    as `connected, delimiter='.', mode=shadow`. Folder names in config use
    `/`; filter rewrites to whatever the server actually uses.
@@ -250,12 +249,12 @@ Useful queries:
 ```sql
 -- 50 most recent events for an account
 SELECT datetime(ts, 'unixepoch', 'localtime'), event, substr(message_id,1,40), detail
-FROM events WHERE account='marcel' ORDER BY ts DESC LIMIT 50;
+FROM events WHERE account='your_name' ORDER BY ts DESC LIMIT 50;
 
 -- "I think I lost a mail" - search by subject across all folders
 SELECT datetime(last_seen, 'unixepoch', 'localtime'),
        current_folder, our_score, our_action, learned_as, sender, subject
-FROM messages WHERE account='marcel' AND subject LIKE '%invoice%';
+FROM messages WHERE account='your_name' AND subject LIKE '%invoice%';
 
 -- per-account rate consumption in the last hour
 SELECT account, action, COUNT(*) FROM rate_limit
@@ -274,7 +273,8 @@ SELECT account, scope, datetime(entered_at, 'unixepoch', 'localtime'), reason
 FROM safe_mode;
 
 -- clear after investigating
-DELETE FROM safe_mode WHERE account='marcel';
+DELETE FROM safe_mode WHERE account='your_name';
+-- or to clear all: DELETE FROM safe_mode;
 ```
 
 Safe-mode is sticky on purpose; it requires a human to evaluate whether the

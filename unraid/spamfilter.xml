@@ -10,7 +10,7 @@
   <Support>https://github.com/marcelverdult/imap-spamfilter/issues</Support>
   <Project>https://github.com/marcelverdult/imap-spamfilter</Project>
   <Overview>
-    IMAP spam filter for netcup and other IMAP/IDLE-capable mailboxes.
+    IMAP spam filter for any IMAP/IDLE-capable mailbox.
     One thread per account, scores via the companion rspamd container,
     moves to Junk based on per-account rules, learns Bayes from your
     own Inbox&lt;-&gt;Junk moves. Never deletes mail (MOVE only).
