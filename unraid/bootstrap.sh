@@ -52,8 +52,11 @@ PW_FILE="$APP/state/controller.password"
 if [ ! -f "$PW_FILE" ]; then
   echo "generating rspamd controller password"
   openssl rand -base64 48 | tr -d '\n' > "$PW_FILE"
-  chmod 600 "$PW_FILE"
 fi
+# 644 so the non-root user inside the filter container (uid 1000) can
+# read this through the bind mount. Appdata share is already restricted
+# on the host.
+chmod 644 "$PW_FILE"
 
 # 6. Render worker-controller.inc from the .template now (host side),
 #    so the rspamd container can mount local.d/ as read-only and start
@@ -64,7 +67,8 @@ if [ -f "$TEMPLATE" ]; then
   PW="$(cat "$PW_FILE")"
   # sed-based substitution avoids depending on gettext/envsubst being on the host.
   sed "s|\${RSPAMD_PASSWORD}|${PW}|g" "$TEMPLATE" > "$TARGET"
-  chmod 600 "$TARGET"
+  # 644 so rspamd's _rspamd user inside the container (uid 102) can read it.
+  chmod 644 "$TARGET"
   echo "rendered worker-controller.inc"
 fi
 
