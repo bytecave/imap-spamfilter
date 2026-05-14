@@ -8,12 +8,17 @@ set -e
 
 APP=/mnt/user/appdata/spamfilter
 BASE=https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/main
+# Unraid container convention: appdata files belong to nobody:users.
+APP_UID=99
+APP_GID=100
 
 # 1. Docker network shared by all four containers
 docker network create spamnet 2>/dev/null || true
 
 # 2. Directory layout under appdata
 mkdir -p "$APP"/{redis,state,rspamd/data,rspamd/local.d}
+chown -R "$APP_UID:$APP_GID" "$APP"
+chmod -R u+rwX,g+rwX,o+rX "$APP"
 
 # 3. rspamd local.d configs (download only what's missing)
 RSPAMD_FILES=(
@@ -46,7 +51,8 @@ fi
 # 644 so the non-root user inside the filter container (uid 1000) can
 # read this through the bind mount. Appdata is already restricted at
 # the share level on the host.
-chmod 644 "$APP/accounts.yml"
+chown "$APP_UID:$APP_GID" "$APP/accounts.yml"
+chmod 640 "$APP/accounts.yml"
 
 # 5. rspamd controller password (random, persistent). Both rspamd and the
 #    filter container read it from this file, so the user never sets it
@@ -56,10 +62,8 @@ if [ ! -f "$PW_FILE" ]; then
   echo "generating rspamd controller password"
   openssl rand -base64 48 | tr -d '\n' > "$PW_FILE"
 fi
-# 644 so the non-root user inside the filter container (uid 1000) can
-# read this through the bind mount. Appdata share is already restricted
-# on the host.
-chmod 644 "$PW_FILE"
+chown "$APP_UID:$APP_GID" "$PW_FILE"
+chmod 640 "$PW_FILE"
 
 # 6. Render worker-controller.inc from the .template now (host side),
 #    so the rspamd container can mount local.d/ as read-only and start
@@ -70,7 +74,8 @@ if [ -f "$TEMPLATE" ]; then
   PW="$(cat "$PW_FILE")"
   # sed-based substitution avoids depending on gettext/envsubst being on the host.
   sed "s|\${RSPAMD_PASSWORD}|${PW}|g" "$TEMPLATE" > "$TARGET"
-  # 644 so rspamd's _rspamd user inside the container (uid 102) can read it.
+  # 644 so rspamd's _rspamd user inside the container (uid != 99) can read it.
+  # rspamd uses its own internal user, not the appdata 99:100 convention.
   chmod 644 "$TARGET"
   echo "rendered worker-controller.inc"
 fi
