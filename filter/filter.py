@@ -507,6 +507,49 @@ class Db:
             (self.account, cutoff),
         )
 
+    def prune_events(self, older_than_s: int = 30 * 86400) -> int:
+        """Drop event rows older than the cutoff. Keeps the DB bounded
+        over 24/7/365 operation - the events table is debug/forensic
+        only and accumulates dozens of rows per account per hour."""
+        cutoff = int(time.time()) - older_than_s
+        cur = self.conn.execute(
+            "DELETE FROM events WHERE account=? AND ts<?",
+            (self.account, cutoff),
+        )
+        return cur.rowcount
+
+    def prune_messages(self, older_than_s: int) -> int:
+        """Drop fully-resolved message rows older than the cutoff. A row
+        is fully resolved when there is no pending_learn (we are not
+        waiting on a grace timer) and either it has been moved out of
+        Inbox or it was scored long enough ago that we will not revisit
+        the decision. Rows we still need for revert detection or pending
+        learns stay regardless of age."""
+        cutoff = int(time.time()) - older_than_s
+        cur = self.conn.execute(
+            """
+            DELETE FROM messages
+             WHERE account=?
+               AND last_seen<?
+               AND pending_learn IS NULL
+            """,
+            (self.account, cutoff),
+        )
+        return cur.rowcount
+
+    def vacuum_if_due(self, every_s: int = 7 * 86400) -> None:
+        """Run an incremental SQLite VACUUM at most once per week to
+        reclaim space from the periodic prunes above. Cheap on a few-MB
+        DB, prevents WAL growth over a multi-year run."""
+        cur = self.conn.execute("PRAGMA user_version").fetchone()
+        last = int(cur[0]) if cur else 0
+        now = int(time.time())
+        if last and now - last < every_s:
+            return
+        self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        self.conn.execute("VACUUM")
+        self.conn.execute(f"PRAGMA user_version = {now}")
+
     # ----- safe mode --------------------------------------------------------
 
     def in_safe_mode(self, scope: str) -> bool:
@@ -713,6 +756,7 @@ def first_recipient(raw: bytes, fallback: str) -> str:
 class AccountState:
     last_junk_poll: float = 0.0
     last_retention: float = 0.0
+    scan_fail_streak: int = 0
 
 
 def _kw(flags: tuple[bytes, ...] | list[bytes]) -> set[str]:
@@ -790,7 +834,14 @@ def try_learn(
 # ----- scan / poll / drain -------------------------------------------------
 
 
-def scan_inbox(client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fmap: dict[str, str]) -> None:
+def scan_inbox(
+    client: IMAPClient,
+    db: Db,
+    log: logging.Logger,
+    acc: Account,
+    fmap: dict[str, str],
+    state: "AccountState | None" = None,
+) -> None:
     uv = select_with_uidvalidity_check(client, db, fmap["inbox"], log)
     unseen = client.search(["UNSEEN"])
     all_uids = client.search(["ALL"])  # also detect Junk->Inbox reverts that aren't unseen
@@ -861,7 +912,22 @@ def scan_inbox(client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fm
         if score is None:
             log.warning("scan failed for %s (uid=%s) - keeping in inbox", msgid, uid)
             db.log_event("scan_failed", msgid)
+            if state is not None:
+                state.scan_fail_streak += 1
+                # Escalate loudly at 1/10/50/250+ so rspamd downtime
+                # shows up in logs and Unraid notification scrapers
+                # without spamming once per scanned message.
+                if state.scan_fail_streak in (1, 10, 50) or state.scan_fail_streak % 250 == 0:
+                    log.error(
+                        "rspamd scan failing: %d consecutive failures (check rspamd container)",
+                        state.scan_fail_streak,
+                    )
+                    db.log_event("scan_fail_streak", detail=str(state.scan_fail_streak))
             continue
+        if state is not None and state.scan_fail_streak:
+            log.info("rspamd scan recovered after %d failures", state.scan_fail_streak)
+            db.log_event("scan_recovered", detail=str(state.scan_fail_streak))
+            state.scan_fail_streak = 0
 
         with db.tx():
             db.update_message(msgid, our_score=score)
@@ -1229,7 +1295,7 @@ def account_loop(acc: Account) -> None:
                 if SHUTDOWN.is_set():
                     break
 
-                scan_inbox(client, db, log, acc, acc.folder_map)
+                scan_inbox(client, db, log, acc, acc.folder_map, state)
                 if SHUTDOWN.is_set():
                     break
                 execute_due_moves(client, db, log, acc, acc.folder_map)
@@ -1241,6 +1307,21 @@ def account_loop(acc: Account) -> None:
 
                 if now - state.last_retention >= acc.retention_check_interval:
                     retention_sweep(client, db, log, acc, acc.folder_map)
+                    # Keep the local DB bounded over years of uptime.
+                    # `messages` rows we no longer need for revert
+                    # detection get dropped once last_seen is older than
+                    # both retention windows combined; events older than
+                    # 30 days are debug-only. VACUUM runs weekly inside.
+                    msg_window = (
+                        max(acc.junk_retention_days, acc.trained_retention_days, 14)
+                        + 7
+                    ) * 86400
+                    with db.tx():
+                        ev = db.prune_events()
+                        ms = db.prune_messages(msg_window)
+                    if ev or ms:
+                        log.info("pruned events=%d messages=%d", ev, ms)
+                    db.vacuum_if_due()
                     state.last_retention = now
 
                 # IDLE on Inbox until activity, junk_poll_interval, or idle_timeout.
@@ -1314,19 +1395,33 @@ def main() -> int:
     log.info("loaded %d account(s): %s", len(accounts), ", ".join(a.name for a in accounts))
     heartbeat()
 
-    threads: list[threading.Thread] = []
+    threads: dict[str, threading.Thread] = {}
     for acc in accounts:
         t = threading.Thread(target=account_loop, args=(acc,), name=acc.name, daemon=False)
         t.start()
-        threads.append(t)
+        threads[acc.name] = t
+    accounts_by_name = {a.name: a for a in accounts}
 
     # Heartbeat watchdog: keep main thread alive, update heartbeat periodically
-    # so it advances even if every account thread is stuck in IDLE.
+    # so it advances even if every account thread is stuck in IDLE. Restart
+    # any account thread that has died - account_loop catches the common
+    # exceptions itself, but an unhandled error (OOM, bug after a future
+    # change) must not silently disable an account for the rest of the
+    # 24/7 run.
     while not SHUTDOWN.is_set():
         heartbeat()
+        for name, t in list(threads.items()):
+            if not t.is_alive():
+                log.error("account thread %s died; restarting", name)
+                acc = accounts_by_name[name]
+                nt = threading.Thread(
+                    target=account_loop, args=(acc,), name=name, daemon=False
+                )
+                nt.start()
+                threads[name] = nt
         SHUTDOWN.wait(timeout=60)
 
-    for t in threads:
+    for t in threads.values():
         t.join(timeout=30)
     log.info("all threads exited")
     return 0
