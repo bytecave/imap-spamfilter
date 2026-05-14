@@ -198,6 +198,20 @@ def _apply_env_overrides(defaults: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _clean_bayes_user(raw: Any, account_name: str) -> str | None:
+    """Validate the bayes_user override. Rejects CR/LF so the value cannot
+    be smuggled as an extra header line via the `Delivered-To:` prefix we
+    prepend to /learn{spam,ham} bodies."""
+    if not raw:
+        return None
+    s = str(raw)
+    if "\r" in s or "\n" in s:
+        raise SystemExit(
+            f"account {account_name!r}: bayes_user must not contain CR or LF"
+        )
+    return s
+
+
 def load_accounts(path: Path) -> list[Account]:
     raw = yaml.safe_load(path.read_text())
     if not isinstance(raw, dict) or "accounts" not in raw:
@@ -246,7 +260,7 @@ def load_accounts(path: Path) -> list[Account]:
                 trained_retention_days=int(merged["trained_retention_days"]),
                 learn_from_moves=bool(merged["learn_from_moves"]),
                 auto_special_folders=bool(merged["auto_special_folders"]),
-                bayes_user=(str(merged["bayes_user"]) if merged.get("bayes_user") else None),
+                bayes_user=_clean_bayes_user(merged.get("bayes_user"), merged.get("name", "?")),
             )
         except KeyError as ex:
             raise SystemExit(f"account {entry.get('name')!r}: missing config key {ex.args[0]!r}") from ex
@@ -509,6 +523,12 @@ class Db:
             VALUES(?,?,?,?)
             """,
             (self.account, scope, int(time.time()), reason),
+        )
+
+    def exit_safe_mode(self, scope: str) -> None:
+        self.conn.execute(
+            "DELETE FROM safe_mode WHERE account=? AND scope=?",
+            (self.account, scope),
         )
 
 
@@ -782,6 +802,15 @@ def scan_inbox(client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fm
             db.enter_safe_mode("all", reason)
             db.log_event("safe_mode", detail=reason)
         return
+    # Auto-exit safe mode once the trigger condition (unseen > cap) clears.
+    # The only enter_safe_mode("all", ...) call site is the cap check above,
+    # so observing unseen <= cap is sufficient to know it is safe to resume.
+    if db.in_safe_mode("all"):
+        log.info("exiting safe mode (unseen=%d back under cap=%d)",
+                 len(unseen), SAFE_MODE_UNSEEN_CAP)
+        with db.tx():
+            db.exit_safe_mode("all")
+            db.log_event("safe_mode_exit", detail=f"unseen={len(unseen)}")
 
     if not candidates:
         return
@@ -1151,6 +1180,7 @@ def account_loop(acc: Account) -> None:
             acc.delimiter = delim
             if acc.auto_special_folders:
                 detected = detect_special_folders(client)
+                old_junk = acc.junk
                 for key in ("junk", "trash"):
                     name = detected.get(key)
                     if not name:
@@ -1160,14 +1190,19 @@ def account_loop(acc: Account) -> None:
                         log.info("auto-detected %s folder via SPECIAL-USE: %s (was %s)",
                                  key, name, current)
                         setattr(acc, key, name)
-                # Keep spam_train/trained_spam under whatever the new junk is,
-                # if the configured names referenced "Junk/..." literally.
-                if "junk" in detected:
-                    new_junk = detected["junk"]
+                # Keep spam_train/trained_spam under whatever the new junk
+                # is, regardless of what prefix the operator originally
+                # configured. Catches operators who don't use literal
+                # "Junk/..." (e.g. "Spam/...") when the server later remaps.
+                if "junk" in detected and acc.junk != old_junk:
+                    new_junk = acc.junk
+                    prefix = old_junk + "/"
                     for key in ("spam_train", "trained_spam"):
                         cur = getattr(acc, key)
-                        if cur.startswith("Junk/"):
-                            setattr(acc, key, new_junk + cur[len("Junk"):])
+                        if cur.startswith(prefix):
+                            remapped = new_junk + cur[len(old_junk):]
+                            log.info("remapped %s: %s -> %s", key, cur, remapped)
+                            setattr(acc, key, remapped)
             acc.folder_map = build_folder_map(acc, delim)
             ensure_folders(client, log, acc.folder_map)
             log.info("connected, delimiter=%r, mode=%s", delim, acc.mode)

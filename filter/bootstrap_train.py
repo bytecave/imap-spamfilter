@@ -55,8 +55,8 @@ def main() -> int:
         return 2
 
     client = IMAPClient(acc.imap_host, port=acc.imap_port, ssl=acc.ssl, timeout=60)
-    client.login(acc.user, acc.password)
     try:
+        client.login(acc.user, acc.password)
         delim = detect_delimiter(client)
         fmap = build_folder_map(acc, delim)
         src = resolve_folder(args.source, delim)
