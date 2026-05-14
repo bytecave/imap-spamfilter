@@ -714,6 +714,23 @@ def select_with_uidvalidity_check(
                 "DELETE FROM pending_move WHERE account=? AND uidvalidity=?",
                 (db.account, stored),
             )
+            # pending_learn rows for messages that lived in this folder are
+            # also unsafe: the UIDs they would have been promoted under no
+            # longer exist, and Message-ID search may resolve to a stale or
+            # missing message. Drop pending_learn so the next user move (or
+            # next drain pass for spam_train) re-creates a clean row.
+            cancelled = db.conn.execute(
+                """
+                UPDATE messages SET pending_learn=NULL, pending_learn_at=NULL
+                 WHERE account=? AND current_folder=? AND pending_learn IS NOT NULL
+                """,
+                (db.account, folder),
+            ).rowcount
+            if cancelled:
+                db.log_event(
+                    "pending_canceled_uidvalidity",
+                    detail=f"{folder} cleared {cancelled} pending_learn rows",
+                )
     with db.tx():
         db.set_uidvalidity(folder, uv)
     return uv
@@ -1325,16 +1342,34 @@ def account_loop(acc: Account) -> None:
                     state.last_retention = now
 
                 # IDLE on Inbox until activity, junk_poll_interval, or idle_timeout.
+                # Poll SHUTDOWN every 60s so a SIGTERM during a long IDLE wait
+                # does not leave the account thread blocked for up to
+                # idle_timeout (~25 min). Also keeps the IDLE chunk well under
+                # any server-side IDLE cap (RFC 2177 mentions 29 min).
                 client.select_folder(acc.folder_map["inbox"])
                 wait = min(acc.idle_timeout, max(30, acc.junk_poll_interval))
+                idle_chunk = 60
+                idle_failed = False
                 try:
                     client.idle()
-                    client.idle_check(timeout=wait)
+                    elapsed = 0
+                    while elapsed < wait and not SHUTDOWN.is_set():
+                        step = min(idle_chunk, wait - elapsed)
+                        if client.idle_check(timeout=step):
+                            break  # server pushed activity, exit IDLE early
+                        elapsed += step
                 finally:
                     try:
                         client.idle_done()
-                    except IMAPClientError:
-                        pass
+                    except (IMAPClientError, OSError) as ex:
+                        # Server likely closed the connection silently
+                        # (idle timeout, restart, network blip). Force a
+                        # reconnect rather than continuing on a half-dead
+                        # socket; the outer except handles the error path.
+                        log.warning("idle_done failed: %s; forcing reconnect", ex)
+                        idle_failed = True
+                if idle_failed:
+                    raise IMAPClientError("idle_done failed")
         except (IMAPClientError, OSError) as ex:
             log.warning("connection error: %s (backoff %ds)", ex, backoff)
             db.log_event("conn_error", detail=str(ex)[:300])
@@ -1421,8 +1456,12 @@ def main() -> int:
                 threads[name] = nt
         SHUTDOWN.wait(timeout=60)
 
+    # Account threads now poll SHUTDOWN every ~60s during IDLE, so a
+    # 180s join leaves 3x cushion for the current chunk to finish plus a
+    # logout round-trip. Without this, threads still in idle_check at
+    # SIGTERM would be abandoned and Docker would have to SIGKILL them.
     for t in threads.values():
-        t.join(timeout=30)
+        t.join(timeout=180)
     log.info("all threads exited")
     return 0
 
