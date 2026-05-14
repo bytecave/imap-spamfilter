@@ -522,15 +522,14 @@ def rspamd_scan(
 ) -> float | None:
     """POST to /checkv2. Return numeric score or None on any error.
 
-    `bayes_user`, if given, is sent as the rspamd `User` header so the
-    classifier (with `users_enabled = true`) keys Bayes data under that
-    identity instead of the message recipient. Multiple accounts using the
-    same `bayes_user` share a Bayes namespace.
+    `bayes_user`, if given, is used as the `Rcpt` header so rspamd's
+    per-user classifier (with `users_enabled = true`) looks up Bayes data
+    under that identity instead of the message recipient. Multiple accounts
+    using the same `bayes_user` share a Bayes namespace.
     """
     try:
-        headers = {"Rcpt": recipient, "From": recipient}
-        if bayes_user:
-            headers["User"] = bayes_user
+        rcpt = bayes_user or recipient
+        headers = {"Rcpt": rcpt, "From": recipient}
         resp = requests.post(RSPAMD_SCAN_URL, data=raw, headers=headers, timeout=HTTP_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
@@ -548,15 +547,20 @@ def rspamd_scan(
 def rspamd_learn(raw: bytes, kind: str, user: str) -> bool:
     """POST to /learnspam or /learnham. Accept 200 and 208 (already learned).
 
-    `user` is sent as the rspamd `User` header so per-user Bayes
-    (`users_enabled = true`) stores tokens under that identity. Must match
-    the value used during scan for the data to apply on future deliveries.
+    `user` becomes the classifier user for per-user Bayes
+    (`users_enabled = true`) by prepending a `Delivered-To: <user>` header
+    to the message bytes before POSTing. Rspamd reads that header to pick
+    the classifier namespace. The HTTP `User` header is ignored by
+    rspamd's controller for classifier identity, so message-header
+    injection is the only working path. Must match the recipient used at
+    scan time for the data to apply on future deliveries.
     """
     assert kind in {"spam", "ham"}
     url = f"{RSPAMD_LEARN_URL}/learn{kind}"
-    headers = {"Password": RSPAMD_PASSWORD, "User": user}
+    headers = {"Password": RSPAMD_PASSWORD}
+    body = f"Delivered-To: {user}\r\n".encode() + raw
     try:
-        resp = requests.post(url, data=raw, headers=headers, timeout=HTTP_TIMEOUT)
+        resp = requests.post(url, data=body, headers=headers, timeout=HTTP_TIMEOUT)
     except requests.RequestException:
         return False
     return resp.status_code in (200, 208)
