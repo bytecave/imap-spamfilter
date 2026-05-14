@@ -13,6 +13,7 @@ Usage (inside the container):
 from __future__ import annotations
 
 import argparse
+import ssl
 import sys
 import time
 from pathlib import Path
@@ -56,7 +57,14 @@ def main() -> int:
 
     client: IMAPClient | None = None
     try:
-        client = IMAPClient(acc.imap_host, port=acc.imap_port, ssl=acc.ssl, timeout=60)
+        ssl_ctx = ssl.create_default_context() if acc.ssl else None
+        client = IMAPClient(
+            acc.imap_host,
+            port=acc.imap_port,
+            ssl=acc.ssl,
+            ssl_context=ssl_ctx,
+            timeout=60,
+        )
         client.login(acc.user, acc.password)
         delim = detect_delimiter(client)
         fmap = build_folder_map(acc, delim)

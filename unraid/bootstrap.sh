@@ -56,9 +56,10 @@ if [ ! -f "$APP/accounts.yml" ]; then
   echo "  >>> EDIT $APP/accounts.yml before starting the spamfilter container"
   echo
 fi
-# 644 so the non-root user inside the filter container (uid 1000) can
-# read this through the bind mount. Appdata is already restricted at
-# the share level on the host.
+# 640 so the filter container (running as Unraid's nobody:users, uid
+# 99 gid 100, matching $APP_UID/$APP_GID) can read accounts.yml via
+# the bind mount, while world has no access. Appdata is already
+# restricted at the share level on the host.
 chown "$APP_UID:$APP_GID" "$APP/accounts.yml"
 chmod 640 "$APP/accounts.yml"
 
@@ -68,7 +69,15 @@ chmod 640 "$APP/accounts.yml"
 PW_FILE="$APP/state/controller.password"
 if [ ! -f "$PW_FILE" ]; then
   echo "generating rspamd controller password"
-  openssl rand -base64 48 | tr -d '\n' > "$PW_FILE"
+  # Write to a temp file then rename so the password file is never
+  # observable in a partially-written state, and append a trailing
+  # newline so common tools (cat, less, while-read) handle it cleanly.
+  ( umask 077 && {
+      openssl rand -base64 48 | tr -d '\n'
+      echo
+    } > "$PW_FILE.tmp"
+  )
+  mv "$PW_FILE.tmp" "$PW_FILE"
 fi
 chown "$APP_UID:$APP_GID" "$PW_FILE"
 chmod 640 "$PW_FILE"

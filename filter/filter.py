@@ -19,6 +19,7 @@ import os
 import re
 import signal
 import sqlite3
+import ssl
 import sys
 import threading
 import time
@@ -68,7 +69,9 @@ _ENV_DEFAULT_OVERRIDES: dict[str, str] = {
 }
 
 FLIP_FLOP_COOLDOWN_S = 600       # 10 min between opposite learns for one msg
+UNLEARNABLE_RETRY_S = 30 * 86400 # retry messages marked 'unlearnable' after 30d
 SAFE_MODE_UNSEEN_CAP = 500       # refuse to process if Inbox unseen > this
+SCAN_FETCH_CHUNK = 50            # max msgs fetched per scan_inbox FETCH call
 RECONNECT_MIN_BACKOFF = 5
 RECONNECT_MAX_BACKOFF = 300
 HTTP_TIMEOUT = 30
@@ -576,8 +579,23 @@ class Db:
         # disk full mid-rewrite) does not cause a tight retry loop where
         # every retention sweep tries VACUUM again and fails the same way.
         self.conn.execute(f"PRAGMA user_version = {now}")
-        self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        self.conn.execute("VACUUM")
+        try:
+            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self.conn.execute("VACUUM")
+        except sqlite3.Error as ex:
+            # Surface VACUUM failure: the marker is now set so we will not
+            # retry for a week, which is the right tradeoff for spin-loop
+            # avoidance but the wrong tradeoff to fail silently. Log loudly
+            # and write an event so the operator notices DB growth before
+            # the next vacuum window rolls around.
+            logging.getLogger("main").error(
+                "vacuum failed for %s; next attempt in %dd: %s",
+                self.account, every_s // 86400, ex,
+            )
+            try:
+                self.log_event("vacuum_failed", detail=str(ex)[:300])
+            except sqlite3.Error:
+                pass
 
     # ----- safe mode --------------------------------------------------------
 
@@ -817,9 +835,22 @@ def _kw(flags: tuple[bytes, ...] | list[bytes]) -> set[str]:
 
 def heartbeat() -> None:
     try:
-        HEARTBEAT_PATH.write_text(str(int(time.time())))
-    except OSError:
-        pass
+        # Atomic write so a partial / interrupted heartbeat write does not
+        # leave a truncated file that healthcheck reads as "0" (unix epoch
+        # = stale by ~50 years). On NFS the rename is atomic per POSIX.
+        tmp = HEARTBEAT_PATH.with_suffix(".tmp")
+        tmp.write_text(str(int(time.time())))
+        tmp.replace(HEARTBEAT_PATH)
+    except OSError as ex:
+        # Surface the failure so the operator notices a stuck NFS mount or
+        # disk full before the healthcheck staleness threshold trips. Use
+        # logger directly to avoid recursion if logging itself blocks on
+        # the same fs.
+        logging.getLogger("main").warning("heartbeat write failed: %s", ex)
+
+
+_RATE_LOG_LOCK = threading.Lock()
+_RATE_LOG_LAST: dict[tuple[str, str], float] = {}
 
 
 def check_rate(db: Db, log: logging.Logger, action: str, limit: int) -> bool:
@@ -829,17 +860,22 @@ def check_rate(db: Db, log: logging.Logger, action: str, limit: int) -> bool:
     count = db.rate_count(action, 3600)
     if count >= limit:
         # Log once per minute at most to avoid log spam during a burst.
-        if not getattr(check_rate, "_last_log", {}).get((db.account, action), 0) \
-                or time.time() - check_rate._last_log[(db.account, action)] > 60:
+        # The last-log map is shared across account threads so it must
+        # be guarded; CPython dict ops are atomic individually but the
+        # read-then-write pattern here is not.
+        key = (db.account, action)
+        now = time.time()
+        with _RATE_LOG_LOCK:
+            last = _RATE_LOG_LAST.get(key, 0.0)
+            should_log = (now - last) > 60
+            if should_log:
+                _RATE_LOG_LAST[key] = now
+        if should_log:
             log.warning("%s rate limit hit (%d/%d per hour), refusing for now",
                         action, count, limit)
-            check_rate._last_log[(db.account, action)] = time.time()  # type: ignore[attr-defined]
             db.log_event("rate_limited", detail=f"{action} {count}/{limit}")
         return False
     return True
-
-
-check_rate._last_log = {}  # type: ignore[attr-defined]
 
 
 def try_learn(
@@ -859,10 +895,16 @@ def try_learn(
             # (e.g. drain_train_spam) still moves the message out.
             return True
         if learned == "unlearnable":
-            # rspamd has already refused this content's tokens (typically
-            # min_tokens not met or HTML-only body). Report success so the
-            # message is moved out without endlessly re-asking rspamd.
-            return True
+            # rspamd previously refused this content's tokens (typically
+            # min_tokens not met). Retry once a month in case the body
+            # changed (some IMAP servers allow APPEND+flag edits) and so
+            # operators do not need to manually clear the row to retry.
+            last = row["learned_at"] or 0
+            if int(time.time()) - last < UNLEARNABLE_RETRY_S:
+                # Report success so caller still moves the message out
+                # of the train folder without endlessly re-asking rspamd.
+                return True
+            # Old enough to retry: fall through to the rspamd_learn call.
         if learned and learned != kind:
             last = row["learned_at"] or 0
             if int(time.time()) - last < FLIP_FLOP_COOLDOWN_S:
@@ -919,95 +961,103 @@ def scan_inbox(
     if not candidates:
         return
 
-    fetched = client.fetch(candidates, [b"BODY.PEEK[]", b"FLAGS"])
-    for uid, data in fetched.items():
+    # Chunk the FETCH so a single oversized inbox does not allocate up
+    # to len(candidates) * MAX_FETCH_BYTES at once. With 200 candidates
+    # and 5 MB cap that would be 1 GB of resident memory.
+    for chunk_start in range(0, len(candidates), SCAN_FETCH_CHUNK):
         if SHUTDOWN.is_set():
             return
-        raw = data.get(b"BODY[]") or data.get(b"BODY.PEEK[]")
-        if not raw:
-            continue
-        flags = _kw(data.get(b"FLAGS", ()))
-        msgid, subject, sender = parse_envelope(raw)
-        if not msgid:
-            log.debug("inbox uid %s: no Message-ID, skipping", uid)
-            continue
+        chunk = candidates[chunk_start : chunk_start + SCAN_FETCH_CHUNK]
+        fetched = client.fetch(chunk, [b"BODY.PEEK[]", b"FLAGS"])
+        for uid, data in fetched.items():
+            if SHUTDOWN.is_set():
+                return
+            raw = data.get(b"BODY[]") or data.get(b"BODY.PEEK[]")
+            if not raw:
+                continue
+            flags = _kw(data.get(b"FLAGS", ()))
+            msgid, subject, sender = parse_envelope(raw)
+            if not msgid:
+                log.debug("inbox uid %s: no Message-ID, skipping", uid)
+                continue
 
-        prior = db.get_message(msgid)
-        prior_folder = prior["current_folder"] if prior else None
-        with db.tx():
-            db.upsert_message(msgid, fmap["inbox"], sender, subject)
+            prior = db.get_message(msgid)
+            prior_folder = prior["current_folder"] if prior else None
+            with db.tx():
+                db.upsert_message(msgid, fmap["inbox"], sender, subject)
 
-        # Detect Junk -> Inbox revert (user moved a message we previously
-        # placed in Junk, or a message that lived in Junk, back to Inbox).
-        reverted = prior_folder == fmap["junk"]
-        if reverted and uid in unseen:
-            # User intent confirmed by $NotJunk keyword skips grace.
-            if NOTJUNK_KEYWORD in flags:
-                try_learn(db, log, acc, raw, msgid, "ham", reason="revert+notjunk_kw")
-            else:
-                # Schedule ham learn after grace.
-                with db.tx():
-                    db.update_message(msgid, pending_learn="ham", pending_learn_at=int(time.time()))
-                    db.log_event("pending_ham", msgid, detail="user revert")
-            continue
+            # Detect Junk -> Inbox revert (user moved a message we
+            # previously placed in Junk, or a message that lived in Junk,
+            # back to Inbox).
+            reverted = prior_folder == fmap["junk"]
+            if reverted and uid in unseen:
+                # User intent confirmed by $NotJunk keyword skips grace.
+                if NOTJUNK_KEYWORD in flags:
+                    try_learn(db, log, acc, raw, msgid, "ham", reason="revert+notjunk_kw")
+                else:
+                    # Schedule ham learn after grace.
+                    with db.tx():
+                        db.update_message(msgid, pending_learn="ham", pending_learn_at=int(time.time()))
+                        db.log_event("pending_ham", msgid, detail="user revert")
+                continue
 
-        # Skip scoring on already-scored messages (avoid duplicate moves).
-        if prior is not None and prior["our_score"] is not None:
-            continue
-        # Only score unseen messages on first appearance.
-        if uid not in unseen:
-            continue
+            # Skip scoring on already-scored messages (avoid duplicate moves).
+            if prior is not None and prior["our_score"] is not None:
+                continue
+            # Only score unseen messages on first appearance.
+            if uid not in unseen:
+                continue
 
-        recipient = first_recipient(raw, acc.user)
-        score = rspamd_scan(
-            raw, recipient, acc.reject_score_above, bayes_user=acc.bayes_user or acc.user
-        )
-        if score is None:
-            log.warning("scan failed for %s (uid=%s) - keeping in inbox", msgid, uid)
-            db.log_event("scan_failed", msgid)
-            if state is not None:
-                state.scan_fail_streak += 1
-                # Escalate loudly at 1/10/50/250+ so rspamd downtime
-                # shows up in logs and Unraid notification scrapers
-                # without spamming once per scanned message.
-                if state.scan_fail_streak in (1, 10, 50) or state.scan_fail_streak % 250 == 0:
-                    log.error(
-                        "rspamd scan failing: %d consecutive failures (check rspamd container)",
-                        state.scan_fail_streak,
-                    )
-                    db.log_event("scan_fail_streak", detail=str(state.scan_fail_streak))
-            continue
-        if state is not None and state.scan_fail_streak:
-            log.info("rspamd scan recovered after %d failures", state.scan_fail_streak)
-            db.log_event("scan_recovered", detail=str(state.scan_fail_streak))
-            state.scan_fail_streak = 0
+            recipient = first_recipient(raw, acc.user)
+            score = rspamd_scan(
+                raw, recipient, acc.reject_score_above, bayes_user=acc.bayes_user or acc.user
+            )
+            if score is None:
+                log.warning("scan failed for %s (uid=%s) - keeping in inbox", msgid, uid)
+                db.log_event("scan_failed", msgid)
+                if state is not None:
+                    state.scan_fail_streak += 1
+                    # Escalate loudly at 1/10/50/250+ so rspamd downtime
+                    # shows up in logs and Unraid notification scrapers
+                    # without spamming once per scanned message.
+                    if state.scan_fail_streak in (1, 10, 50) or state.scan_fail_streak % 250 == 0:
+                        log.error(
+                            "rspamd scan failing: %d consecutive failures (check rspamd container)",
+                            state.scan_fail_streak,
+                        )
+                        db.log_event("scan_fail_streak", detail=str(state.scan_fail_streak))
+                continue
+            if state is not None and state.scan_fail_streak:
+                log.info("rspamd scan recovered after %d failures", state.scan_fail_streak)
+                db.log_event("scan_recovered", detail=str(state.scan_fail_streak))
+                state.scan_fail_streak = 0
 
-        with db.tx():
-            db.update_message(msgid, our_score=score)
-            db.log_event("scan", msgid, detail=f"score={score:.2f} mode={acc.mode}")
-        log.debug("scored %s = %.2f", msgid, score)
+            with db.tx():
+                db.update_message(msgid, our_score=score)
+                db.log_event("scan", msgid, detail=f"score={score:.2f} mode={acc.mode}")
+            log.debug("scored %s = %.2f", msgid, score)
 
-        if score < acc.threshold:
-            continue
+            if score < acc.threshold:
+                continue
 
-        # Over threshold: act according to mode.
-        match acc.mode:
-            case "shadow":
-                log.info("[shadow] would flag %s score=%.2f subj=%r", msgid, score, subject[:80])
-                with db.tx():
-                    db.update_message(msgid, our_action="shadow")
-            case "flag":
-                client.add_flags(uid, [b"\\Flagged"])
-                log.info("[flag] flagged %s score=%.2f", msgid, score)
-                with db.tx():
-                    db.update_message(msgid, our_action="flagged")
-                    db.log_event("flagged", msgid, detail=f"score={score:.2f}")
-            case "move":
-                client.add_flags(uid, [b"\\Flagged"])
-                with db.tx():
-                    db.add_pending_move(uv, uid, msgid)
-                    db.update_message(msgid, our_action="flagged")
-                    db.log_event("flag_pending_move", msgid, detail=f"score={score:.2f}")
+            # Over threshold: act according to mode.
+            match acc.mode:
+                case "shadow":
+                    log.info("[shadow] would flag %s score=%.2f subj=%r", msgid, score, subject[:80])
+                    with db.tx():
+                        db.update_message(msgid, our_action="shadow")
+                case "flag":
+                    client.add_flags(uid, [b"\\Flagged"])
+                    log.info("[flag] flagged %s score=%.2f", msgid, score)
+                    with db.tx():
+                        db.update_message(msgid, our_action="flagged")
+                        db.log_event("flagged", msgid, detail=f"score={score:.2f}")
+                case "move":
+                    client.add_flags(uid, [b"\\Flagged"])
+                    with db.tx():
+                        db.add_pending_move(uv, uid, msgid)
+                        db.update_message(msgid, our_action="flagged")
+                        db.log_event("flag_pending_move", msgid, detail=f"score={score:.2f}")
 
 
 def execute_due_moves(client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fmap: dict[str, str]) -> None:
@@ -1136,6 +1186,8 @@ def process_pending_learns(
             log.warning("select %s for pending learn failed: %s", folder, ex)
             continue
         for r in rows:
+            if SHUTDOWN.is_set():
+                return
             msgid = r["message_id"]
             kind = r["pending_learn"]
             # Spam pending must still be in Junk; ham pending must still be in Inbox.
@@ -1169,7 +1221,7 @@ def drain_train_spam(client: IMAPClient, db: Db, log: logging.Logger, acc: Accou
         return
     folder = fmap["spam_train"]
     try:
-        select_with_uidvalidity_check(client, db, folder, log)
+        uv = select_with_uidvalidity_check(client, db, folder, log)
     except IMAPClientError as ex:
         log.warning("select %s failed: %s", folder, ex)
         return
@@ -1187,7 +1239,12 @@ def drain_train_spam(client: IMAPClient, db: Db, log: logging.Logger, acc: Accou
         if not raw:
             continue
         msgid, subject, sender = parse_envelope(raw)
-        msgid = msgid or f"<no-msgid-uid-{uid}>"
+        # Synthesise a per-(uidvalidity,uid) id when the message has no
+        # Message-ID header. Including the UIDVALIDITY prevents a UID
+        # collision after a folder resync from looking up the OLD msg's
+        # row (which is marked learned) and silent-skipping a brand-new
+        # unrelated message - that bug would silently drop training data.
+        msgid = msgid or f"<no-msgid-uv-{uv}-uid-{uid}>"
         with db.tx():
             db.upsert_message(msgid, folder, sender, subject)
         ok = try_learn(db, log, acc, raw, msgid, "spam", reason="train_spam_folder")
@@ -1286,22 +1343,25 @@ def _sweep_folder_to_trash(
         return
     uids = uids[:500]
     to_move: list[int] = []
-    if exclude_learned_ham:
-        fetched = client.fetch(uids, [b"BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)]"])
-        for uid, data in fetched.items():
-            raw = (
-                data.get(b"BODY[HEADER.FIELDS (MESSAGE-ID)]")
-                or data.get(b"BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)]")
-                or b""
-            )
-            msgid, _, _ = parse_envelope(raw)
-            if msgid:
-                row = db.get_message(msgid)
-                if row is not None and row["learned_as"] == "ham":
-                    continue
-            to_move.append(uid)
-    else:
-        to_move = list(uids)
+    moved_msgids: list[str] = []
+    # Always fetch Message-ID so we can update current_folder in the DB
+    # after the move; otherwise rows referencing src would persist
+    # forever and a future re-train would silent-skip them.
+    fetched = client.fetch(uids, [b"BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)]"])
+    for uid in uids:
+        raw = (
+            fetched.get(uid, {}).get(b"BODY[HEADER.FIELDS (MESSAGE-ID)]")
+            or fetched.get(uid, {}).get(b"BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)]")
+            or b""
+        )
+        msgid, _, _ = parse_envelope(raw)
+        if exclude_learned_ham and msgid:
+            row = db.get_message(msgid)
+            if row is not None and row["learned_as"] == "ham":
+                continue
+        to_move.append(uid)
+        if msgid:
+            moved_msgids.append(msgid)
     if not to_move:
         return
     try:
@@ -1309,8 +1369,22 @@ def _sweep_folder_to_trash(
     except IMAPClientError as ex:
         log.warning("retention: move %s -> %s failed: %s", src, fmap["trash"], ex)
         return
-    with db.tx():
-        db.log_event(tag, detail=f"moved {len(to_move)} from {src} to {fmap['trash']}")
+    try:
+        with db.tx():
+            db.log_event(tag, detail=f"moved {len(to_move)} from {src} to {fmap['trash']}")
+            if moved_msgids:
+                placeholders = ",".join("?" * len(moved_msgids))
+                db.conn.execute(
+                    f"UPDATE messages SET current_folder=? WHERE account=? "
+                    f"AND message_id IN ({placeholders})",
+                    (fmap["trash"], db.account, *moved_msgids),
+                )
+    except sqlite3.Error as ex:
+        log.error(
+            "retention sweep %s: IMAP moved %d msgs to %s but DB update failed: %s",
+            tag, len(to_move), fmap["trash"], ex,
+        )
+        return
     log.info("retention sweep %s: moved %d %s -> %s", tag, len(to_move), src, fmap["trash"])
 
 
@@ -1328,7 +1402,17 @@ def account_loop(acc: Account) -> None:
         client: IMAPClient | None = None
         try:
             log.info("connecting to %s:%d as %s", acc.imap_host, acc.imap_port, acc.user)
-            client = IMAPClient(acc.imap_host, port=acc.imap_port, ssl=acc.ssl, timeout=60)
+            # Pin a strict TLS context so a future imapclient version cannot
+            # silently relax the default - we want hostname verification and
+            # the system CA bundle, no exceptions.
+            ssl_ctx = ssl.create_default_context() if acc.ssl else None
+            client = IMAPClient(
+                acc.imap_host,
+                port=acc.imap_port,
+                ssl=acc.ssl,
+                ssl_context=ssl_ctx,
+                timeout=60,
+            )
             client.login(acc.user, acc.password)
             delim = detect_delimiter(client)
             acc.delimiter = delim
@@ -1406,7 +1490,10 @@ def account_loop(acc: Account) -> None:
                 # any server-side IDLE cap (RFC 2177 mentions 29 min).
                 client.select_folder(acc.folder_map["inbox"])
                 wait = min(acc.idle_timeout, max(30, acc.junk_poll_interval))
-                idle_chunk = 60
+                # 30s idle_chunk keeps us comfortably below the 60s socket
+                # timeout, so a hung peer is detected within one chunk and
+                # SHUTDOWN is observed within ~30s rather than ~120s.
+                idle_chunk = 30
                 idle_failed = False
                 try:
                     client.idle()
@@ -1432,7 +1519,14 @@ def account_loop(acc: Account) -> None:
             log.warning("connection error: %s (backoff %ds)", ex, backoff)
             db.log_event("conn_error", detail=str(ex)[:300])
         except Exception as ex:  # noqa: BLE001 - last-resort guard
-            log.exception("unhandled error in account loop: %s", ex)
+            # Use error+truncated str rather than log.exception(): the full
+            # traceback can echo the IMAP password back if the underlying
+            # exception text contains it (some servers reflect the LOGIN
+            # arguments in their error response).
+            log.error(
+                "unhandled error in account loop (%s): %s",
+                type(ex).__name__, str(ex)[:300],
+            )
             db.log_event("unhandled_error", detail=str(ex)[:300])
         finally:
             if client is not None:
@@ -1505,11 +1599,23 @@ def main() -> int:
     # exceptions itself, but an unhandled error (OOM, bug after a future
     # change) must not silently disable an account for the rest of the
     # 24/7 run.
+    # An account that has been up for 10 minutes since its last restart
+    # is considered healthy, so the next failure starts a fresh backoff
+    # cycle from 5s rather than continuing whatever previous max it
+    # reached. Without this, a thread that crashed once a year ago and
+    # crashes again now waits 5 minutes to recover.
+    backoff_reset_after = 600.0
     while not SHUTDOWN.is_set():
         heartbeat()
         now = time.monotonic()
         for name, t in list(threads.items()):
             if t.is_alive():
+                if (
+                    restart_backoff[name] > 0
+                    and last_restart[name]
+                    and (now - last_restart[name]) > backoff_reset_after
+                ):
+                    restart_backoff[name] = 0.0
                 continue
             wait_for = max(0.0, last_restart[name] + restart_backoff[name] - now)
             if wait_for > 0:
@@ -1525,10 +1631,6 @@ def main() -> int:
             nt.start()
             threads[name] = nt
             last_restart[name] = now
-            # Cap backoff at 5 minutes; reset to 0 once the thread has
-            # been up long enough to be considered healthy (handled in
-            # account_loop's own success path is not strictly needed -
-            # any thread alive past one full backoff cycle proves it).
             restart_backoff[name] = min(max(restart_backoff[name] * 2, 5.0), 300.0)
         SHUTDOWN.wait(timeout=60)
 
