@@ -349,6 +349,43 @@ The `DEFAULT_JUNK_RETENTION_DAYS` and `DEFAULT_TRAINED_RETENTION_DAYS`
 environment variables on the filter container override `defaults:` for
 those two keys (useful for the Unraid template form).
 
+### Bayes identity (sharing or isolating training across accounts)
+
+rspamd's Bayes classifier in this project runs with `users_enabled = true`,
+which means tokens are stored per-recipient. By default each IMAP account
+in `accounts.yml` trains its own Bayes namespace keyed by its `user`.
+
+| Key | Default | Notes |
+| --- | --- | --- |
+| `bayes_user` | unset | rspamd `User` header used for both scan and learn; overrides the per-recipient default |
+
+Use `bayes_user` to pool training across several of your own mailboxes
+while leaving other users (e.g. family members) isolated. Set the same
+`bayes_user` value on every account that should share data. Accounts that
+omit the field stay isolated under their own IMAP user.
+
+```yaml
+accounts:
+  - name: marcel_main
+    user: marcel@verdult.de
+    password: "..."
+    bayes_user: marcel-pool        # shared
+  - name: marcel_work
+    user: work@verdult.de
+    password: "..."
+    bayes_user: marcel-pool        # shared (same value)
+  - name: family_member
+    user: kid@verdult.de
+    password: "..."
+    # no bayes_user -> isolated, keyed by kid@verdult.de
+```
+
+Switching an existing account from per-recipient to a `bayes_user` value
+(or vice versa) starts a fresh Bayes namespace. The prior tokens stay in
+Redis under the old key but are no longer consulted. Either re-train under
+the new identity (drop mail back into Train-Spam) or migrate the keys in
+Redis manually.
+
 ---
 
 ## Persistent data
