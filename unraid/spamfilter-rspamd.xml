@@ -21,14 +21,13 @@
   <WebUI>http://[IP]:[PORT:11334]/</WebUI>
   <TemplateURL/>
   <Icon>https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/main/assets/icon.png</Icon>
-  <ExtraParams>--log-opt max-size=50m --log-opt max-file=5</ExtraParams>
+  <ExtraParams>--log-opt max-size=50m --log-opt max-file=5 -p 127.0.0.1:11334:11334</ExtraParams>
   <PostArgs/>
   <CPUset/>
   <DateInstalled/>
   <DonateText/>
   <DonateLink/>
   <Requires>Run unraid/bootstrap.sh first (creates the spamnet network, the appdata layout, and the rspamd controller password file).</Requires>
-  <Config Name="Controller UI" Target="11334" Default="11334" Mode="tcp" Description="Bound to 127.0.0.1 only. Tunnel via SSH (`ssh -L 11334:127.0.0.1:11334 root@unraid`) to access the web UI from outside." Type="Port" Display="always" Required="false" Mask="false" HostIP="127.0.0.1">11334</Config>
   <Config Name="local.d configs" Target="/etc/rspamd/local.d" Default="/mnt/user/appdata/spamfilter/rspamd/local.d" Mode="ro" Description="Mounted read-only at /etc/rspamd/local.d. Filled by bootstrap.sh." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/spamfilter/rspamd/local.d</Config>
   <Config Name="rspamd state" Target="/var/lib/rspamd" Default="/mnt/user/appdata/spamfilter/rspamd/data" Mode="rw" Description="rspamd-managed runtime state (caches). Does not need backup." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/spamfilter/rspamd/data</Config>
 </Container>
