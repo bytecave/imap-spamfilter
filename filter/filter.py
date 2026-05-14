@@ -772,7 +772,7 @@ def try_learn(
             log.warning("skip learn (%s) for %s: flip-flop cooldown active", kind, msgid)
             db.log_event("learn_flipflop_block", msgid, detail=f"{row['learned_as']}->{kind}")
             return False
-    if not check_rate(db, log,"learn", acc.max_learns_per_hour):
+    if not check_rate(db, log, "learn", acc.max_learns_per_hour):
         return False
     if not rspamd_learn(raw, kind, user=acc.bayes_user or acc.user):
         log.warning("rspamd learn(%s) failed for %s", kind, msgid)
@@ -1082,14 +1082,27 @@ def drain_train_spam(client: IMAPClient, db: Db, log: logging.Logger, acc: Accou
     except IMAPClientError as ex:
         log.warning("move %s -> %s failed: %s", folder, fmap["trained_spam"], ex)
         return
-    with db.tx():
-        for uid in learned_uids:
-            db.log_event("trained_moved", detail=f"uid={uid} -> {fmap['trained_spam']}")
-        placeholders = ",".join("?" * len(moved_msgids))
-        db.conn.execute(
-            f"UPDATE messages SET current_folder=? WHERE account=? AND message_id IN ({placeholders})",
-            (fmap["trained_spam"], db.account, *moved_msgids),
+    # IMAP move has already succeeded by this point. If the DB update
+    # below raises (e.g. disk full), the messages are on the server in
+    # Trained-Spam while the rows still point at Train-Spam, which is
+    # cosmetic drift only - next drain pass cannot re-move them because
+    # the source folder no longer holds those UIDs - but log it loudly
+    # so an operator can reconcile by hand.
+    try:
+        with db.tx():
+            for uid in learned_uids:
+                db.log_event("trained_moved", detail=f"uid={uid} -> {fmap['trained_spam']}")
+            placeholders = ",".join("?" * len(moved_msgids))
+            db.conn.execute(
+                f"UPDATE messages SET current_folder=? WHERE account=? AND message_id IN ({placeholders})",
+                (fmap["trained_spam"], db.account, *moved_msgids),
+            )
+    except sqlite3.Error as ex:
+        log.error(
+            "drain_train_spam: IMAP moved %d msgs to %s but DB update failed: %s",
+            len(learned_uids), fmap["trained_spam"], ex,
         )
+        return
     log.info("drain_train_spam: learned+moved %d", len(learned_uids))
 
 
