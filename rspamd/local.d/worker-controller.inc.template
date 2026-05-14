@@ -1,0 +1,7 @@
+# Rendered at container start by envsubst (see docker-compose.yml).
+# Source of truth for the password is RSPAMD_PASSWORD in .env.
+bind_socket = "*:11334";
+password = "${RSPAMD_PASSWORD}";
+enable_password = "${RSPAMD_PASSWORD}";
+secure_ip = "172.16.0.0/12";
+secure_ip = "127.0.0.1";

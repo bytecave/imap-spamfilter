@@ -1,0 +1,60 @@
+# Copy to accounts.yml and fill in real credentials.
+# accounts.yml is gitignored. Keep it out of version control.
+
+defaults:
+  # IMAP connection
+  imap_host: imap.your-netcup-server.de   # verify with netcup CCP before deploying
+  imap_port: 993
+  ssl: true
+
+  # Folder names as displayed in your client. The filter auto-detects the
+  # IMAP hierarchy delimiter on connect and rewrites these accordingly
+  # (e.g. "Junk/Train-Spam" becomes "Junk.Train-Spam" on Dovecot).
+  inbox: INBOX
+  junk: Junk
+  trash: Trash
+  spam_train: Junk/Train-Spam       # drag-to-train inbox
+  trained_spam: Junk/Trained-Spam   # post-learn archive
+
+  # Operating mode per account: shadow | flag | move
+  #   shadow - scan + log only, no mailbox writes
+  #   flag   - shadow + set \Flagged keyword on suspect mail
+  #   move   - flag + after move_grace_seconds, MOVE to Junk
+  mode: shadow
+
+  # Scoring
+  threshold: 8.0
+  min_threshold_allowed: 5.0      # startup refuses to run below this
+  reject_score_above: 100.0       # scores outside +/- this are treated as None
+
+  # Timing
+  move_grace_seconds: 60          # delay between flag and move (mode=move)
+  learn_grace_seconds: 300        # 5 min undo window before any learning
+  idle_timeout: 1500              # IMAP IDLE re-issue interval (<30 min)
+  poll_interval: 600              # fallback poll when IDLE not supported
+  junk_poll_interval: 120         # how often to scan Junk for user moves
+  retention_check_interval: 3600  # how often retention sweeps run
+
+  # Rate limits (per-hour unless noted)
+  max_moves_per_hour: 30
+  max_learns_per_hour: 50
+  max_train_per_run: 100          # cap per drain_train_spam batch
+
+  # Retention - MOVE only, never delete
+  junk_retention_days: 10         # Junk -> Trash after N days (0 = disabled)
+  trained_retention_days: 7       # Trained-Spam -> Trash after N days
+
+  # Training toggle (false = no learning at all, scan-only forever)
+  learn_from_moves: true
+
+accounts:
+  - name: marcel
+    user: marcel@yourdomain.de
+    password: "REPLACE_ME"
+    mode: shadow
+
+  # - name: family-member
+  #   user: someone@yourdomain.de
+  #   password: "REPLACE_ME"
+  #   mode: shadow
+  #   threshold: 9.0          # per-account overrides allowed

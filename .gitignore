@@ -1,0 +1,23 @@
+# Local runtime / secrets
+.env
+accounts.yml
+rspamd/local.d/worker-controller.inc
+
+# Per-host data (Unraid appdata)
+state/
+redis/
+rspamd/data/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store

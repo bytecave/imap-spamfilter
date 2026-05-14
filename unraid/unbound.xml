@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>spamfilter-unbound</Name>
+  <Repository>mvance/unbound:latest</Repository>
+  <Registry>https://hub.docker.com/r/mvance/unbound</Registry>
+  <Network>spamnet</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support/>
+  <Project/>
+  <Overview>
+    Recursive DNS resolver for the IMAP spam filter stack. Lets rspamd run
+    DNSBL queries (Spamhaus, Abusix, SpamCop) without hitting the
+    rate-limits that public/shared resolvers impose. Required for the RBL
+    module to actually contribute signal.
+  </Overview>
+  <Category>Network:DNS</Category>
+  <WebUI/>
+  <TemplateURL/>
+  <Icon/>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires>Custom network `spamnet` must exist: `docker network create spamnet`.</Requires>
+</Container>

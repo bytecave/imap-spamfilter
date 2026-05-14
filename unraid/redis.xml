@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>spamfilter-redis</Name>
+  <Repository>redis:8-alpine</Repository>
+  <Registry>https://hub.docker.com/_/redis/</Registry>
+  <Network>spamnet</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support/>
+  <Project/>
+  <Overview>
+    Redis persistence backend for the IMAP spam filter stack. Stores rspamd
+    Bayes tokens, fuzzy hashes, and neural weights. AOF + RDB enabled so
+    the corpus survives container restarts. Install on the spamnet network
+    alongside spamfilter-rspamd, spamfilter-unbound, and spamfilter.
+  </Overview>
+  <Category>Productivity: Network:Other</Category>
+  <WebUI/>
+  <TemplateURL/>
+  <Icon>https://raw.githubusercontent.com/docker-library/docs/master/redis/logo.png</Icon>
+  <ExtraParams/>
+  <PostArgs>redis-server --appendonly yes --appendfsync everysec --save 300 10 --save 60 10000</PostArgs>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires>Custom network `spamnet` must exist before install: open the Unraid console and run `docker network create spamnet`.</Requires>
+  <Config Name="Data dir" Target="/data" Default="/mnt/user/appdata/spamfilter/redis" Mode="rw" Description="Redis AOF/RDB files. Critical to back up - losing this means retraining Bayes from zero." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/spamfilter/redis</Config>
+</Container>

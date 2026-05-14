@@ -1,0 +1,80 @@
+# Optional: brings the same four containers up via Compose Manager.
+# The recommended install path on Unraid is via Community Applications
+# (one template per container). See unraid/*.xml and README.md.
+
+services:
+  spamfilter-redis:
+    image: redis:8-alpine
+    container_name: spamfilter-redis
+    restart: unless-stopped
+    volumes:
+      - /mnt/user/appdata/spamfilter/redis:/data
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --save
+      - "300 10"
+      - --save
+      - "60 10000"
+    networks: [spamnet]
+
+  spamfilter-unbound:
+    image: mvance/unbound:latest
+    container_name: spamfilter-unbound
+    restart: unless-stopped
+    networks: [spamnet]
+
+  spamfilter-rspamd:
+    image: rspamd/rspamd:latest
+    container_name: spamfilter-rspamd
+    restart: unless-stopped
+    depends_on: [spamfilter-redis, spamfilter-unbound]
+    environment:
+      - RSPAMD_PASSWORD=${RSPAMD_PASSWORD}
+    volumes:
+      - /mnt/user/appdata/spamfilter/rspamd/local.d:/etc/rspamd/local.d.src:ro
+      - /mnt/user/appdata/spamfilter/rspamd/data:/var/lib/rspamd
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "set -e;
+       mkdir -p /etc/rspamd/local.d;
+       cp -a /etc/rspamd/local.d.src/. /etc/rspamd/local.d/;
+       if [ -z \"$$RSPAMD_PASSWORD\" ]; then echo 'RSPAMD_PASSWORD is empty'; exit 1; fi;
+       envsubst < /etc/rspamd/local.d/worker-controller.inc.template \
+                > /etc/rspamd/local.d/worker-controller.inc;
+       rm -f /etc/rspamd/local.d/worker-controller.inc.template;
+       exec /docker-entrypoint.sh rspamd"
+    networks: [spamnet]
+    ports:
+      - "127.0.0.1:11334:11334"
+
+  spamfilter:
+    build: ./filter
+    image: ghcr.io/marcelverdult/imap-spamfilter:latest
+    container_name: spamfilter
+    restart: unless-stopped
+    depends_on: [spamfilter-rspamd]
+    volumes:
+      - /mnt/user/appdata/spamfilter/accounts.yml:/app/accounts.yml:ro
+      - /mnt/user/appdata/spamfilter/state:/state
+    environment:
+      - RSPAMD_SCAN_URL=http://spamfilter-rspamd:11333/checkv2
+      - RSPAMD_LEARN_URL=http://spamfilter-rspamd:11334
+      - RSPAMD_PASSWORD=${RSPAMD_PASSWORD}
+      - STATE_DIR=/state
+      - LOG_LEVEL=INFO
+      - TZ=Europe/Berlin
+    healthcheck:
+      test: ["CMD-SHELL", "test $$(($$(date +%s) - $$(cat /state/heartbeat 2>/dev/null || echo 0))) -lt 1800"]
+      interval: 5m
+      timeout: 10s
+      retries: 2
+    networks: [spamnet]
+
+networks:
+  spamnet:
+    name: spamnet
+    driver: bridge

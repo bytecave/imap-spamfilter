@@ -1,0 +1,50 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>spamfilter</Name>
+  <Repository>ghcr.io/marcelverdult/imap-spamfilter:latest</Repository>
+  <Registry>https://ghcr.io/marcelverdult/imap-spamfilter</Registry>
+  <Network>spamnet</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/marcelverdult/imap-spamfilter/issues</Support>
+  <Project>https://github.com/marcelverdult/imap-spamfilter</Project>
+  <Overview>
+    IMAP spam filter for netcup and other IMAP/IDLE-capable mailboxes.
+    One thread per account, scores via the companion rspamd container,
+    moves to Junk based on per-account rules, learns Bayes from your
+    own Inbox&lt;-&gt;Junk moves. Never deletes mail (MOVE only).
+
+    Per-account config (credentials, modes, threshold) lives in
+    `/mnt/user/appdata/spamfilter/accounts.yml`. Edit that file by hand;
+    container picks it up on restart.
+
+    Requires the companion containers spamfilter-redis,
+    spamfilter-rspamd, and spamfilter-unbound on the `spamnet` network.
+  </Overview>
+  <Category>Productivity: Network:Other</Category>
+  <WebUI/>
+  <TemplateURL/>
+  <Icon/>
+  <ExtraParams>--health-cmd="test $(($(date +%s) - $(cat /state/heartbeat 2>/dev/null || echo 0))) -lt 1800" --health-interval=5m --health-timeout=10s --health-retries=2</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires>Custom network `spamnet`. spamfilter-rspamd must be running on the same network. Create accounts.yml before first start (see accounts.yml.example in the repo).</Requires>
+
+  <Config Name="accounts.yml" Target="/app/accounts.yml" Default="/mnt/user/appdata/spamfilter/accounts.yml" Mode="ro" Description="Account list and per-account overrides. Must exist before first start. Template at https://github.com/marcelverdult/imap-spamfilter/blob/main/accounts.yml.example" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/spamfilter/accounts.yml</Config>
+  <Config Name="State dir" Target="/state" Default="/mnt/user/appdata/spamfilter/state" Mode="rw" Description="SQLite audit DB and heartbeat file. Persists across restarts." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/spamfilter/state</Config>
+
+  <Config Name="RSPAMD_SCAN_URL" Target="RSPAMD_SCAN_URL" Default="http://spamfilter-rspamd:11333/checkv2" Mode="" Description="rspamd /checkv2 endpoint. Default works with the companion container on the same spamnet network." Type="Variable" Display="always" Required="true" Mask="false">http://spamfilter-rspamd:11333/checkv2</Config>
+  <Config Name="RSPAMD_LEARN_URL" Target="RSPAMD_LEARN_URL" Default="http://spamfilter-rspamd:11334" Mode="" Description="rspamd controller base URL. Used for /learnspam and /learnham." Type="Variable" Display="always" Required="true" Mask="false">http://spamfilter-rspamd:11334</Config>
+  <Config Name="RSPAMD_PASSWORD" Target="RSPAMD_PASSWORD" Default="" Mode="" Description="MUST match the value used in spamfilter-rspamd container." Type="Variable" Display="always" Required="true" Mask="true"/>
+
+  <Config Name="DEFAULT_JUNK_RETENTION_DAYS" Target="DEFAULT_JUNK_RETENTION_DAYS" Default="10" Mode="" Description="How many days a message stays in Junk before being MOVED to Trash. 0 disables. Overrides defaults.junk_retention_days in accounts.yml." Type="Variable" Display="always" Required="false" Mask="false">10</Config>
+  <Config Name="DEFAULT_TRAINED_RETENTION_DAYS" Target="DEFAULT_TRAINED_RETENTION_DAYS" Default="7" Mode="" Description="How many days a message stays in Junk/Trained-Spam before being MOVED to Trash. 0 disables. Overrides defaults.trained_retention_days in accounts.yml." Type="Variable" Display="always" Required="false" Mask="false">7</Config>
+
+  <Config Name="LOG_LEVEL" Target="LOG_LEVEL" Default="INFO" Mode="" Description="DEBUG | INFO | WARNING | ERROR" Type="Variable" Display="always" Required="false" Mask="false">INFO</Config>
+  <Config Name="TZ" Target="TZ" Default="Europe/Berlin" Mode="" Description="Timezone for log timestamps" Type="Variable" Display="advanced" Required="false" Mask="false">Europe/Berlin</Config>
+  <Config Name="STATE_DIR" Target="STATE_DIR" Default="/state" Mode="" Description="In-container path (matches the State dir mount)" Type="Variable" Display="advanced" Required="false" Mask="false">/state</Config>
+</Container>

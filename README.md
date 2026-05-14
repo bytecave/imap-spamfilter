@@ -1,0 +1,350 @@
+# imap-spamfilter
+
+Docker-based IMAP spam filter. Built for netcup mailboxes (works with any
+IMAP server that supports IDLE), designed to run 24/7 on Unraid (templates
+included) or any Linux host with Docker. Per-account modes, move-based
+Bayes training, never deletes mail. Multi-arch image (`linux/amd64`,
+`linux/arm64`).
+
+## Architecture
+
+Four containers on a shared `spamnet` Docker network:
+
+| Container          | Image                  | Role |
+| ------------------ | ---------------------- | ---- |
+| spamfilter-redis   | `redis:8-alpine`       | Persists rspamd Bayes tokens, fuzzy hashes, neural weights (AOF + RDB). |
+| spamfilter-unbound | `mvance/unbound:latest`| Local recursive DNS. Keeps DNSBL lookups out of shared-resolver quotas. |
+| spamfilter-rspamd  | `rspamd/rspamd:latest` | Scores messages: Bayes / fuzzy / neural / RBL. No autolearn. |
+| spamfilter         | this repo (custom)     | Python service. One thread per account, IDLE on Inbox, polls Junk, scores, moves, learns. |
+
+Per-account operating modes (set in `accounts.yml`, promoted manually):
+- **shadow**  - scan + log only, no mailbox writes
+- **flag**    - shadow + sets `\Flagged` on suspect mail
+- **move**    - flag + after `move_grace_seconds`, MOVEs to Junk
+
+Move-based training (no special folders needed in daily use):
+- Inbox -> Junk = learn as spam (after `learn_grace_seconds`, default 300s)
+- Junk -> Inbox = learn as ham  (after `learn_grace_seconds`)
+- IMAP keyword `$Junk` / `$NotJunk` skips the grace window
+
+Folder-based training (bootstrap and bulk corrections):
+- Drag suspected spam to `Junk/Train-Spam` -> filter learns, moves to `Junk/Trained-Spam`
+- `Junk/Trained-Spam` is swept to Trash after `trained_retention_days` (default 7)
+
+Hard rules:
+- **Never deletes.** Only IMAP MOVE. Trash retention is netcup's job.
+- **Fails closed.** rspamd unreachable / parse error / folder missing => message stays put.
+- **No autolearn.** Bayes only learns from explicit user moves or the Train-Spam folder.
+
+---
+
+## Install on Unraid (recommended path)
+
+Each container installs as a normal Unraid Docker app. No Compose Manager
+required. All four containers run on a shared user-defined Docker network
+called `spamnet` so they can resolve each other by name.
+
+### 0. Prerequisites
+
+#### Create the `spamnet` Docker network
+
+Unraid does not auto-create Docker networks from templates. You have to make
+the user-defined bridge once. Pick one method:
+
+**Recommended - User Scripts plugin (no SSH needed afterwards):**
+
+Install **User Scripts** from Community Apps if not already. Settings ->
+User Scripts -> Add New Script, name it `create-spamnet`, paste:
+
+```bash
+#!/bin/bash
+docker network create spamnet 2>/dev/null || true
+```
+
+Set the schedule to **"At First Array Start Only"**. Click Run Script
+once to create it now; from then on Unraid recreates it automatically
+if it disappears (rare).
+
+**Alternative - one-line SSH:**
+
+```bash
+docker network create spamnet
+```
+
+#### Lay out appdata
+
+```bash
+mkdir -p /mnt/user/appdata/spamfilter/{redis,state,rspamd/data,rspamd/local.d}
+```
+
+Drop the rspamd config files into appdata. From a clone/download of this
+repo on the Unraid box:
+
+```bash
+cp -r rspamd/local.d/* /mnt/user/appdata/spamfilter/rspamd/local.d/
+cp accounts.yml.example /mnt/user/appdata/spamfilter/accounts.yml
+chmod 600 /mnt/user/appdata/spamfilter/accounts.yml
+```
+
+Edit `accounts.yml`:
+
+```bash
+vi /mnt/user/appdata/spamfilter/accounts.yml
+```
+
+Set `imap_host`, fill in each account's `user` / `password`, leave `mode: shadow`
+for the first week.
+
+Generate a long random rspamd controller password (keep it for the next step):
+
+```bash
+openssl rand -base64 48
+```
+
+### 1. Edit `rspamd/local.d/fuzzy_check.conf`
+
+Verify the current public encryption key at
+<https://rspamd.com/doc/modules/fuzzy_check.html> and replace
+`VERIFY_AT_RSPAMD_DOCS_BEFORE_DEPLOY` in
+`/mnt/user/appdata/spamfilter/rspamd/local.d/fuzzy_check.conf`. Without a
+valid key the fuzzy module silently fails open.
+
+### 2. Install the four templates
+
+In the Unraid web UI (Docker tab -> Add Container -> Template -> "Add" a
+local template), import each XML from this repo's `unraid/` directory:
+
+1. `unraid/redis.xml`    -> install (no prompts beyond the data path)
+2. `unraid/unbound.xml`  -> install
+3. `unraid/rspamd.xml`   -> paste the rspamd controller password into
+   `RSPAMD_PASSWORD`, install
+4. `unraid/spamfilter.xml` -> paste the SAME password into `RSPAMD_PASSWORD`,
+   set `DEFAULT_JUNK_RETENTION_DAYS` and `DEFAULT_TRAINED_RETENTION_DAYS` to
+   taste (defaults 10 / 7), install
+
+Each template defaults its paths under `/mnt/user/appdata/spamfilter/<service>`,
+matches typical Unraid conventions, and references `Network=spamnet`.
+
+> **Tip.** If you'd rather get the templates without cloning the repo,
+> point Unraid's "Template repositories" setting (Docker tab -> Advanced
+> view) at this GitHub repo URL. The XMLs in `unraid/` will then show up
+> in the standard "Add Container" template picker.
+
+### 3. First run
+
+After `spamfilter` starts, watch the logs:
+
+```bash
+docker logs -f spamfilter
+```
+
+Expect:
+
+```
+[main]   loaded 1 account(s): marcel
+[marcel] connecting to imap.your-netcup-server.de:993 as marcel@yourdomain.de
+[marcel] connected, delimiter='.', mode=shadow
+```
+
+Browse the rspamd web UI on `http://<unraid-ip>:11334` (password = the value
+you set in `RSPAMD_PASSWORD`).
+
+### 4. Bootstrap training (optional but recommended)
+
+Bayes is roughly useless until ~200 spam and ~200 ham are learned. Create a
+temporary IMAP folder in your mail client (e.g. `Bootstrap-Spam`), drag
+known spam in, then:
+
+```bash
+docker exec -it spamfilter python bootstrap_train.py marcel Bootstrap-Spam spam --dry-run
+docker exec -it spamfilter python bootstrap_train.py marcel Bootstrap-Spam spam --move-to Junk
+```
+
+Repeat with `Bootstrap-Ham` and `ham`. Delete the bootstrap folders when
+done.
+
+### 5. Mode promotion
+
+After ~1 week in `shadow`:
+
+```bash
+vi /mnt/user/appdata/spamfilter/accounts.yml   # change mode: shadow -> flag
+docker restart spamfilter
+```
+
+After another week, promote to `move`. Promote each family member
+independently. Modify the file by hand any time - changes take effect on
+container restart.
+
+---
+
+## Alternative install: any Linux host with Docker (no Unraid)
+
+The published `ghcr.io/marcelverdult/imap-spamfilter` image is multi-arch
+(`linux/amd64` and `linux/arm64`), so the same stack runs on Synology,
+generic Linux servers, Raspberry Pi 4/5, ARM mini-PCs, etc.
+
+```bash
+git clone https://github.com/marcelverdult/imap-spamfilter
+cd imap-spamfilter
+
+# pick a host path you want appdata under, and edit docker-compose.yml
+# to use it instead of /mnt/user/appdata/spamfilter (sed works fine):
+APP=/srv/spamfilter
+sed -i "s|/mnt/user/appdata/spamfilter|$APP|g" docker-compose.yml
+
+mkdir -p $APP/{redis,state,rspamd/data,rspamd/local.d}
+cp rspamd/local.d/* $APP/rspamd/local.d/
+cp accounts.yml.example $APP/accounts.yml
+chmod 600 $APP/accounts.yml
+# edit $APP/accounts.yml + the fuzzy_check.conf encryption key
+
+cp .env.example .env
+# edit .env: set RSPAMD_PASSWORD
+
+docker compose pull        # use the prebuilt ghcr image
+docker compose up -d
+docker compose logs -f spamfilter
+```
+
+The compose file matches the Unraid layout one-for-one, so backups,
+docs, and the SQLite audit queries all apply the same way. Pick one
+install path; don't run both against the same mailbox.
+
+---
+
+## Verify before deploying
+
+Items the spec did not pin. Confirm before trusting the filter in `move` mode.
+
+1. **netcup IMAP hostname** - use the value shown in netcup CCP (often
+   `imap.your-customer-domain.de` or `<servername>.netcup.net`). Set in
+   `accounts.yml`.
+2. **IMAP folder hierarchy delimiter** - auto-detected on connect, logged
+   as `connected, delimiter='.', mode=shadow`. Folder names in config use
+   `/`; filter rewrites to whatever the server actually uses.
+3. **`$Junk` / `$NotJunk` keyword spelling** - RFC 5788 names. Apple Mail
+   and most modern clients set them literally. If your client uses a vendor
+   variant, edit `JUNK_KEYWORD` / `NOTJUNK_KEYWORD` in `filter/filter.py`.
+4. **fuzzy.rspamd.com encryption key** - see step 1 of the Unraid install.
+5. **Filter container image** - prebuilt and pushed to
+   `ghcr.io/marcelverdult/imap-spamfilter:latest` by the GitHub Actions
+   workflow in `.github/workflows/build.yml` on every push to `main` and
+   every `v*` tag. After the first push you must flip the GHCR package
+   visibility to **public** (GitHub -> your profile -> Packages ->
+   `imap-spamfilter` -> Package settings -> Change visibility -> Public),
+   otherwise Unraid will fail to pull with `manifest unknown`.
+   If you'd rather build locally:
+   ```bash
+   docker build -t imap-spamfilter:local ./filter
+   ```
+   then edit the Unraid template's `Repository` field.
+
+---
+
+## Persistent data
+
+Everything stateful lives under `/mnt/user/appdata/spamfilter/`:
+
+```
+/mnt/user/appdata/spamfilter/
+├── accounts.yml                # account list and per-account overrides (SECRETS)
+├── redis/                      # Bayes corpus, fuzzy hashes, neural weights
+├── state/
+│   ├── spamfilter.db           # SQLite audit log + state
+│   └── heartbeat               # epoch updated each loop (healthcheck source)
+└── rspamd/
+    ├── local.d/                # rspamd configs (you populate from this repo)
+    └── data/                   # rspamd-managed caches
+```
+
+Back up `redis/`, `state/`, and `accounts.yml`. Skip `rspamd/data/` (rebuilds
+itself). Unraid's built-in **CA Backup** plugin pointed at the appdata path is
+sufficient.
+
+---
+
+## Operational queries
+
+The SQLite DB is WAL mode; safe to query while the filter is running.
+
+```bash
+sqlite3 /mnt/user/appdata/spamfilter/state/spamfilter.db
+```
+
+Useful queries:
+
+```sql
+-- 50 most recent events for an account
+SELECT datetime(ts, 'unixepoch', 'localtime'), event, substr(message_id,1,40), detail
+FROM events WHERE account='marcel' ORDER BY ts DESC LIMIT 50;
+
+-- "I think I lost a mail" - search by subject across all folders
+SELECT datetime(last_seen, 'unixepoch', 'localtime'),
+       current_folder, our_score, our_action, learned_as, sender, subject
+FROM messages WHERE account='marcel' AND subject LIKE '%invoice%';
+
+-- per-account rate consumption in the last hour
+SELECT account, action, COUNT(*) FROM rate_limit
+WHERE ts >= strftime('%s','now','-1 hour') GROUP BY account, action;
+```
+
+---
+
+## Recovering from safe-mode
+
+If an account hits a rate limit or sanity check, scanning continues but
+moving/learning halts and a row is inserted into the `safe_mode` table.
+
+```sql
+SELECT account, scope, datetime(entered_at, 'unixepoch', 'localtime'), reason
+FROM safe_mode;
+
+-- clear after investigating
+DELETE FROM safe_mode WHERE account='marcel';
+```
+
+Safe-mode is sticky on purpose; it requires a human to evaluate whether the
+trigger was a real problem or a benign spike.
+
+---
+
+## Known limitations
+
+- **No allowlist.** Intentional. rspamd's DKIM/SPF symbols already give
+  negative score to aligned mail. Fix misclassifications by training, not
+  by allowlisting.
+- **No web UI for accounts.** All inspection via SQLite or the rspamd UI.
+- **IDLE re-issued every `idle_timeout` (default 1500s).** Lower it if your
+  server drops idle connections faster.
+- **No multi-host coordination.** Don't run two filter instances against
+  the same mailbox.
+
+---
+
+## Repository contents
+
+```
+.
+├── README.md
+├── LICENSE
+├── docker-compose.yml            # alt install path
+├── .env.example
+├── .gitignore
+├── accounts.yml.example
+├── filter/                       # custom Python service
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   ├── filter.py
+│   └── bootstrap_train.py
+├── rspamd/local.d/               # drop into /mnt/user/appdata/spamfilter/rspamd/local.d/
+└── unraid/                       # Unraid Docker templates (one per container)
+    ├── redis.xml
+    ├── unbound.xml
+    ├── rspamd.xml
+    └── spamfilter.xml
+```
+
+`.env`, `accounts.yml`, `state/`, `redis/`, `rspamd/data/`, and the rendered
+`worker-controller.inc` are gitignored. Nothing in version control contains
+secrets.

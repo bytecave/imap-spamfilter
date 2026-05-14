@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>spamfilter-rspamd</Name>
+  <Repository>rspamd/rspamd:latest</Repository>
+  <Registry>https://hub.docker.com/r/rspamd/rspamd</Registry>
+  <Network>spamnet</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support/>
+  <Project/>
+  <Overview>
+    rspamd scanner for the IMAP spam filter stack. Reads its `local.d`
+    config from the mounted appdata directory, renders the controller
+    password from $RSPAMD_PASSWORD at startup (envsubst), and listens on
+    11333 (scan) and 11334 (control + web UI).
+  </Overview>
+  <Category>Productivity: Network:Other</Category>
+  <WebUI>http://[IP]:[PORT:11334]/</WebUI>
+  <TemplateURL/>
+  <Icon>https://rspamd.com/img/rspamd_logo_navy.png</Icon>
+  <ExtraParams>--entrypoint /bin/sh</ExtraParams>
+  <PostArgs>-c "set -e; mkdir -p /etc/rspamd/local.d; cp -a /etc/rspamd/local.d.src/. /etc/rspamd/local.d/; [ -n \"$RSPAMD_PASSWORD\" ] || { echo RSPAMD_PASSWORD empty; exit 1; }; envsubst &lt; /etc/rspamd/local.d/worker-controller.inc.template &gt; /etc/rspamd/local.d/worker-controller.inc; rm -f /etc/rspamd/local.d/worker-controller.inc.template; exec /docker-entrypoint.sh rspamd"</PostArgs>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires>Custom network `spamnet` must exist: `docker network create spamnet`. spamfilter-redis and spamfilter-unbound must be running.</Requires>
+  <Config Name="Controller UI" Target="11334" Default="11334" Mode="tcp" Description="rspamd controller HTTP (UI + /learn endpoints). Bind only to LAN or 127.0.0.1." Type="Port" Display="always" Required="false" Mask="false">11334</Config>
+  <Config Name="local.d configs" Target="/etc/rspamd/local.d.src" Default="/mnt/user/appdata/spamfilter/rspamd/local.d" Mode="ro" Description="Copy this repo's rspamd/local.d/* into this directory before first start." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/spamfilter/rspamd/local.d</Config>
+  <Config Name="rspamd state" Target="/var/lib/rspamd" Default="/mnt/user/appdata/spamfilter/rspamd/data" Mode="rw" Description="rspamd-managed runtime state (caches). Does not need backup." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/spamfilter/rspamd/data</Config>
+  <Config Name="RSPAMD_PASSWORD" Target="RSPAMD_PASSWORD" Default="" Mode="" Description="Long random string. Use the SAME value here and on the spamfilter container. Suggestion: openssl rand -base64 48" Type="Variable" Display="always" Required="true" Mask="true"/>
+</Container>
