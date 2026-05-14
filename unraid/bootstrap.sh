@@ -15,12 +15,16 @@ APP_GID=100
 # 1. Docker network shared by all four containers
 docker network create spamnet 2>/dev/null || true
 
-# 2. Directory layout under appdata. Only the dirs that the filter
-# container writes are chowned to nobody:users; redis/rspamd manage
-# their own data dirs with their internal uids.
+# 2. Directory layout under appdata.
+# - All dirs owned by nobody:users (Unraid appdata convention).
+# - redis/, rspamd/data/ kept world-writable (777) so the official
+#   redis/rspamd images can write as their internal uids (999 / 102).
+# - state/ stays 755 (only the filter writes, runs as 99:100).
 mkdir -p "$APP"/{redis,state,rspamd/data,rspamd/local.d}
-chown "$APP_UID:$APP_GID" "$APP/state"
-chmod 755 "$APP/state"
+chown "$APP_UID:$APP_GID" "$APP" "$APP/redis" "$APP/state" \
+                          "$APP/rspamd" "$APP/rspamd/data" "$APP/rspamd/local.d"
+chmod 755 "$APP" "$APP/state" "$APP/rspamd" "$APP/rspamd/local.d"
+chmod 777 "$APP/redis" "$APP/rspamd/data"
 
 # 3. rspamd local.d configs (download only what's missing)
 RSPAMD_FILES=(
@@ -40,6 +44,8 @@ for f in "${RSPAMD_FILES[@]}"; do
     echo "fetching rspamd/local.d/$f"
     curl -fsSL "$BASE/rspamd/local.d/$f" -o "$dst"
   fi
+  chown "$APP_UID:$APP_GID" "$dst"
+  chmod 644 "$dst"
 done
 
 # 4. accounts.yml seed (only if not present; user must edit afterwards)
