@@ -55,9 +55,46 @@ accounts:
     password: "REPLACE_ME"
     mode: shadow
 
-  # - name: family-member
+    # ----- Every key from `defaults:` above is overridable per-account.
+    # Uncomment and edit only the ones you actually want to differ.
+    # imap_port: 993
+    # ssl: true
+    # inbox: INBOX
+    # junk: Junk
+    # trash: Trash
+    # spam_train: Junk/Train-Spam
+    # trained_spam: Junk/Trained-Spam
+    # threshold: 8.0
+    # min_threshold_allowed: 5.0
+    # reject_score_above: 100.0
+    # move_grace_seconds: 60
+    # learn_grace_seconds: 300
+    # idle_timeout: 1500
+    # poll_interval: 600
+    # junk_poll_interval: 120
+    # retention_check_interval: 3600
+    # max_moves_per_hour: 30
+    # max_learns_per_hour: 50
+    # max_train_per_run: 100
+    # junk_retention_days: 10
+    # trained_retention_days: 7
+    # learn_from_moves: true
+
+  # ----- Second account on the same server, almost-default settings.
+  # - name: spouse
   #   imap_host: imap.your-netcup-server.de
-  #   user: someone@yourdomain.de
+  #   user: spouse@yourdomain.de
   #   password: "REPLACE_ME"
   #   mode: shadow
-  #   threshold: 9.0          # any default can be overridden per-account
+  #   threshold: 9.0                  # less aggressive than the default
+
+  # ----- Account on a different IMAP server entirely.
+  # - name: external
+  #   imap_host: mail.other-provider.example
+  #   imap_port: 993
+  #   ssl: true
+  #   user: someone@other-provider.example
+  #   password: "REPLACE_ME"
+  #   mode: shadow
+  #   junk_retention_days: 30
+  #   learn_from_moves: false         # scan-only, never train
