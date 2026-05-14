@@ -27,8 +27,6 @@ USER 99:100
 # Unraid templates) don't need to ship a shell-quoted `--health-cmd`
 # that gets expanded on the host instead of in the container.
 HEALTHCHECK --interval=2m --timeout=10s --start-period=60s --retries=3 \
-    CMD python -c "import sys,time,pathlib; \
-hb=pathlib.Path('/state/heartbeat'); \
-sys.exit(0 if hb.exists() and time.time()-int(hb.read_text().strip() or 0)<600 else 1)"
+    CMD ["python", "-c", "import sys,time,pathlib; hb=pathlib.Path('/state/heartbeat'); sys.exit(0 if hb.exists() and time.time()-int(hb.read_text().strip() or 0)<600 else 1)"]
 
 ENTRYPOINT ["python", "-u", "filter.py"]
