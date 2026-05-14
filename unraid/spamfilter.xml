@@ -26,7 +26,7 @@
   <WebUI/>
   <TemplateURL/>
   <Icon/>
-  <ExtraParams>--health-cmd="test $(($(date +%s) - $(cat /state/heartbeat 2>/dev/null || echo 0))) -lt 1800" --health-interval=5m --health-timeout=10s --health-retries=2</ExtraParams>
+  <ExtraParams>--health-cmd="test $(($(date +%s) - $(cat /state/heartbeat 2>/dev/null || echo 0))) -lt 1800" --health-interval=5m --health-timeout=10s --health-retries=2 --log-opt max-size=50m --log-opt max-file=5</ExtraParams>
   <PostArgs/>
   <CPUset/>
   <DateInstalled/>

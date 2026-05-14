@@ -19,7 +19,7 @@
   <WebUI/>
   <TemplateURL/>
   <Icon>https://raw.githubusercontent.com/docker-library/docs/master/redis/logo.png</Icon>
-  <ExtraParams/>
+  <ExtraParams>--log-opt max-size=50m --log-opt max-file=5</ExtraParams>
   <PostArgs>redis-server --appendonly yes --appendfsync everysec --save 300 10 --save 60 10000</PostArgs>
   <CPUset/>
   <DateInstalled/>

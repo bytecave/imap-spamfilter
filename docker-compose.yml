@@ -2,11 +2,18 @@
 # The recommended install path on Unraid is via Community Applications
 # (one template per container). See unraid/*.xml and README.md.
 
+x-logging: &log-rotate
+  driver: json-file
+  options:
+    max-size: 50m
+    max-file: "5"
+
 services:
   spamfilter-redis:
     image: redis:8-alpine
     container_name: spamfilter-redis
     restart: unless-stopped
+    logging: *log-rotate
     volumes:
       - /mnt/user/appdata/spamfilter/redis:/data
     command:
@@ -25,12 +32,14 @@ services:
     image: mvance/unbound:latest
     container_name: spamfilter-unbound
     restart: unless-stopped
+    logging: *log-rotate
     networks: [spamnet]
 
   spamfilter-rspamd:
     image: rspamd/rspamd:latest
     container_name: spamfilter-rspamd
     restart: unless-stopped
+    logging: *log-rotate
     depends_on: [spamfilter-redis, spamfilter-unbound]
     environment:
       - RSPAMD_PASSWORD=${RSPAMD_PASSWORD:-}
@@ -60,6 +69,7 @@ services:
     image: ghcr.io/marcelverdult/imap-spamfilter:latest
     container_name: spamfilter
     restart: unless-stopped
+    logging: *log-rotate
     depends_on: [spamfilter-rspamd]
     volumes:
       - /mnt/user/appdata/spamfilter/accounts.yml:/app/accounts.yml:ro

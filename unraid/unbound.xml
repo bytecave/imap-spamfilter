@@ -19,7 +19,7 @@
   <WebUI/>
   <TemplateURL/>
   <Icon/>
-  <ExtraParams/>
+  <ExtraParams>--log-opt max-size=50m --log-opt max-file=5</ExtraParams>
   <PostArgs/>
   <CPUset/>
   <DateInstalled/>
