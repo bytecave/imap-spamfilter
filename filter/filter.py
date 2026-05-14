@@ -277,10 +277,23 @@ def load_accounts(path: Path) -> list[Account]:
 def validate_account(acc: Account) -> None:
     if acc.mode not in VALID_MODES:
         raise SystemExit(f"{acc.name}: invalid mode {acc.mode!r}")
+    if not 1 <= acc.imap_port <= 65535:
+        raise SystemExit(f"{acc.name}: imap_port out of range ({acc.imap_port})")
+    if acc.min_threshold_allowed <= 0:
+        raise SystemExit(
+            f"{acc.name}: min_threshold_allowed must be positive "
+            f"({acc.min_threshold_allowed})"
+        )
     if acc.threshold < acc.min_threshold_allowed:
         raise SystemExit(
             f"{acc.name}: threshold {acc.threshold} below min_threshold_allowed "
             f"{acc.min_threshold_allowed}"
+        )
+    if acc.reject_score_above < acc.threshold:
+        raise SystemExit(
+            f"{acc.name}: reject_score_above {acc.reject_score_above} must be "
+            f">= threshold {acc.threshold} (otherwise every legit score is "
+            f"discarded as out-of-range)"
         )
     folder_set = {acc.inbox, acc.junk, acc.trash, acc.spam_train, acc.trained_spam}
     if len(folder_set) != 5:
@@ -426,9 +439,22 @@ class Db:
             (self.account, msgid, now, now, folder, sender, subject),
         )
 
+    # Whitelist of message-table columns the rest of the filter is
+    # allowed to update through update_message(). update_message builds
+    # its SET clause from kwarg names; without this guard a typo or a
+    # future caller could put an arbitrary identifier into the SQL.
+    _UPDATABLE_MESSAGE_COLUMNS = frozenset({
+        "current_folder", "moved_to_junk_at", "our_score", "our_action",
+        "learned_as", "learned_at", "pending_learn", "pending_learn_at",
+        "sender", "subject",
+    })
+
     def update_message(self, msgid: str, **fields: Any) -> None:
         if not fields:
             return
+        bad = set(fields) - self._UPDATABLE_MESSAGE_COLUMNS
+        if bad:
+            raise ValueError(f"update_message: unknown column(s) {sorted(bad)}")
         cols = ", ".join(f"{k}=?" for k in fields)
         vals = list(fields.values()) + [self.account, msgid]
         self.conn.execute(
@@ -546,9 +572,12 @@ class Db:
         now = int(time.time())
         if last and now - last < every_s:
             return
+        # Stamp the marker FIRST so an interrupted VACUUM (process kill,
+        # disk full mid-rewrite) does not cause a tight retry loop where
+        # every retention sweep tries VACUUM again and fails the same way.
+        self.conn.execute(f"PRAGMA user_version = {now}")
         self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         self.conn.execute("VACUUM")
-        self.conn.execute(f"PRAGMA user_version = {now}")
 
     # ----- safe mode --------------------------------------------------------
 
@@ -1465,6 +1494,10 @@ def main() -> int:
         t.start()
         threads[acc.name] = t
     accounts_by_name = {a.name: a for a in accounts}
+    # Per-account exponential backoff so a thread that crashes immediately
+    # after restart does not spin the main loop or fill logs at 1 Hz.
+    restart_backoff: dict[str, float] = {a.name: 0.0 for a in accounts}
+    last_restart: dict[str, float] = {a.name: 0.0 for a in accounts}
 
     # Heartbeat watchdog: keep main thread alive, update heartbeat periodically
     # so it advances even if every account thread is stuck in IDLE. Restart
@@ -1474,15 +1507,29 @@ def main() -> int:
     # 24/7 run.
     while not SHUTDOWN.is_set():
         heartbeat()
+        now = time.monotonic()
         for name, t in list(threads.items()):
-            if not t.is_alive():
-                log.error("account thread %s died; restarting", name)
-                acc = accounts_by_name[name]
-                nt = threading.Thread(
-                    target=account_loop, args=(acc,), name=name, daemon=False
-                )
-                nt.start()
-                threads[name] = nt
+            if t.is_alive():
+                continue
+            wait_for = max(0.0, last_restart[name] + restart_backoff[name] - now)
+            if wait_for > 0:
+                continue
+            log.error(
+                "account thread %s died; restarting (backoff was %.0fs)",
+                name, restart_backoff[name],
+            )
+            acc = accounts_by_name[name]
+            nt = threading.Thread(
+                target=account_loop, args=(acc,), name=name, daemon=False
+            )
+            nt.start()
+            threads[name] = nt
+            last_restart[name] = now
+            # Cap backoff at 5 minutes; reset to 0 once the thread has
+            # been up long enough to be considered healthy (handled in
+            # account_loop's own success path is not strictly needed -
+            # any thread alive past one full backoff cycle proves it).
+            restart_backoff[name] = min(max(restart_backoff[name] * 2, 5.0), 300.0)
         SHUTDOWN.wait(timeout=60)
 
     # Account threads now poll SHUTDOWN every ~60s during IDLE, so a

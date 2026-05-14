@@ -54,8 +54,9 @@ def main() -> int:
         print(f"unknown account: {args.account}", file=sys.stderr)
         return 2
 
-    client = IMAPClient(acc.imap_host, port=acc.imap_port, ssl=acc.ssl, timeout=60)
+    client: IMAPClient | None = None
     try:
+        client = IMAPClient(acc.imap_host, port=acc.imap_port, ssl=acc.ssl, timeout=60)
         client.login(acc.user, acc.password)
         delim = detect_delimiter(client)
         fmap = build_folder_map(acc, delim)
@@ -107,10 +108,11 @@ def main() -> int:
                 return 3
         return 0
     finally:
-        try:
-            client.logout()
-        except Exception:
-            pass
+        if client is not None:
+            try:
+                client.logout()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
