@@ -7,8 +7,8 @@
   <MyIP/>
   <Shell>sh</Shell>
   <Privileged>false</Privileged>
-  <Support/>
-  <Project/>
+  <Support>https://github.com/marcelverdult/imap-spamfilter/issues</Support>
+  <Project>https://github.com/marcelverdult/imap-spamfilter</Project>
   <Overview>
     Redis persistence backend for the IMAP spam filter stack. Stores rspamd
     Bayes tokens, fuzzy hashes, and neural weights. AOF + RDB enabled so
@@ -18,7 +18,7 @@
   <Category>Productivity: Network:Other</Category>
   <WebUI/>
   <TemplateURL/>
-  <Icon>https://raw.githubusercontent.com/docker-library/docs/master/redis/logo.png</Icon>
+  <Icon>https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/main/assets/icon.png</Icon>
   <ExtraParams>--log-opt max-size=50m --log-opt max-file=5</ExtraParams>
   <PostArgs>redis-server --appendonly yes --appendfsync everysec --save 300 10 --save 60 10000</PostArgs>
   <CPUset/>
