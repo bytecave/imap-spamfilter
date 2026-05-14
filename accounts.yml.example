@@ -11,6 +11,14 @@
 #   flag   - shadow + sets \Flagged on suspect mail
 #   move   - flag + MOVEs to Junk after move_grace_seconds
 # Promote shadow -> flag -> move once you trust the scores.
+#
+# Folder discovery (see README "Folder discovery and naming"):
+#   - Hierarchy delimiter is auto-detected on connect (/ vs . vs other).
+#   - Junk/Trash are auto-detected via RFC 6154 SPECIAL-USE flags when
+#     the server advertises them (Apple Mail, Thunderbird, Outlook, etc).
+#   - Junk, Trash, Junk/Train-Spam, Junk/Trained-Spam are auto-created
+#     if missing. INBOX must already exist.
+#   - Override with `auto_special_folders: false` + explicit junk/trash.
 
 accounts:
   - name: your_name

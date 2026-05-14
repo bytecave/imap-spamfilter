@@ -37,6 +37,69 @@ Hard rules:
 
 ---
 
+## Folder discovery and naming
+
+The filter cares about five folders per account: **Inbox**, **Junk**, **Trash**,
+**Junk/Train-Spam**, **Junk/Trained-Spam**. Each can be configured per account,
+but day one most users don't need to touch them.
+
+### Hierarchy delimiter (auto)
+
+On connect the filter runs `LIST "" "*"` and reads the server's hierarchy
+delimiter (typically `/` or `.`). Folder names in `accounts.yml` use `/` and
+get rewritten at runtime: `Junk/Train-Spam` becomes `Junk.Train-Spam` on a
+Dovecot server using `.`. The detected delimiter is logged once at connect:
+
+```
+connected, delimiter='/', mode=shadow
+```
+
+### Junk / Trash auto-detection (RFC 6154)
+
+If your IMAP server advertises folders with RFC 6154 **SPECIAL-USE** attribute
+flags (most modern servers do), the filter uses those names regardless of
+what your mail client decided to call them locally. So if Apple Mail picked
+`Spam` as the junk folder (and the server tagged it `\Junk`), the filter
+follows the same folder automatically. No config edit required.
+
+Logged at connect when override happens:
+```
+auto-detected junk folder via SPECIAL-USE: Spam (was Junk)
+auto-detected trash folder via SPECIAL-USE: Bin  (was Trash)
+```
+
+Controlled by `auto_special_folders` (default `true`). Set it to `false`
+in `accounts.yml` if you want the filter to use the literal `junk:` /
+`trash:` values you configured.
+
+### Auto-create
+
+`Junk`, `Trash`, `Junk/Train-Spam`, and `Junk/Trained-Spam` are created
+automatically on first connect if missing. `INBOX` is required by the IMAP
+RFC and must already exist.
+
+### Manual override
+
+To pin specific folder names (e.g. you want the filter to use a folder
+named `Spam-quarantine` rather than whatever the server thinks is `\Junk`):
+
+```yaml
+accounts:
+  - name: your_name
+    imap_host: ...
+    user: ...
+    password: "..."
+    auto_special_folders: false
+    junk: Spam-quarantine
+    trash: Bin
+```
+
+`spam_train` and `trained_spam` follow the (possibly auto-detected) `junk`
+parent automatically; you only need to override them if you want them
+somewhere outside the Junk subtree.
+
+---
+
 ## Install on Unraid (recommended path)
 
 Each container installs as a normal Unraid Docker app. No Compose Manager
