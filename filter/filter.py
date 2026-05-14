@@ -566,16 +566,20 @@ def build_folder_map(acc: Account, delim: str) -> dict[str, str]:
 
 def ensure_folders(client: IMAPClient, log: logging.Logger, fmap: dict[str, str]) -> None:
     existing = {name for _flags, _delim, name in client.list_folders()}
-    for key in ("spam_train", "trained_spam"):
+    if fmap["inbox"] not in existing:
+        # INBOX is required by IMAP RFC; bail loud if it's missing.
+        raise RuntimeError(f"required folder missing on server: {fmap['inbox']}")
+    for key in ("junk", "trash", "spam_train", "trained_spam"):
         f = fmap[key]
         if f not in existing:
             log.info("creating missing folder %s", f)
-            client.create_folder(f)
-            client.subscribe_folder(f)
-    for key in ("inbox", "junk", "trash"):
-        f = fmap[key]
-        if f not in existing:
-            raise RuntimeError(f"required folder missing on server: {f}")
+            try:
+                client.create_folder(f)
+                client.subscribe_folder(f)
+            except IMAPClientError as ex:
+                # Some servers return ALREADYEXISTS on second pass after a
+                # racy LIST; ignore and move on.
+                log.warning("create_folder(%s) failed: %s", f, ex)
 
 
 def select_with_uidvalidity_check(
