@@ -280,6 +280,17 @@ def load_accounts(path: Path) -> list[Account]:
 def validate_account(acc: Account) -> None:
     if acc.mode not in VALID_MODES:
         raise SystemExit(f"{acc.name}: invalid mode {acc.mode!r}")
+    # acc.user is the bayes_user fallback when no explicit bayes_user is
+    # configured, and the value ends up in a Delivered-To header we
+    # inject into the rspamd /learn body. Reject CR/LF here for the same
+    # reason _clean_bayes_user does, otherwise an operator who pastes a
+    # multi-line value into accounts.yml smuggles arbitrary headers.
+    for field_name in ("user", "name"):
+        val = str(getattr(acc, field_name))
+        if "\r" in val or "\n" in val:
+            raise SystemExit(
+                f"{acc.name}: account {field_name} must not contain CR or LF"
+            )
     if not 1 <= acc.imap_port <= 65535:
         raise SystemExit(f"{acc.name}: imap_port out of range ({acc.imap_port})")
     if acc.min_threshold_allowed <= 0:
