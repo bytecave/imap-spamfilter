@@ -122,6 +122,7 @@ class Account:
     trained_retention_days: int
 
     learn_from_moves: bool
+    auto_special_folders: bool
 
     # Populated at runtime once IMAP delimiter is known.
     delimiter: str = "/"
@@ -157,6 +158,11 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "junk_retention_days": 10,
     "trained_retention_days": 7,
     "learn_from_moves": True,
+    # When True, look up junk/trash folders via RFC 6154 SPECIAL-USE flags
+    # on connect and override the configured names if the server advertises
+    # them. Lets Apple Mail / Thunderbird / Outlook users keep their client-
+    # chosen folder name (e.g. "Spam") without editing accounts.yml.
+    "auto_special_folders": True,
 }
 
 REQUIRED_PER_ACCOUNT: tuple[str, ...] = ("name", "user", "password", "imap_host")
@@ -232,6 +238,7 @@ def load_accounts(path: Path) -> list[Account]:
                 junk_retention_days=int(merged["junk_retention_days"]),
                 trained_retention_days=int(merged["trained_retention_days"]),
                 learn_from_moves=bool(merged["learn_from_moves"]),
+                auto_special_folders=bool(merged["auto_special_folders"]),
             )
         except KeyError as ex:
             raise SystemExit(f"account {entry.get('name')!r}: missing config key {ex.args[0]!r}") from ex
@@ -562,6 +569,21 @@ def build_folder_map(acc: Account, delim: str) -> dict[str, str]:
         "spam_train": resolve_folder(acc.spam_train, delim),
         "trained_spam": resolve_folder(acc.trained_spam, delim),
     }
+
+
+def detect_special_folders(client: IMAPClient) -> dict[str, str]:
+    """Return {'junk': name, 'trash': name} for folders carrying RFC 6154
+    SPECIAL-USE flags. Empty dict if the server doesn't advertise them.
+    """
+    flag_map = {r"\Junk": "junk", r"\Trash": "trash"}
+    out: dict[str, str] = {}
+    for flags, _delim, name in client.list_folders():
+        for f in flags or ():
+            s = f.decode("ascii", "replace") if isinstance(f, bytes) else str(f)
+            key = flag_map.get(s)
+            if key and key not in out:
+                out[key] = name if isinstance(name, str) else name.decode("utf-8", "replace")
+    return out
 
 
 def ensure_folders(client: IMAPClient, log: logging.Logger, fmap: dict[str, str]) -> None:
@@ -1085,6 +1107,25 @@ def account_loop(acc: Account) -> None:
             client.login(acc.user, acc.password)
             delim = detect_delimiter(client)
             acc.delimiter = delim
+            if acc.auto_special_folders:
+                detected = detect_special_folders(client)
+                for key in ("junk", "trash"):
+                    name = detected.get(key)
+                    if not name:
+                        continue
+                    current = getattr(acc, key)
+                    if name != current:
+                        log.info("auto-detected %s folder via SPECIAL-USE: %s (was %s)",
+                                 key, name, current)
+                        setattr(acc, key, name)
+                # Keep spam_train/trained_spam under whatever the new junk is,
+                # if the configured names referenced "Junk/..." literally.
+                if "junk" in detected:
+                    new_junk = detected["junk"]
+                    for key in ("spam_train", "trained_spam"):
+                        cur = getattr(acc, key)
+                        if cur.startswith("Junk/"):
+                            setattr(acc, key, new_junk + cur[len("Junk"):])
             acc.folder_map = build_folder_map(acc, delim)
             ensure_folders(client, log, acc.folder_map)
             log.info("connected, delimiter=%r, mode=%s", delim, acc.mode)

@@ -59,6 +59,8 @@ accounts:
     # junk_retention_days: 10       # Junk -> Trash after N days (0 = disabled)
     # trained_retention_days: 7     # Trained-Spam -> Trash after N days
     # learn_from_moves: true        # false = scan-only, never train
+    # auto_special_folders: true    # honor RFC 6154 \Junk/\Trash flags
+                                    # set to false to use literal junk/trash names
 
   # ----- Second account on the same server, almost-default settings.
   # - name: spouse
