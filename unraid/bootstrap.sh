@@ -58,5 +58,4 @@ fi
 echo "spamfilter bootstrap complete."
 echo "Next:"
 echo "  1. Edit $APP/accounts.yml (IMAP host, credentials)."
-echo "  2. Edit $APP/rspamd/local.d/fuzzy_check.conf (replace the encryption-key placeholder)."
-echo "  3. Install the four Docker templates from $BASE/unraid/."
+echo "  2. Install the four Docker templates from $BASE/unraid/."
