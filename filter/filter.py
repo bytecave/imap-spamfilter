@@ -565,26 +565,27 @@ def build_folder_map(acc: Account, delim: str) -> dict[str, str]:
 
 
 def ensure_folders(client: IMAPClient, log: logging.Logger, fmap: dict[str, str]) -> None:
-    # \NonExistent (RFC 6154) marks placeholder parents created when a child
-    # like "Junk/Train-Spam" exists but "Junk" itself doesn't. Treat those
-    # as missing so we (re)create them.
-    existing: set[str] = set()
-    for flags, _delim, name in client.list_folders():
-        flag_set = {f.decode("ascii", "replace") if isinstance(f, bytes) else str(f) for f in flags or ()}
-        if r"\NonExistent" in flag_set or "\\NonExistent" in flag_set:
-            continue
-        existing.add(name)
-    if fmap["inbox"] not in existing:
-        raise RuntimeError(f"required folder missing on server: {fmap['inbox']}")
+    # Don't trust LIST alone: some servers return placeholders (\Noselect /
+    # \NonExistent) for parents whose children we created earlier, which
+    # confuses a name-only existence check. Probe with SELECT instead.
+    try:
+        client.select_folder(fmap["inbox"], readonly=True)
+    except IMAPClientError as ex:
+        raise RuntimeError(f"required folder missing on server: {fmap['inbox']} ({ex})") from ex
+
     for key in ("junk", "trash", "spam_train", "trained_spam"):
         f = fmap[key]
-        if f not in existing:
-            log.info("creating missing folder %s", f)
-            try:
-                client.create_folder(f)
-                client.subscribe_folder(f)
-            except IMAPClientError as ex:
-                log.warning("create_folder(%s) failed: %s", f, ex)
+        try:
+            client.select_folder(f, readonly=True)
+            continue  # exists
+        except IMAPClientError:
+            pass
+        log.info("creating missing folder %s", f)
+        try:
+            client.create_folder(f)
+            client.subscribe_folder(f)
+        except IMAPClientError as ex:
+            log.warning("create_folder(%s) failed: %s", f, ex)
 
 
 def select_with_uidvalidity_check(
