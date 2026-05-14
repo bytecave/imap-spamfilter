@@ -685,18 +685,24 @@ def heartbeat() -> None:
         pass
 
 
-def check_rate_or_safe_mode(db: Db, log: logging.Logger, action: str, limit: int) -> bool:
-    """True if allowed, False if rate-limit hit. Safe-mode entered on breach."""
+def check_rate(db: Db, log: logging.Logger, action: str, limit: int) -> bool:
+    """True if allowed, False if rate-limit hit. Soft refusal only -
+    the rate window rolls off naturally, no sticky safe-mode entry.
+    The sliding rate_limit table is already self-bounded to 1 hour."""
     count = db.rate_count(action, 3600)
     if count >= limit:
-        scope = "all" if action == "move" else "learning"
-        reason = f"{action} rate limit hit ({count}/{limit} per hour)"
-        log.error("entering safe mode (%s): %s", scope, reason)
-        with db.tx():
-            db.enter_safe_mode(scope, reason)
-            db.log_event("safe_mode", detail=reason)
+        # Log once per minute at most to avoid log spam during a burst.
+        if not getattr(check_rate, "_last_log", {}).get((db.account, action), 0) \
+                or time.time() - check_rate._last_log[(db.account, action)] > 60:
+            log.warning("%s rate limit hit (%d/%d per hour), refusing for now",
+                        action, count, limit)
+            check_rate._last_log[(db.account, action)] = time.time()  # type: ignore[attr-defined]
+            db.log_event("rate_limited", detail=f"{action} {count}/{limit}")
         return False
     return True
+
+
+check_rate._last_log = {}  # type: ignore[attr-defined]
 
 
 def try_learn(
@@ -718,7 +724,7 @@ def try_learn(
             log.warning("skip learn (%s) for %s: flip-flop cooldown active", kind, msgid)
             db.log_event("learn_flipflop_block", msgid, detail=f"{row['learned_as']}->{kind}")
             return False
-    if not check_rate_or_safe_mode(db, log, "learn", acc.max_learns_per_hour):
+    if not check_rate(db, log,"learn", acc.max_learns_per_hour):
         return False
     if not rspamd_learn(raw, kind):
         log.warning("rspamd learn(%s) failed for %s", kind, msgid)
@@ -835,7 +841,7 @@ def execute_due_moves(client: IMAPClient, db: Db, log: logging.Logger, acc: Acco
     rows = db.due_pending_moves(uv, acc.move_grace_seconds)
     if not rows:
         return
-    if not check_rate_or_safe_mode(db, log, "move", acc.max_moves_per_hour):
+    if not check_rate(db, log,"move", acc.max_moves_per_hour):
         return
 
     uids = [r["uid"] for r in rows]
