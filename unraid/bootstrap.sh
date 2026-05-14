@@ -55,6 +55,19 @@ if [ ! -f "$PW_FILE" ]; then
   chmod 600 "$PW_FILE"
 fi
 
+# 6. Render worker-controller.inc from the .template now (host side),
+#    so the rspamd container can mount local.d/ as read-only and start
+#    with the official entrypoint - no cp/envsubst gymnastics.
+TEMPLATE="$APP/rspamd/local.d/worker-controller.inc.template"
+TARGET="$APP/rspamd/local.d/worker-controller.inc"
+if [ -f "$TEMPLATE" ]; then
+  PW="$(cat "$PW_FILE")"
+  # sed-based substitution avoids depending on gettext/envsubst being on the host.
+  sed "s|\${RSPAMD_PASSWORD}|${PW}|g" "$TEMPLATE" > "$TARGET"
+  chmod 600 "$TARGET"
+  echo "rendered worker-controller.inc"
+fi
+
 echo "spamfilter bootstrap complete."
 echo "Next:"
 echo "  1. Edit $APP/accounts.yml (IMAP host, credentials)."

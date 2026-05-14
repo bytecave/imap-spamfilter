@@ -40,27 +40,12 @@ services:
     container_name: spamfilter-rspamd
     restart: unless-stopped
     logging: *log-rotate
-    user: "0:0"   # entrypoint shim needs root to cp configs; docker-entrypoint.sh drops to _rspamd
     depends_on: [spamfilter-redis, spamfilter-unbound]
-    environment:
-      - RSPAMD_PASSWORD=${RSPAMD_PASSWORD:-}
+    # worker-controller.inc is rendered on the host by bootstrap.sh
+    # before this container starts, so no entrypoint override is needed.
     volumes:
-      - /mnt/user/appdata/spamfilter/rspamd/local.d:/etc/rspamd/local.d.src:ro
+      - /mnt/user/appdata/spamfilter/rspamd/local.d:/etc/rspamd/local.d:ro
       - /mnt/user/appdata/spamfilter/rspamd/data:/var/lib/rspamd
-      - /mnt/user/appdata/spamfilter/state:/state:ro
-    entrypoint: ["/bin/sh", "-c"]
-    command: >
-      "set -e;
-       mkdir -p /etc/rspamd/local.d;
-       cp -a /etc/rspamd/local.d.src/. /etc/rspamd/local.d/;
-       if [ -z \"$$RSPAMD_PASSWORD\" ] && [ -f /state/controller.password ]; then
-         export RSPAMD_PASSWORD=$$(cat /state/controller.password);
-       fi;
-       if [ -z \"$$RSPAMD_PASSWORD\" ]; then echo 'no RSPAMD_PASSWORD (set env or run bootstrap.sh)'; exit 1; fi;
-       envsubst < /etc/rspamd/local.d/worker-controller.inc.template \
-                > /etc/rspamd/local.d/worker-controller.inc;
-       rm -f /etc/rspamd/local.d/worker-controller.inc.template;
-       exec /docker-entrypoint.sh rspamd"
     networks: [spamnet]
     ports:
       - "127.0.0.1:11334:11334"
