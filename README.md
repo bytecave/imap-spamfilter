@@ -84,11 +84,11 @@ edit by hand.
 In the Unraid web UI (Docker tab -> Add Container -> Template -> "Add" a
 local template), import each XML from this repo's `unraid/` directory:
 
-1. `unraid/redis.xml`    -> install (no prompts beyond the data path)
-2. `unraid/unbound.xml`  -> install
-3. `unraid/rspamd.xml`   -> install (controller password is read from
+1. `unraid/spamfilter-redis.xml`   -> install (no prompts beyond the data path)
+2. `unraid/spamfilter-unbound.xml` -> install
+3. `unraid/spamfilter-rspamd.xml`  -> install (controller password is read from
    the bootstrap-generated `state/controller.password` file)
-4. `unraid/spamfilter.xml` -> set `DEFAULT_JUNK_RETENTION_DAYS` and
+4. `unraid/spamfilter.xml`         -> set `DEFAULT_JUNK_RETENTION_DAYS` and
    `DEFAULT_TRAINED_RETENTION_DAYS` if you want non-defaults (defaults
    10 / 7), install
 
