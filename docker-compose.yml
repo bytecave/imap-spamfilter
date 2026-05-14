@@ -40,6 +40,7 @@ services:
     container_name: spamfilter-rspamd
     restart: unless-stopped
     logging: *log-rotate
+    user: "0:0"   # entrypoint shim needs root to cp configs; docker-entrypoint.sh drops to _rspamd
     depends_on: [spamfilter-redis, spamfilter-unbound]
     environment:
       - RSPAMD_PASSWORD=${RSPAMD_PASSWORD:-}

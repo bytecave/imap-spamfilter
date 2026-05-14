@@ -21,7 +21,7 @@
   <WebUI>http://[IP]:[PORT:11334]/</WebUI>
   <TemplateURL/>
   <Icon>https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/main/assets/icon.png</Icon>
-  <ExtraParams>--entrypoint /bin/sh --log-opt max-size=50m --log-opt max-file=5</ExtraParams>
+  <ExtraParams>--entrypoint /bin/sh --user 0 --log-opt max-size=50m --log-opt max-file=5</ExtraParams>
   <PostArgs>-c "set -e; mkdir -p /etc/rspamd/local.d; cp -a /etc/rspamd/local.d.src/. /etc/rspamd/local.d/; [ -n \"$RSPAMD_PASSWORD\" ] || { [ -f /state/controller.password ] &amp;&amp; export RSPAMD_PASSWORD=$(cat /state/controller.password); }; [ -n \"$RSPAMD_PASSWORD\" ] || { echo 'no RSPAMD_PASSWORD - run bootstrap.sh first'; exit 1; }; envsubst &lt; /etc/rspamd/local.d/worker-controller.inc.template &gt; /etc/rspamd/local.d/worker-controller.inc; rm -f /etc/rspamd/local.d/worker-controller.inc.template; exec /docker-entrypoint.sh rspamd"</PostArgs>
   <CPUset/>
   <DateInstalled/>
