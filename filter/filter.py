@@ -715,9 +715,10 @@ def try_learn(
         return False
     row = db.get_message(msgid)
     if row is not None and row["learned_as"] == kind:
-        # Already learned this message as this kind. rspamd would return 208
-        # but we'd burn a rate slot and never converge. Silently skip.
-        return False
+        # Already learned as same kind. Skip rspamd POST (would return 208
+        # and burn a rate slot) but report success so the caller (e.g.
+        # drain_train_spam) still moves the message out of the train folder.
+        return True
     if row is not None and row["learned_as"] and row["learned_as"] != kind:
         last = row["learned_at"] or 0
         if int(time.time()) - last < FLIP_FLOP_COOLDOWN_S:
@@ -1001,6 +1002,7 @@ def drain_train_spam(client: IMAPClient, db: Db, log: logging.Logger, acc: Accou
     uids = uids[: acc.max_train_per_run]
     fetched = client.fetch(uids, [b"BODY.PEEK[]"])
     learned_uids: list[int] = []
+    moved_msgids: list[str] = []
     for uid, data in fetched.items():
         if SHUTDOWN.is_set():
             return
@@ -1014,6 +1016,7 @@ def drain_train_spam(client: IMAPClient, db: Db, log: logging.Logger, acc: Accou
         ok = try_learn(db, log, acc, raw, msgid, "spam", reason="train_spam_folder")
         if ok:
             learned_uids.append(uid)
+            moved_msgids.append(msgid)
     if not learned_uids:
         return
     try:
@@ -1021,13 +1024,13 @@ def drain_train_spam(client: IMAPClient, db: Db, log: logging.Logger, acc: Accou
     except IMAPClientError as ex:
         log.warning("move %s -> %s failed: %s", folder, fmap["trained_spam"], ex)
         return
-    now = int(time.time())
     with db.tx():
         for uid in learned_uids:
             db.log_event("trained_moved", detail=f"uid={uid} -> {fmap['trained_spam']}")
+        placeholders = ",".join("?" * len(moved_msgids))
         db.conn.execute(
-            "UPDATE messages SET current_folder=? WHERE account=? AND current_folder=? AND learned_as='spam' AND learned_at>=?",
-            (fmap["trained_spam"], db.account, folder, now - 60),
+            f"UPDATE messages SET current_folder=? WHERE account=? AND message_id IN ({placeholders})",
+            (fmap["trained_spam"], db.account, *moved_msgids),
         )
     log.info("drain_train_spam: learned+moved %d", len(learned_uids))
 
