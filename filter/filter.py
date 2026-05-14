@@ -128,6 +128,40 @@ class Account:
     folder_map: dict[str, str] = field(default_factory=dict)
 
 
+# Built-in defaults applied unless overridden in accounts.yml `defaults:` or in
+# a per-account block. Users can leave `defaults:` empty (or omit it entirely)
+# and only specify per-account credentials. Required-from-the-user keys (name,
+# user, password, imap_host) are NOT here on purpose - they have no sensible
+# default and the loader raises if missing.
+BUILTIN_DEFAULTS: dict[str, Any] = {
+    "imap_port": 993,
+    "ssl": True,
+    "inbox": "INBOX",
+    "junk": "Junk",
+    "trash": "Trash",
+    "spam_train": "Junk/Train-Spam",
+    "trained_spam": "Junk/Trained-Spam",
+    "mode": "shadow",
+    "threshold": 8.0,
+    "min_threshold_allowed": 5.0,
+    "reject_score_above": 100.0,
+    "move_grace_seconds": 60,
+    "learn_grace_seconds": 300,
+    "idle_timeout": 1500,
+    "poll_interval": 600,
+    "junk_poll_interval": 120,
+    "retention_check_interval": 3600,
+    "max_moves_per_hour": 30,
+    "max_learns_per_hour": 50,
+    "max_train_per_run": 100,
+    "junk_retention_days": 10,
+    "trained_retention_days": 7,
+    "learn_from_moves": True,
+}
+
+REQUIRED_PER_ACCOUNT: tuple[str, ...] = ("name", "user", "password", "imap_host")
+
+
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
     out = dict(base)
     for k, v in overlay.items():
@@ -155,13 +189,20 @@ def load_accounts(path: Path) -> list[Account]:
     raw = yaml.safe_load(path.read_text())
     if not isinstance(raw, dict) or "accounts" not in raw:
         raise SystemExit(f"{path}: missing 'accounts' key")
-    defaults = _apply_env_overrides(raw.get("defaults") or {})
+    # Built-ins, then user defaults, then env overrides.
+    defaults = _apply_env_overrides(_deep_merge(BUILTIN_DEFAULTS, raw.get("defaults") or {}))
     out: list[Account] = []
     seen: set[str] = set()
     for entry in raw["accounts"]:
         if not isinstance(entry, dict):
             raise SystemExit(f"{path}: each account must be a mapping")
         merged = _deep_merge(defaults, entry)
+        missing = [k for k in REQUIRED_PER_ACCOUNT if not merged.get(k)]
+        if missing:
+            raise SystemExit(
+                f"{path}: account {entry.get('name', '?')!r} missing required key(s): "
+                f"{', '.join(missing)}"
+            )
         try:
             acc = Account(
                 name=merged["name"],
