@@ -86,7 +86,7 @@ def main() -> int:
                 print(f"[dry-run] would learn-{args.kind}: uid={uid} subj={short!r}")
                 ok_count += 1
                 continue
-            if rspamd_learn(raw, args.kind):
+            if rspamd_learn(raw, args.kind, user=acc.bayes_user or acc.user):
                 ok_count += 1
                 learned_uids.append(uid)
                 if ok_count % 25 == 0:
