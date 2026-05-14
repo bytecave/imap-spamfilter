@@ -708,6 +708,10 @@ def try_learn(
         log.warning("skip learn (%s) for %s: in safe mode", kind, msgid)
         return False
     row = db.get_message(msgid)
+    if row is not None and row["learned_as"] == kind:
+        # Already learned this message as this kind. rspamd would return 208
+        # but we'd burn a rate slot and never converge. Silently skip.
+        return False
     if row is not None and row["learned_as"] and row["learned_as"] != kind:
         last = row["learned_at"] or 0
         if int(time.time()) - last < FLIP_FLOP_COOLDOWN_S:
