@@ -822,17 +822,24 @@ def try_learn(
         log.warning("skip learn (%s) for %s: in safe mode", kind, msgid)
         return False
     row = db.get_message(msgid)
-    if row is not None and row["learned_as"] == kind:
-        # Already learned as same kind. Skip rspamd POST (would return 208
-        # and burn a rate slot) but report success so the caller (e.g.
-        # drain_train_spam) still moves the message out of the train folder.
-        return True
-    if row is not None and row["learned_as"] and row["learned_as"] != kind:
-        last = row["learned_at"] or 0
-        if int(time.time()) - last < FLIP_FLOP_COOLDOWN_S:
-            log.warning("skip learn (%s) for %s: flip-flop cooldown active", kind, msgid)
-            db.log_event("learn_flipflop_block", msgid, detail=f"{row['learned_as']}->{kind}")
-            return False
+    if row is not None:
+        learned = row["learned_as"]
+        if learned == kind:
+            # Already learned as same kind. Skip rspamd POST (would return
+            # 208 and burn a rate slot) but report success so the caller
+            # (e.g. drain_train_spam) still moves the message out.
+            return True
+        if learned == "unlearnable":
+            # rspamd has already refused this content's tokens (typically
+            # min_tokens not met or HTML-only body). Report success so the
+            # message is moved out without endlessly re-asking rspamd.
+            return True
+        if learned and learned != kind:
+            last = row["learned_at"] or 0
+            if int(time.time()) - last < FLIP_FLOP_COOLDOWN_S:
+                log.warning("skip learn (%s) for %s: flip-flop cooldown active", kind, msgid)
+                db.log_event("learn_flipflop_block", msgid, detail=f"{learned}->{kind}")
+                return False
     if not check_rate(db, log, "learn", acc.max_learns_per_hour):
         return False
     if not rspamd_learn(raw, kind, user=acc.bayes_user or acc.user):
@@ -1156,6 +1163,28 @@ def drain_train_spam(client: IMAPClient, db: Db, log: logging.Logger, acc: Accou
             db.upsert_message(msgid, folder, sender, subject)
         ok = try_learn(db, log, acc, raw, msgid, "spam", reason="train_spam_folder")
         if ok:
+            learned_uids.append(uid)
+            moved_msgids.append(msgid)
+            continue
+        # try_learn returned False: either rspamd refused this content
+        # (e.g. min_tokens not met) or the call hit a transient issue.
+        # Count prior learn_failed events for the same msgid; after a few
+        # failures, give up so the train folder cannot loop forever on
+        # the same UID. The row is marked 'unlearnable' so try_learn's
+        # silent-skip path takes over if the message ever reappears.
+        fails = db.conn.execute(
+            "SELECT COUNT(*) FROM events "
+            "WHERE account=? AND message_id=? AND event='learn_failed'",
+            (db.account, msgid),
+        ).fetchone()[0]
+        if fails >= 3:
+            log.warning(
+                "drain_train_spam: giving up on %s after %d learn failures, moving out unlearned",
+                msgid, fails,
+            )
+            with db.tx():
+                db.update_message(msgid, learned_as="unlearnable", learned_at=int(time.time()))
+                db.log_event("learn_giveup", msgid, detail=f"after {fails} failures")
             learned_uids.append(uid)
             moved_msgids.append(msgid)
     if not learned_uids:
