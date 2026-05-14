@@ -44,37 +44,28 @@ Each container installs as a normal Unraid Docker app. No Compose Manager
 required. All four containers run on a shared user-defined Docker network
 called `spamnet` so they can resolve each other by name.
 
-### 0. Prerequisites
+### 0. Bootstrap (one shot)
 
-#### Create the `spamnet` Docker network
+Install **User Scripts** from Community Apps if you don't already have it.
+Settings -> User Scripts -> Add New Script, name it `spamfilter-bootstrap`,
+paste in the contents of
+[`unraid/bootstrap.sh`](unraid/bootstrap.sh):
 
-Unraid does not auto-create Docker networks from templates. You have to make
-the user-defined bridge once. Pick one method:
+The script is idempotent and does all of the following:
 
-**Recommended - User Scripts plugin (no SSH needed afterwards):**
+- Creates the user-defined `spamnet` Docker network
+- Creates the `/mnt/user/appdata/spamfilter/{redis,state,rspamd/data,rspamd/local.d}` layout
+- Downloads the rspamd `local.d/*` configs from this repo (only if missing)
+- Seeds `accounts.yml` from `accounts.yml.example` (only if missing)
 
-Install **User Scripts** from Community Apps if not already. Settings ->
-User Scripts -> Add New Script, name it `create-spamnet`, paste:
+Set the schedule to **"At First Array Start Only"** and click **Run Script**
+once to bootstrap immediately. It'll re-run on every array start, so the
+network/layout are recreated automatically after a USB reformat or migration.
 
-```bash
-#!/bin/bash
-docker network create spamnet 2>/dev/null || true
-```
-
-Set the schedule to **"At First Array Start Only"**. Click Run Script
-once to create it now; from then on Unraid recreates it automatically
-if it disappears (rare).
-
-**Alternative - one-line SSH:**
+If you'd rather not use User Scripts, run the same script over SSH:
 
 ```bash
-docker network create spamnet
-```
-
-#### Lay out appdata
-
-```bash
-mkdir -p /mnt/user/appdata/spamfilter/{redis,state,rspamd/data,rspamd/local.d}
+curl -fsSL https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/main/unraid/bootstrap.sh | bash
 ```
 
 Drop the rspamd config files into appdata. From a clone/download of this
