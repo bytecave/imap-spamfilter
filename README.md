@@ -214,6 +214,80 @@ Items the spec did not pin. Confirm before trusting the filter in `move` mode.
 
 ---
 
+## Configuration reference
+
+Every field below is optional unless marked **required**. Per-account values
+override `defaults:` values; both override built-in defaults from `filter.py`.
+
+### Required per account
+
+| Key | Example | Notes |
+| --- | --- | --- |
+| `name` | `marcel` | label used in logs and SQLite, must be unique |
+| `imap_host` | `imap.example.de` | hostname only, no scheme |
+| `user` | `you@example.de` | login username (usually the full address) |
+| `password` | `"..."` | quote to keep YAML happy with special chars |
+
+### Connection
+
+| Key | Default | Notes |
+| --- | --- | --- |
+| `imap_port` | `993` | port |
+| `ssl` | `true` | `false` = use port 143 with STARTTLS instead |
+
+### Folder names
+
+| Key | Default | Notes |
+| --- | --- | --- |
+| `inbox` | `INBOX` | RFC-mandated; do not change |
+| `junk` | `Junk` | auto-detected via RFC 6154 if server advertises `\Junk` |
+| `trash` | `Trash` | auto-detected via `\Trash` |
+| `spam_train` | `Junk/Train-Spam` | drag-to-train inbox |
+| `trained_spam` | `Junk/Trained-Spam` | post-learn archive |
+| `auto_special_folders` | `true` | set `false` to use literal `junk`/`trash` names |
+
+### Mode and scoring
+
+| Key | Default | Notes |
+| --- | --- | --- |
+| `mode` | `shadow` | `shadow` \| `flag` \| `move` |
+| `threshold` | `8.0` | rspamd score >= this counts as spam |
+| `min_threshold_allowed` | `5.0` | startup refuses to run if `threshold` is below this |
+| `reject_score_above` | `100.0` | scores outside `±this` are treated as failed scan |
+
+### Timing (all seconds)
+
+| Key | Default | Notes |
+| --- | --- | --- |
+| `move_grace_seconds` | `60` | delay between flag and move (mode=move) |
+| `learn_grace_seconds` | `300` | undo window before any Bayes update |
+| `idle_timeout` | `1500` | IMAP IDLE re-issue interval (must be < 30 min) |
+| `poll_interval` | `600` | fallback poll when IDLE not supported |
+| `junk_poll_interval` | `120` | how often to scan Junk for user moves |
+| `retention_check_interval` | `3600` | how often retention sweeps run |
+
+### Rate limits
+
+| Key | Default | Notes |
+| --- | --- | --- |
+| `max_moves_per_hour` | `30` | breach triggers safe-mode for the account |
+| `max_learns_per_hour` | `50` | breach triggers learning-only safe-mode |
+| `max_train_per_run` | `100` | cap per `drain_train_spam` batch |
+
+### Retention
+
+| Key | Default | Notes |
+| --- | --- | --- |
+| `junk_retention_days` | `10` | Junk -> Trash after N days, `0` disables |
+| `trained_retention_days` | `7` | Trained-Spam -> Trash after N days |
+| `learn_from_moves` | `true` | set `false` to disable all learning (scan-only) |
+
+The `DEFAULT_JUNK_RETENTION_DAYS` and `DEFAULT_TRAINED_RETENTION_DAYS`
+environment variables on the filter container override `defaults:` for
+those two keys (useful for the Unraid template form).
+
+---
+
 ## Persistent data
 
 Everything stateful lives under `/mnt/user/appdata/spamfilter/`:

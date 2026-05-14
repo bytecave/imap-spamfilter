@@ -1,32 +1,10 @@
 # Copy to accounts.yml and fill in real credentials.
 # accounts.yml is gitignored. Keep it out of version control.
 #
-# Minimum viable file - the built-in defaults in filter.py cover everything
-# else. You can omit the `defaults:` block entirely if you want to.
-#
-# accounts:
-#   - name: your_name
-#     imap_host: imap.your-mail-provider.example
-#     user: you@your-domain.example
-#     password: "REPLACE_ME"
-#
-# Required per account: name, imap_host, user, password.
-# Everything else falls back to the built-in defaults (mode=shadow,
-# threshold=8.0, junk_retention_days=10, ...).
-
-# Optional `defaults:` block. Anything you put here overrides the built-in
-# defaults from filter.py and applies to every account unless an account
-# block sets the same key.
-defaults:
-  # Common overrides (uncomment and edit if you want to change them):
-  # imap_port: 993
-  # ssl: true
-  # mode: shadow
-  # threshold: 8.0
-  # junk_retention_days: 10
-  # trained_retention_days: 7
-  # learn_grace_seconds: 300
-  # move_grace_seconds: 60
+# Minimum required per account: name, imap_host, user, password.
+# Every other field falls back to a built-in default
+# (mode=shadow, threshold=8.0, junk_retention_days=10, ...).
+# Full list of overridable keys: see "Configuration reference" in README.md.
 
 accounts:
   - name: your_name
@@ -34,47 +12,8 @@ accounts:
     user: you@your-domain.example
     password: "REPLACE_ME"
 
-    # ----- Every built-in default is overridable per-account.
-    # Uncomment any line you want to differ from the defaults block.
-    # imap_port: 993
-    # ssl: true
-    # mode: shadow                  # shadow | flag | move
-    # threshold: 8.0                # rspamd score >= this counts as spam
-    # min_threshold_allowed: 5.0    # startup refuses to run below this
-    # reject_score_above: 100.0     # score outside +/- this is treated as None
-    # inbox: INBOX
-    # junk: Junk
-    # trash: Trash
-    # spam_train: Junk/Train-Spam
-    # trained_spam: Junk/Trained-Spam
-    # move_grace_seconds: 60        # delay between flag and move (mode=move)
-    # learn_grace_seconds: 300      # undo window before any learning
-    # idle_timeout: 1500            # IMAP IDLE re-issue interval (<30 min)
-    # poll_interval: 600            # fallback poll when IDLE not supported
-    # junk_poll_interval: 120       # how often to scan Junk for user moves
-    # retention_check_interval: 3600
-    # max_moves_per_hour: 30
-    # max_learns_per_hour: 50
-    # max_train_per_run: 100        # cap per drain_train_spam batch
-    # junk_retention_days: 10       # Junk -> Trash after N days (0 = disabled)
-    # trained_retention_days: 7     # Trained-Spam -> Trash after N days
-    # learn_from_moves: true        # false = scan-only, never train
-    # auto_special_folders: true    # honor RFC 6154 \Junk/\Trash flags
-                                    # set to false to use literal junk/trash names
-
-  # ----- Second account on the same server, almost-default settings.
-  # - name: another_user
-  #   imap_host: imap.your-mail-provider.example
-  #   user: another@your-domain.example
-  #   password: "REPLACE_ME"
-  #   threshold: 9.0                # less aggressive than default
-
-  # ----- Account on a different IMAP server entirely.
-  # - name: external
-  #   imap_host: mail.other-provider.example
-  #   imap_port: 993
-  #   ssl: true
-  #   user: someone@other-provider.example
-  #   password: "REPLACE_ME"
-  #   junk_retention_days: 30
-  #   learn_from_moves: false       # scan-only, never train
+# Optional: shared overrides for all accounts above. Most users don't need this.
+# Per-account values still take precedence.
+# defaults:
+#   threshold: 9.0
+#   junk_retention_days: 30
