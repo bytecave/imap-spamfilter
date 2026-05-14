@@ -6,11 +6,18 @@
 # (mode=shadow, threshold=8.0, junk_retention_days=10, ...).
 # Full list of overridable keys: see "Configuration reference" in README.md.
 
+# Operating modes (set per-account or in `defaults:`):
+#   shadow - scan + log only, no mailbox writes      <- start here
+#   flag   - shadow + sets \Flagged on suspect mail
+#   move   - flag + MOVEs to Junk after move_grace_seconds
+# Promote shadow -> flag -> move once you trust the scores.
+
 accounts:
   - name: your_name
     imap_host: imap.your-mail-provider.example
     user: you@your-domain.example
     password: "REPLACE_ME"
+    # mode: shadow     # default; uncomment to set or change
 
 # Optional: shared overrides for all accounts above. Most users don't need this.
 # Per-account values still take precedence.
