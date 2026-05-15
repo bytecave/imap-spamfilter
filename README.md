@@ -39,9 +39,9 @@ Hard rules:
 
 ## Folder discovery and naming
 
-The filter cares about five folders per account: **Inbox**, **Junk**, **Trash**,
-**Junk/Train-Spam**, **Junk/Trained-Spam**. Each can be configured per account,
-but day one most users don't need to touch them.
+The filter cares about seven folders per account: **Inbox**, **Junk**,
+**Trash**, **Junk/Train-Spam**, **Junk/Trained-Spam**, **Junk/Train-Ham**,
+**Junk/Trained-Ham**. Day one most users don't need to touch any of them.
 
 ### Hierarchy delimiter (auto)
 
@@ -66,17 +66,35 @@ Logged at connect when override happens:
 ```
 auto-detected junk folder via SPECIAL-USE: Spam (was Junk)
 auto-detected trash folder via SPECIAL-USE: Bin  (was Trash)
+remapped spam_train:   Junk/Train-Spam   -> Spam/Train-Spam
+remapped trained_spam: Junk/Trained-Spam -> Spam/Trained-Spam
+remapped ham_train:    Junk/Train-Ham    -> Spam/Train-Ham
+remapped trained_ham:  Junk/Trained-Ham  -> Spam/Trained-Ham
 ```
 
 Controlled by `auto_special_folders` (default `true`). Set it to `false`
 in `accounts.yml` if you want the filter to use the literal `junk:` /
 `trash:` values you configured.
 
-### Auto-create
+### Auto-create policy
 
-`Junk`, `Trash`, `Junk/Train-Spam`, and `Junk/Trained-Spam` are created
-automatically on first connect if missing. `INBOX` is required by the IMAP
-RFC and must already exist.
+The filter only auto-creates folders it **owns**:
+
+- `Junk/Train-Spam`, `Junk/Trained-Spam`, `Junk/Train-Ham`,
+  `Junk/Trained-Ham` (under the server-detected junk parent)
+
+It **refuses** to create the core user folders:
+
+- `INBOX` (required by the IMAP RFC, must already exist)
+- `Junk` and `Trash`
+
+If `Junk` or `Trash` are missing after SPECIAL-USE detection, the filter
+aborts with a clear error rather than silently creating duplicate
+hierarchies in your mailbox (this is how an account ends up with two
+parallel `Junk/` and `Spam/` trees and the filter trains under the wrong
+one). Either enable SPECIAL-USE on your IMAP server, or set explicit
+`junk:` / `trash:` names in `accounts.yml` that match folders that
+already exist.
 
 ### Manual override
 
@@ -94,9 +112,9 @@ accounts:
     trash: Bin
 ```
 
-`spam_train` and `trained_spam` follow the (possibly auto-detected) `junk`
-parent automatically; you only need to override them if you want them
-somewhere outside the Junk subtree.
+`spam_train`, `trained_spam`, `ham_train`, and `trained_ham` follow the
+(possibly auto-detected) `junk` parent automatically; you only need to
+override them if you want them somewhere outside the Junk subtree.
 
 ---
 
