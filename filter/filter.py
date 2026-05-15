@@ -1250,18 +1250,25 @@ def drain_train_spam(client: IMAPClient, db: Db, log: logging.Logger, acc: Accou
         if not raw:
             continue
         msgid, subject, sender = parse_envelope(raw)
-        # Synthesise a per-(uidvalidity,uid) id when the message has no
-        # Message-ID header. Including the UIDVALIDITY prevents a UID
-        # collision after a folder resync from looking up the OLD msg's
-        # row (which is marked learned) and silent-skipping a brand-new
-        # unrelated message - that bug would silently drop training data.
-        msgid = msgid or f"<no-msgid-uv-{uv}-uid-{uid}>"
-        with db.tx():
-            db.upsert_message(msgid, folder, sender, subject)
+        if not msgid:
+            # No Message-ID header. Skip DB tracking entirely - we cannot
+            # safely identify the row across folder moves later (the
+            # synthetic uv+uid id we used to mint is no longer addressable
+            # once the message is moved to Trained-Spam under a different
+            # uidvalidity), so storing it would just leak stale rows that
+            # retention can never update. Use a synthetic per-pass id for
+            # event logging only, and let rspamd dedup by content hash.
+            msgid = f"<no-msgid-uv-{uv}-uid-{uid}>"
+            synthetic = True
+        else:
+            synthetic = False
+            with db.tx():
+                db.upsert_message(msgid, folder, sender, subject)
         ok = try_learn(db, log, acc, raw, msgid, "spam", reason="train_spam_folder")
         if ok:
             learned_uids.append(uid)
-            moved_msgids.append(msgid)
+            if not synthetic:
+                moved_msgids.append(msgid)
             continue
         # try_learn returned False: either rspamd refused this content
         # (e.g. min_tokens not met) or the call hit a transient issue.
@@ -1269,6 +1276,9 @@ def drain_train_spam(client: IMAPClient, db: Db, log: logging.Logger, acc: Accou
         # failures, give up so the train folder cannot loop forever on
         # the same UID. The row is marked 'unlearnable' so try_learn's
         # silent-skip path takes over if the message ever reappears.
+        # Synthetic-msgid messages skip the row-mark (we have no
+        # addressable row) but still get evicted from the train folder
+        # after the 3rd failure so they cannot loop forever.
         fails = db.conn.execute(
             "SELECT COUNT(*) FROM events "
             "WHERE account=? AND message_id=? AND event='learn_failed'",
@@ -1280,10 +1290,12 @@ def drain_train_spam(client: IMAPClient, db: Db, log: logging.Logger, acc: Accou
                 msgid, fails,
             )
             with db.tx():
-                db.update_message(msgid, learned_as="unlearnable", learned_at=int(time.time()))
+                if not synthetic:
+                    db.update_message(msgid, learned_as="unlearnable", learned_at=int(time.time()))
                 db.log_event("learn_giveup", msgid, detail=f"after {fails} failures")
             learned_uids.append(uid)
-            moved_msgids.append(msgid)
+            if not synthetic:
+                moved_msgids.append(msgid)
     if not learned_uids:
         return
     try:
@@ -1373,6 +1385,16 @@ def _sweep_folder_to_trash(
         to_move.append(uid)
         if msgid:
             moved_msgids.append(msgid)
+        else:
+            # The DB row (if any) is keyed by Message-ID; without one we
+            # cannot address it, so the corresponding row stays stale
+            # until prune_messages eventually drops it. The IMAP move
+            # itself is still safe. Surface the rare case for visibility.
+            log.debug(
+                "retention %s: uid=%s in %s has no Message-ID; "
+                "moving without DB current_folder update",
+                tag, uid, src,
+            )
     if not to_move:
         return
     try:
