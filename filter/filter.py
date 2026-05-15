@@ -1742,6 +1742,17 @@ def main() -> int:
         return 2
     init_db()
     install_signal_handlers()
+
+    # Optional read-only dashboard (Flask + waitress). Disabled unless
+    # DASHBOARD_PORT is set, and refuses to start without
+    # DASHBOARD_USER / DASHBOARD_PASSWORD for basic auth.
+    if os.environ.get("DASHBOARD_PORT"):
+        try:
+            import dashboard as _dashboard
+            _dashboard.start()
+        except Exception as ex:  # noqa: BLE001
+            log.error("failed to start dashboard: %s", ex)
+
     accounts = load_accounts(CONFIG_PATH)
     log.info("loaded %d account(s): %s", len(accounts), ", ".join(a.name for a in accounts))
     heartbeat()

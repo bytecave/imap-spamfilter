@@ -16,7 +16,11 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-COPY filter.py bootstrap_train.py ./
+COPY filter.py bootstrap_train.py dashboard.py ./
+
+# Read-only web dashboard; disabled by default. Operator opts in by
+# setting DASHBOARD_PORT + DASHBOARD_USER + DASHBOARD_PASSWORD.
+EXPOSE 8080
 
 RUN mkdir -p /state && chown -R 99:100 /app /state
 # Run as Unraid's nobody:users so bind-mounted appdata files

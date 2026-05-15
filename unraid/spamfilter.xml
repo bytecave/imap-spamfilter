@@ -23,7 +23,7 @@
     spamfilter-rspamd, and spamfilter-unbound on the `spamnet` network.
   </Overview>
   <Category>Productivity Security Network-Other</Category>
-  <WebUI/>
+  <WebUI>http://[IP]:[PORT:8080]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/main/unraid/spamfilter.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/main/assets/icon.png</Icon>
   <ExtraParams>--log-opt max-size=50m --log-opt max-file=5</ExtraParams>
@@ -47,4 +47,9 @@
   <Config Name="LOG_LEVEL" Target="LOG_LEVEL" Default="INFO" Mode="" Description="DEBUG | INFO | WARNING | ERROR" Type="Variable" Display="always" Required="false" Mask="false">INFO</Config>
   <Config Name="TZ" Target="TZ" Default="Europe/Berlin" Mode="" Description="Timezone for log timestamps" Type="Variable" Display="advanced" Required="false" Mask="false">Europe/Berlin</Config>
   <Config Name="STATE_DIR" Target="STATE_DIR" Default="/state" Mode="" Description="In-container path (matches the State dir mount)" Type="Variable" Display="advanced" Required="false" Mask="false">/state</Config>
+
+  <Config Name="Dashboard port" Target="8080" Default="8080" Mode="tcp" Description="Host port for the optional read-only web dashboard. Leave blank to disable the published port; the dashboard itself only starts when DASHBOARD_PORT is set below." Type="Port" Display="always" Required="false" Mask="false">8080</Config>
+  <Config Name="DASHBOARD_PORT" Target="DASHBOARD_PORT" Default="" Mode="" Description="Set to 8080 (or the container-internal port matching the host port above) to enable the read-only Flask dashboard. Leave blank to disable. Requires DASHBOARD_USER and DASHBOARD_PASSWORD." Type="Variable" Display="always" Required="false" Mask="false"/>
+  <Config Name="DASHBOARD_USER" Target="DASHBOARD_USER" Default="" Mode="" Description="Basic auth username for the dashboard. Required when DASHBOARD_PORT is set." Type="Variable" Display="always" Required="false" Mask="false"/>
+  <Config Name="DASHBOARD_PASSWORD" Target="DASHBOARD_PASSWORD" Default="" Mode="" Description="Basic auth password for the dashboard. Required when DASHBOARD_PORT is set." Type="Variable" Display="always" Required="false" Mask="true"/>
 </Container>

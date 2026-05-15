@@ -74,6 +74,13 @@ services:
       - STATE_DIR=/state
       - LOG_LEVEL=INFO
       - TZ=Europe/Berlin
+      # Optional read-only dashboard. Uncomment all three (or set in
+      # .env) to enable a Flask web UI on port 8080 with basic auth.
+      # - DASHBOARD_PORT=8080
+      # - DASHBOARD_USER=${DASHBOARD_USER:-}
+      # - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:-}
+    # ports:
+    #   - "8080:8080"  # only published when DASHBOARD_PORT is set
     # Healthcheck baked into the image (see filter/Dockerfile). Compose
     # used to shadow it with a shell-string form that broke under Unraid
     # `--health-cmd`; the image definition works the same everywhere.

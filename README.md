@@ -455,6 +455,37 @@ sufficient.
 
 ---
 
+## Web dashboard (optional)
+
+A small read-only Flask dashboard is available for at-a-glance stats:
+recent scans, recent learns, per-account activity, rspamd Bayes
+counts, and active safe-mode entries. **Off by default.** No actions,
+no buttons — read-only.
+
+Enable on Unraid: in the spamfilter container template set
+`DASHBOARD_PORT=8080`, `DASHBOARD_USER=admin`, and
+`DASHBOARD_PASSWORD=<a-random-string>`. Apply. Open
+`http://<unraid-ip>:8080/`.
+
+Enable via docker-compose: uncomment the three `DASHBOARD_*` lines
+under `spamfilter:` in `docker-compose.yml` plus the `ports:` block,
+fill in basic-auth creds in `.env`, recreate the container.
+
+The dashboard refuses to start if `DASHBOARD_PORT` is set without
+both `DASHBOARD_USER` and `DASHBOARD_PASSWORD`. There is no TLS in
+the dashboard itself — terminate HTTPS at a reverse proxy if you
+expose it beyond your LAN.
+
+Pages:
+
+- `/`         summary KPIs + rspamd Bayes counts + recent learns
+- `/messages` last 200 scanned msgs with score filter
+- `/learned`  last 300 learn / learn_failed / learn_giveup events
+- `/events`   tail of the full events table
+- `/accounts` per-account scan / learn / fail counts plus safe-mode
+
+---
+
 ## Operational queries
 
 The SQLite DB is WAL mode; safe to query while the filter is running.
