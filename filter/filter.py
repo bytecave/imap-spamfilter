@@ -150,13 +150,13 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "inbox": "INBOX",
     "junk": "Junk",
     "trash": "Trash",
+    # All four training folders live under the server's junk parent so
+    # they are auto-relocated together when SPECIAL-USE remaps the junk
+    # name (e.g. "Junk/" -> "Spam/" on Dovecot \Junk-flagged accounts).
     "spam_train": "Junk/Train-Spam",
     "trained_spam": "Junk/Trained-Spam",
-    # Top-level by default (not under Junk/Spam) so ham training shows
-    # up next to the user's regular folders in mail clients. Operators
-    # can override per-account in accounts.yml.
-    "ham_train": "Train-Ham",
-    "trained_ham": "Trained-Ham",
+    "ham_train": "Junk/Train-Ham",
+    "trained_ham": "Junk/Trained-Ham",
     "mode": "shadow",
     "threshold": 8.0,
     "min_threshold_allowed": 5.0,

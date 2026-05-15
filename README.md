@@ -321,9 +321,16 @@ override `defaults:` values; both override built-in defaults from `filter.py`.
 | `trash` | `Trash` | auto-detected via `\Trash` |
 | `spam_train` | `Junk/Train-Spam` | drop spam here for the filter to learn |
 | `trained_spam` | `Junk/Trained-Spam` | post-learn archive (auto-trashed by retention) |
-| `ham_train` | `Train-Ham` | drop (or **copy**) known-good mail here for ham training |
-| `trained_ham` | `Trained-Ham` | post-learn archive for ham (auto-trashed by retention) |
+| `ham_train` | `Junk/Train-Ham` | drop (or **copy**) known-good mail here for ham training |
+| `trained_ham` | `Junk/Trained-Ham` | post-learn archive for ham (auto-trashed by retention) |
 | `auto_special_folders` | `true` | set `false` to use literal `junk`/`trash` names |
+
+All four train/trained folders live under the server's junk parent and are
+auto-relocated together when SPECIAL-USE remaps the junk name (e.g. when
+the server actually flags `Spam` as `\Junk`, the four become
+`Spam/Train-Spam`, `Spam/Train-Ham`, etc.). The filter refuses to create
+`Junk` / `Trash` themselves to avoid duplicate junk hierarchies in the
+user's mailbox.
 
 ### Mode and scoring
 

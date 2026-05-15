@@ -16,11 +16,11 @@
 #   - Hierarchy delimiter is auto-detected on connect (/ vs . vs other).
 #   - Junk/Trash are auto-detected via RFC 6154 SPECIAL-USE flags when
 #     the server advertises them (Apple Mail, Thunderbird, Outlook, etc).
-#   - Junk, Trash, Junk/Train-Spam, Junk/Trained-Spam, Train-Ham,
-#     Trained-Ham are auto-created if missing. INBOX must already exist.
-#   - Train-Ham / Trained-Ham default to top level (alongside INBOX) so
-#     legitimate-mail training shows up next to the user's regular
-#     folders. Override per-account with `ham_train` / `trained_ham`.
+#   - Junk, Trash, and Junk/{Train,Trained}-{Spam,Ham} are managed.
+#     Filter REFUSES to create Junk/Trash itself (they are user
+#     territory). The four train/trained subfolders are auto-created
+#     under whatever the server reports as Junk via SPECIAL-USE.
+#   - INBOX must already exist (RFC).
 #   - Override with `auto_special_folders: false` + explicit junk/trash.
 
 accounts:
