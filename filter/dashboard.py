@@ -222,9 +222,21 @@ def summary():
         statfiles = (stats.get("statfiles") or []) if isinstance(stats, dict) else []
         rows = []
         for sf in statfiles:
+            # rspamd /stat field names vary by version: "revision" or
+            # "learns" or "total" all crop up in the wild. Try them in
+            # priority order; show "?" if none present.
+            learns = (
+                sf.get("revision")
+                or sf.get("learns")
+                or sf.get("total")
+                or 0
+            )
+            size_bytes = sf.get("size") or sf.get("length") or 0
             rows.append(
-                f"<tr><td>{sf.get('symbol','?')}</td><td>{sf.get('users','?')}</td>"
-                f"<td>{sf.get('total','?')}</td><td>{sf.get('size',0)/1024/1024:.1f} MiB</td>"
+                f"<tr><td>{sf.get('symbol','?')}</td>"
+                f"<td>{sf.get('users','?')}</td>"
+                f"<td>{learns}</td>"
+                f"<td>{size_bytes/1024/1024:.2f} MiB</td>"
                 f"<td>{sf.get('languages',0)}</td></tr>"
             )
         bayes_block = (

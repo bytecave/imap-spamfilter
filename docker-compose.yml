@@ -54,8 +54,6 @@ services:
       - /mnt/user/appdata/spamfilter/rspamd/local.d:/etc/rspamd/local.d:ro
       - /mnt/user/appdata/spamfilter/rspamd/data:/var/lib/rspamd
     networks: [spamnet]
-    ports:
-      - "127.0.0.1:11334:11334"
 
   spamfilter:
     build: ./filter
