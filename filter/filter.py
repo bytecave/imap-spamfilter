@@ -1136,11 +1136,15 @@ def scan_inbox(
                         db.update_message(msgid, our_action="flagged")
                         db.log_event("flagged", msgid, detail=f"score={score:.2f}")
                 case "move":
-                    client.add_flags(uid, [b"\\Flagged"])
+                    # Do NOT set \Flagged: that is the user's "starred"
+                    # flag and we pollute it once per spam during the
+                    # grace window. Record the pending_move with just a
+                    # DB row + event - the move happens after
+                    # move_grace_seconds whether or not the flag is set.
                     with db.tx():
                         db.add_pending_move(uv, uid, msgid)
-                        db.update_message(msgid, our_action="flagged")
-                        db.log_event("flag_pending_move", msgid, detail=f"score={score:.2f}")
+                        db.update_message(msgid, our_action="pending_move")
+                        db.log_event("pending_move", msgid, detail=f"score={score:.2f}")
 
 
 def execute_due_moves(client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fmap: dict[str, str]) -> None:
