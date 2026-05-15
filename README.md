@@ -478,22 +478,59 @@ WHERE ts >= strftime('%s','now','-1 hour') GROUP BY account, action;
 
 ---
 
-## Recovering from safe-mode
+## Safe-mode and rate limits
 
-If an account hits a rate limit or sanity check, scanning continues but
-moving/learning halts and a row is inserted into the `safe_mode` table.
+Two distinct mechanisms protect the account from runaway behaviour:
+
+### Rate limits (soft refusal, self-recovering)
+
+`max_moves_per_hour`, `max_learns_per_hour`, and `max_train_per_run`
+cap the number of mailbox-modifying actions per hour. When a limit is
+hit the filter logs a warning **once per minute**, refuses that action
+for the rest of the rolling-hour window, then resumes automatically as
+old entries roll out of the window. No DB state, no manual recovery.
+
+### Safe-mode (sticky-ish, scoped)
+
+The only sticky safe-mode is `scope="all"` triggered when Inbox UNSEEN
+exceeds `SAFE_MODE_UNSEEN_CAP` (500 messages) - a sanity check that
+something is wrong with the mailbox (mass-import, server restored from
+backup, etc.). Scanning halts for that account.
+
+It **auto-exits** on the next `scan_inbox` pass once UNSEEN drops back
+under the cap, so the typical "I marked everything read" recovery is
+hands-off. To clear manually anyway:
 
 ```sql
 SELECT account, scope, datetime(entered_at, 'unixepoch', 'localtime'), reason
 FROM safe_mode;
-
--- clear after investigating
 DELETE FROM safe_mode WHERE account='your_name';
 -- or to clear all: DELETE FROM safe_mode;
 ```
 
-Safe-mode is sticky on purpose; it requires a human to evaluate whether the
-trigger was a real problem or a benign spike.
+---
+
+## Backups
+
+Everything stateful lives under `/mnt/user/appdata/spamfilter/`. Nightly
+backups of that whole tree preserve:
+
+- SQLite state DB (filter's per-account messages, events, rate-limit,
+  safe-mode, uidvalidity tables)
+- Redis AOF + RDB (Bayes tokens — the actual training)
+- rspamd `/var/lib/rspamd` cache (incl. neural-meta weights, which take
+  days of confident decisions to rebuild from scratch)
+- accounts.yml and the rspamd controller password
+
+On Unraid, install the **Appdata Backup** Community App (by `KluthR`)
+and schedule it nightly. Set "Stop container before backup" for all
+four `spamfilter*` containers - downtime is ~30 s while the tar runs,
+and the filter reconnects automatically via IDLE. Keep e.g. 14 daily
+snapshots; expect 50-150 MB raw per snapshot, ~10-40 MB after zst
+compression.
+
+Restore is the reverse: stop the four containers, extract the tar over
+`/mnt/user/appdata/spamfilter/`, start the containers.
 
 ---
 
