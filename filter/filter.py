@@ -104,6 +104,8 @@ class Account:
     trash: str
     spam_train: str
     trained_spam: str
+    ham_train: str
+    trained_ham: str
 
     mode: str
     threshold: float
@@ -150,6 +152,11 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "trash": "Trash",
     "spam_train": "Junk/Train-Spam",
     "trained_spam": "Junk/Trained-Spam",
+    # Top-level by default (not under Junk/Spam) so ham training shows
+    # up next to the user's regular folders in mail clients. Operators
+    # can override per-account in accounts.yml.
+    "ham_train": "Train-Ham",
+    "trained_ham": "Trained-Ham",
     "mode": "shadow",
     "threshold": 8.0,
     "min_threshold_allowed": 5.0,
@@ -246,6 +253,8 @@ def load_accounts(path: Path) -> list[Account]:
                 trash=merged["trash"],
                 spam_train=merged["spam_train"],
                 trained_spam=merged["trained_spam"],
+                ham_train=merged["ham_train"],
+                trained_ham=merged["trained_ham"],
                 mode=str(merged["mode"]),
                 threshold=float(merged["threshold"]),
                 min_threshold_allowed=float(merged["min_threshold_allowed"]),
@@ -309,9 +318,16 @@ def validate_account(acc: Account) -> None:
             f">= threshold {acc.threshold} (otherwise every legit score is "
             f"discarded as out-of-range)"
         )
-    folder_set = {acc.inbox, acc.junk, acc.trash, acc.spam_train, acc.trained_spam}
-    if len(folder_set) != 5:
-        raise SystemExit(f"{acc.name}: inbox/junk/trash/spam_train/trained_spam must all be distinct")
+    folder_set = {
+        acc.inbox, acc.junk, acc.trash,
+        acc.spam_train, acc.trained_spam,
+        acc.ham_train, acc.trained_ham,
+    }
+    if len(folder_set) != 7:
+        raise SystemExit(
+            f"{acc.name}: inbox/junk/trash/spam_train/trained_spam/"
+            f"ham_train/trained_ham must all be distinct"
+        )
     if not 1 <= acc.max_moves_per_hour <= 1000:
         raise SystemExit(f"{acc.name}: max_moves_per_hour out of range")
     if not 1 <= acc.max_learns_per_hour <= 1000:
@@ -738,6 +754,8 @@ def build_folder_map(acc: Account, delim: str) -> dict[str, str]:
         "trash": resolve_folder(acc.trash, delim),
         "spam_train": resolve_folder(acc.spam_train, delim),
         "trained_spam": resolve_folder(acc.trained_spam, delim),
+        "ham_train": resolve_folder(acc.ham_train, delim),
+        "trained_ham": resolve_folder(acc.trained_ham, delim),
     }
 
 
@@ -765,7 +783,7 @@ def ensure_folders(client: IMAPClient, log: logging.Logger, fmap: dict[str, str]
     except IMAPClientError as ex:
         raise RuntimeError(f"required folder missing on server: {fmap['inbox']} ({ex})") from ex
 
-    for key in ("junk", "trash", "spam_train", "trained_spam"):
+    for key in ("junk", "trash", "spam_train", "trained_spam", "ham_train", "trained_ham"):
         f = fmap[key]
         try:
             client.select_folder(f, readonly=True)
@@ -1259,10 +1277,25 @@ def process_pending_learns(
             try_learn(db, log, acc, raw, msgid, kind, reason="grace_elapsed")
 
 
-def drain_train_spam(client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fmap: dict[str, str]) -> None:
+def _drain_train_folder(
+    client: IMAPClient,
+    db: Db,
+    log: logging.Logger,
+    acc: Account,
+    fmap: dict[str, str],
+    *,
+    kind: str,
+    src_key: str,
+    dst_key: str,
+) -> None:
+    """Generic 'pull mail out of a train folder, learn it under `kind`,
+    move to the trained folder' loop. kind is 'spam' or 'ham'; src_key
+    and dst_key index into fmap (e.g. 'spam_train' -> 'trained_spam'
+    or 'ham_train' -> 'trained_ham')."""
+    assert kind in {"spam", "ham"}
     if not acc.learn_from_moves:
         return
-    folder = fmap["spam_train"]
+    folder = fmap[src_key]
     try:
         uv = select_with_uidvalidity_check(client, db, folder, log)
     except IMAPClientError as ex:
@@ -1275,6 +1308,8 @@ def drain_train_spam(client: IMAPClient, db: Db, log: logging.Logger, acc: Accou
     fetched = client.fetch(uids, [b"BODY.PEEK[]"])
     learned_uids: list[int] = []
     moved_msgids: list[str] = []
+    log_tag = f"drain_train_{kind}"
+    reason = f"train_{kind}_folder"
     for uid, data in fetched.items():
         if SHUTDOWN.is_set():
             return
@@ -1283,34 +1318,29 @@ def drain_train_spam(client: IMAPClient, db: Db, log: logging.Logger, acc: Accou
             continue
         msgid, subject, sender = parse_envelope(raw)
         if not msgid:
-            # No Message-ID header. Skip DB tracking entirely - we cannot
-            # safely identify the row across folder moves later (the
-            # synthetic uv+uid id we used to mint is no longer addressable
-            # once the message is moved to Trained-Spam under a different
-            # uidvalidity), so storing it would just leak stale rows that
-            # retention can never update. Use a synthetic per-pass id for
-            # event logging only, and let rspamd dedup by content hash.
+            # No Message-ID header. Skip DB tracking entirely - we
+            # cannot safely identify the row across folder moves later
+            # (the synthetic uv+uid id is no longer addressable once
+            # the message is moved under a different uidvalidity), so
+            # storing it would just leak stale rows that retention
+            # can never update. Use a synthetic per-pass id for event
+            # logging only, and let rspamd dedup by content hash.
             msgid = f"<no-msgid-uv-{uv}-uid-{uid}>"
             synthetic = True
         else:
             synthetic = False
             with db.tx():
                 db.upsert_message(msgid, folder, sender, subject)
-        ok = try_learn(db, log, acc, raw, msgid, "spam", reason="train_spam_folder")
+        ok = try_learn(db, log, acc, raw, msgid, kind, reason=reason)
         if ok:
             learned_uids.append(uid)
             if not synthetic:
                 moved_msgids.append(msgid)
             continue
-        # try_learn returned False: either rspamd refused this content
-        # (e.g. min_tokens not met) or the call hit a transient issue.
-        # Count prior learn_failed events for the same msgid; after a few
-        # failures, give up so the train folder cannot loop forever on
-        # the same UID. The row is marked 'unlearnable' so try_learn's
-        # silent-skip path takes over if the message ever reappears.
-        # Synthetic-msgid messages skip the row-mark (we have no
-        # addressable row) but still get evicted from the train folder
-        # after the 3rd failure so they cannot loop forever.
+        # try_learn returned False: rspamd refused (min_tokens not met,
+        # encoded body, etc.) or transient. Count prior learn_failed
+        # events for this msgid; after 3 fails, give up so the train
+        # folder cannot loop forever on the same UID.
         fails = db.conn.execute(
             "SELECT COUNT(*) FROM events "
             "WHERE account=? AND message_id=? AND event='learn_failed'",
@@ -1318,52 +1348,59 @@ def drain_train_spam(client: IMAPClient, db: Db, log: logging.Logger, acc: Accou
         ).fetchone()[0]
         if fails >= 3:
             log.warning(
-                "drain_train_spam: giving up on %s after %d learn failures, moving out unlearned",
-                msgid, fails,
+                "%s: giving up on %s after %d learn failures, moving out unlearned",
+                log_tag, msgid, fails,
             )
             with db.tx():
                 if not synthetic:
                     db.update_message(msgid, learned_as="unlearnable", learned_at=int(time.time()))
-                db.log_event("learn_giveup", msgid, detail=f"after {fails} failures")
+                db.log_event("learn_giveup", msgid, detail=f"{kind} after {fails} failures")
             learned_uids.append(uid)
             if not synthetic:
                 moved_msgids.append(msgid)
     if not learned_uids:
         return
     try:
-        client.move(learned_uids, fmap["trained_spam"])
+        client.move(learned_uids, fmap[dst_key])
     except IMAPClientError as ex:
-        log.warning("move %s -> %s failed: %s", folder, fmap["trained_spam"], ex)
+        log.warning("move %s -> %s failed: %s", folder, fmap[dst_key], ex)
         return
-    # IMAP move has already succeeded by this point. If the DB update
-    # below raises (e.g. disk full), the messages are on the server in
-    # Trained-Spam while the rows still point at Train-Spam, which is
-    # cosmetic drift only - next drain pass cannot re-move them because
-    # the source folder no longer holds those UIDs - but log it loudly
-    # so an operator can reconcile by hand.
     try:
         with db.tx():
             for uid in learned_uids:
-                db.log_event("trained_moved", detail=f"uid={uid} -> {fmap['trained_spam']}")
-            # Skip the bulk UPDATE entirely when nothing in this batch
-            # has a real Message-ID - SQL `IN ()` is a syntax error in
-            # SQLite, and synthetic-msgid messages are intentionally not
-            # tracked in the messages table so there is nothing to
-            # update for them. Same guard as retention_sweep below.
+                db.log_event("trained_moved", detail=f"uid={uid} -> {fmap[dst_key]}")
             if moved_msgids:
                 placeholders = ",".join("?" * len(moved_msgids))
                 db.conn.execute(
                     f"UPDATE messages SET current_folder=? WHERE account=? "
                     f"AND message_id IN ({placeholders})",
-                    (fmap["trained_spam"], db.account, *moved_msgids),
+                    (fmap[dst_key], db.account, *moved_msgids),
                 )
     except sqlite3.Error as ex:
         log.error(
-            "drain_train_spam: IMAP moved %d msgs to %s but DB update failed: %s",
-            len(learned_uids), fmap["trained_spam"], ex,
+            "%s: IMAP moved %d msgs to %s but DB update failed: %s",
+            log_tag, len(learned_uids), fmap[dst_key], ex,
         )
         return
-    log.info("drain_train_spam: learned+moved %d", len(learned_uids))
+    log.info("%s: learned+moved %d", log_tag, len(learned_uids))
+
+
+def drain_train_spam(
+    client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fmap: dict[str, str]
+) -> None:
+    _drain_train_folder(
+        client, db, log, acc, fmap,
+        kind="spam", src_key="spam_train", dst_key="trained_spam",
+    )
+
+
+def drain_train_ham(
+    client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fmap: dict[str, str]
+) -> None:
+    _drain_train_folder(
+        client, db, log, acc, fmap,
+        kind="ham", src_key="ham_train", dst_key="trained_ham",
+    )
 
 
 # ----- retention ----------------------------------------------------------
@@ -1381,6 +1418,10 @@ def retention_sweep(
         _sweep_folder_to_trash(
             client, db, log, acc, fmap,
             src=fmap["trained_spam"], days=acc.trained_retention_days, exclude_learned_ham=False, tag="trained_retention",
+        )
+        _sweep_folder_to_trash(
+            client, db, log, acc, fmap,
+            src=fmap["trained_ham"], days=acc.trained_retention_days, exclude_learned_ham=False, tag="trained_ham_retention",
         )
 
 
@@ -1517,7 +1558,7 @@ def account_loop(acc: Account) -> None:
                 if "junk" in detected and acc.junk != old_junk:
                     new_junk = acc.junk
                     prefix = old_junk + "/"
-                    for key in ("spam_train", "trained_spam"):
+                    for key in ("spam_train", "trained_spam", "ham_train", "trained_ham"):
                         cur = getattr(acc, key)
                         if cur.startswith(prefix):
                             remapped = new_junk + cur[len(old_junk):]
@@ -1533,6 +1574,9 @@ def account_loop(acc: Account) -> None:
                 db.prune_rate()
 
                 drain_train_spam(client, db, log, acc, acc.folder_map)
+                if SHUTDOWN.is_set():
+                    break
+                drain_train_ham(client, db, log, acc, acc.folder_map)
                 if SHUTDOWN.is_set():
                     break
 

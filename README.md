@@ -187,17 +187,31 @@ cat /mnt/user/appdata/spamfilter/state/controller.password
 
 ### 4. Bootstrap training (optional but recommended)
 
-Bayes is roughly useless until ~200 spam and ~200 ham are learned. Create a
-temporary IMAP folder in your mail client (e.g. `Bootstrap-Spam`), drag
-known spam in, then:
+Bayes is roughly useless until ~200 spam and ~200 ham are learned. Two
+ways to feed it in bulk:
+
+**a) Drop into the auto-created training folders (easiest, no CLI)**
+
+The filter creates four folders on each account:
+
+- `Train-Spam`   — drop **spam** here
+- `Trained-Spam` — filter moves messages here after learning
+- `Train-Ham`    — drop (or **copy**) **known-good** mail here
+- `Trained-Ham`  — filter moves messages here after learning
+
+Bulk-train ham without losing your originals: in your mail client, select
+a known-good folder (e.g. `Archive/Family`) and **copy** to `Train-Ham`.
+The filter learns each copy as ham, moves them to `Trained-Ham`, and
+retention sweeps them to Trash after `trained_retention_days`. Originals
+in your folders are untouched.
+
+**b) bootstrap_train.py CLI (faster for one-off bulk runs)**
 
 ```bash
-docker exec -it spamfilter python bootstrap_train.py your_name Bootstrap-Spam spam --dry-run
-docker exec -it spamfilter python bootstrap_train.py your_name Bootstrap-Spam spam --move-to Junk
+docker exec -it spamfilter python bootstrap_train.py your_name Train-Spam spam --dry-run
+docker exec -it spamfilter python bootstrap_train.py your_name Train-Spam spam --move-to Trained-Spam
+docker exec -it spamfilter python bootstrap_train.py your_name Train-Ham  ham  --move-to Trained-Ham
 ```
-
-Repeat with `Bootstrap-Ham` and `ham`. Delete the bootstrap folders when
-done.
 
 ### 5. Mode promotion
 
@@ -305,8 +319,10 @@ override `defaults:` values; both override built-in defaults from `filter.py`.
 | `inbox` | `INBOX` | RFC-mandated; do not change |
 | `junk` | `Junk` | auto-detected via RFC 6154 if server advertises `\Junk` |
 | `trash` | `Trash` | auto-detected via `\Trash` |
-| `spam_train` | `Junk/Train-Spam` | drag-to-train inbox |
-| `trained_spam` | `Junk/Trained-Spam` | post-learn archive |
+| `spam_train` | `Junk/Train-Spam` | drop spam here for the filter to learn |
+| `trained_spam` | `Junk/Trained-Spam` | post-learn archive (auto-trashed by retention) |
+| `ham_train` | `Train-Ham` | drop (or **copy**) known-good mail here for ham training |
+| `trained_ham` | `Trained-Ham` | post-learn archive for ham (auto-trashed by retention) |
 | `auto_special_folders` | `true` | set `false` to use literal `junk`/`trash` names |
 
 ### Mode and scoring
@@ -342,7 +358,7 @@ override `defaults:` values; both override built-in defaults from `filter.py`.
 | Key | Default | Notes |
 | --- | --- | --- |
 | `junk_retention_days` | `10` | Junk -> Trash after N days, `0` disables |
-| `trained_retention_days` | `7` | Trained-Spam -> Trash after N days |
+| `trained_retention_days` | `7` | Trained-Spam **and** Trained-Ham -> Trash after N days |
 | `learn_from_moves` | `true` | set `false` to disable all learning (scan-only) |
 
 The `DEFAULT_JUNK_RETENTION_DAYS` and `DEFAULT_TRAINED_RETENTION_DAYS`
