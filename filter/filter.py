@@ -563,8 +563,7 @@ class Db:
         is fully resolved when there is no pending_learn (we are not
         waiting on a grace timer) and either it has been moved out of
         Inbox or it was scored long enough ago that we will not revisit
-        the decision. Rows we still need for revert detection or pending
-        learns stay regardless of age."""
+        the decision."""
         cutoff = int(time.time()) - older_than_s
         cur = self.conn.execute(
             """
@@ -572,6 +571,29 @@ class Db:
              WHERE account=?
                AND last_seen<?
                AND pending_learn IS NULL
+            """,
+            (self.account, cutoff),
+        )
+        return cur.rowcount
+
+    def prune_stale_pending_learn(self, older_than_s: int) -> int:
+        """Clear pending_learn flags that have been sitting past their
+        grace window without resolving. Without this, a message that
+        was scheduled for a grace-window learn but then disappeared
+        from its folder (user moved it, server resynced UIDs, etc.)
+        keeps its pending_learn forever and prevents prune_messages
+        from ever evicting the row.
+
+        Cleared rows can then be picked up by prune_messages on the
+        next sweep if they are also old enough by last_seen."""
+        cutoff = int(time.time()) - older_than_s
+        cur = self.conn.execute(
+            """
+            UPDATE messages
+               SET pending_learn=NULL, pending_learn_at=NULL
+             WHERE account=?
+               AND pending_learn IS NOT NULL
+               AND pending_learn_at<?
             """,
             (self.account, cutoff),
         )
@@ -844,20 +866,30 @@ def _kw(flags: tuple[bytes, ...] | list[bytes]) -> set[str]:
     return out
 
 
+_HEARTBEAT_LOCK = threading.Lock()
+
+
 def heartbeat() -> None:
-    try:
-        # Atomic write so a partial / interrupted heartbeat write does not
-        # leave a truncated file that healthcheck reads as "0" (unix epoch
-        # = stale by ~50 years). On NFS the rename is atomic per POSIX.
-        tmp = HEARTBEAT_PATH.with_suffix(".tmp")
-        tmp.write_text(str(int(time.time())))
-        tmp.replace(HEARTBEAT_PATH)
-    except OSError as ex:
-        # Surface the failure so the operator notices a stuck NFS mount or
-        # disk full before the healthcheck staleness threshold trips. Use
-        # logger directly to avoid recursion if logging itself blocks on
-        # the same fs.
-        logging.getLogger("main").warning("heartbeat write failed: %s", ex)
+    # Account threads and the main watchdog all call heartbeat()
+    # concurrently. Without serialisation two threads racing on the
+    # same .tmp path corrupt each other's writes and leave one of the
+    # tmp.replace() calls failing with FileNotFoundError. The critical
+    # section is two filesystem ops; contention is negligible.
+    with _HEARTBEAT_LOCK:
+        try:
+            # Atomic write so a partial / interrupted heartbeat write
+            # does not leave a truncated file that healthcheck reads
+            # as "0" (unix epoch = stale by ~50 years). On NFS the
+            # rename is atomic per POSIX.
+            tmp = HEARTBEAT_PATH.with_suffix(".tmp")
+            tmp.write_text(str(int(time.time())))
+            tmp.replace(HEARTBEAT_PATH)
+        except OSError as ex:
+            # Surface the failure so the operator notices a stuck NFS
+            # mount or disk full before the healthcheck staleness
+            # threshold trips. Use logger directly to avoid recursion
+            # if logging itself blocks on the same fs.
+            logging.getLogger("main").warning("heartbeat write failed: %s", ex)
 
 
 _RATE_LOG_LOCK = threading.Lock()
@@ -1363,7 +1395,17 @@ def _sweep_folder_to_trash(
     except IMAPClientError as ex:
         log.warning("retention: select %s failed: %s", src, ex)
         return
-    cutoff_date = time.strftime("%d-%b-%Y", time.gmtime(time.time() - days * 86400))
+    # IMAP `BEFORE <date>` is interpreted by the SERVER in its local
+    # timezone (RFC 3501 4.3 - dates have no time, server compares
+    # against INTERNALDATE in server-local time). Subtract one extra
+    # day so a TZ mismatch between the container clock and the
+    # server's clock cannot cause us to delete messages slightly too
+    # early. Worst case: retention runs one day late, never one day
+    # early.
+    cutoff_date = time.strftime(
+        "%d-%b-%Y",
+        time.gmtime(time.time() - (days + 1) * 86400),
+    )
     try:
         uids = client.search(["BEFORE", cutoff_date])
     except IMAPClientError as ex:
@@ -1515,11 +1557,23 @@ def account_loop(acc: Account) -> None:
                         max(acc.junk_retention_days, acc.trained_retention_days, 14)
                         + 7
                     ) * 86400
+                    # Pending_learn rows older than max(grace) * 24
+                    # are stale: the grace window has long expired and
+                    # process_pending_learns either resolved them or
+                    # could not find the message. Clear so the row can
+                    # be evicted by prune_messages on the same sweep.
+                    stale_pending_window = (
+                        max(acc.learn_grace_seconds, acc.move_grace_seconds, 3600) * 24
+                    )
                     with db.tx():
+                        cleared = db.prune_stale_pending_learn(stale_pending_window)
                         ev = db.prune_events()
                         ms = db.prune_messages(msg_window)
-                    if ev or ms:
-                        log.info("pruned events=%d messages=%d", ev, ms)
+                    if cleared or ev or ms:
+                        log.info(
+                            "pruned events=%d messages=%d stale_pending=%d",
+                            ev, ms, cleared,
+                        )
                     db.vacuum_if_due()
                     state.last_retention = now
 
