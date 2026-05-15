@@ -217,8 +217,26 @@ def summary():
         ).fetchall()
 
     stats = _rspamd_stats()
+    rspamd_block = ""
     bayes_block = ""
     if stats:
+        actions = stats.get("actions") or {}
+        uptime_s = stats.get("uptime") or 0
+        days = uptime_s // 86400
+        hours = (uptime_s % 86400) // 3600
+        uptime_str = f"{days}d {hours}h" if days else f"{hours}h"
+        rspamd_block = f"""
+<h2>rspamd lifetime totals (since rspamd start, uptime {uptime_str})</h2>
+<div class="kpi-row">
+  <div class="kpi"><div class="label">Scanned</div><div class="value">{stats.get('scanned', '?')}</div></div>
+  <div class="kpi"><div class="label">Identified spam</div><div class="value">{stats.get('spam_count', '?')}</div></div>
+  <div class="kpi"><div class="label">Identified ham</div><div class="value">{stats.get('ham_count', '?')}</div></div>
+  <div class="kpi"><div class="label">Total learns</div><div class="value">{stats.get('total_learns', '?')}</div></div>
+  <div class="kpi"><div class="label">Reject</div><div class="value">{actions.get('reject', 0)}</div></div>
+  <div class="kpi"><div class="label">Add header</div><div class="value">{actions.get('add header', 0)}</div></div>
+  <div class="kpi"><div class="label">Greylist</div><div class="value">{actions.get('greylist', 0)}</div></div>
+  <div class="kpi"><div class="label">No action</div><div class="value">{actions.get('no action', 0)}</div></div>
+</div>"""
         statfiles = (stats.get("statfiles") or []) if isinstance(stats, dict) else []
         rows = []
         for sf in statfiles:
@@ -287,6 +305,7 @@ def summary():
   <div class="kpi"><div class="label">Spam learns total</div><div class="value">{learn_spam_total}</div></div>
   <div class="kpi"><div class="label">Ham learns total</div><div class="value">{learn_ham_total}</div></div>
 </div>
+{rspamd_block}
 {bayes_block}
 {safe_block}
 {learns_block}
