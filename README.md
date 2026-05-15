@@ -27,10 +27,12 @@ Move-based training (no special folders needed in daily use):
 - IMAP keyword `$Junk` / `$NotJunk` skips the grace window
 
 Folder-based training (bootstrap and bulk corrections):
-- Drag (or copy) **spam** to `Junk/Train-Spam` -> filter learns, moves to `Junk/Trained-Spam`
-- Drag (or copy) **known-good** mail to `Junk/Train-Ham` -> filter learns, moves to `Junk/Trained-Ham`
+- **Move** spam to `Junk/Train-Spam` -> filter learns, moves to `Junk/Trained-Spam`
+- **Copy** (never move) known-good mail to `Junk/Train-Ham` -> filter learns,
+  moves to `Junk/Trained-Ham`. The copy is destroyed by retention; the
+  original in your sorted folder stays untouched. **Moving** ham here means
+  the only copy will eventually end up in Trash.
 - Both `Junk/Trained-*` folders are swept to Trash after `trained_retention_days` (default 7)
-- Copy instead of move when bulk-training ham from your sorted folders: originals stay put
 
 Hard rules:
 - **Never deletes.** Only IMAP MOVE. Trash retention is the mail provider's job.
@@ -214,16 +216,16 @@ ways to feed it in bulk:
 
 The filter creates four folders on each account:
 
-- `Train-Spam`   — drop **spam** here
-- `Trained-Spam` — filter moves messages here after learning
-- `Train-Ham`    — drop (or **copy**) **known-good** mail here
-- `Trained-Ham`  — filter moves messages here after learning
+- `Train-Spam`   — **move** spam here (originals are spam, OK to lose)
+- `Trained-Spam` — filter archives here after learning; retention -> Trash
+- `Train-Ham`    — **copy only** known-good mail here (never move)
+- `Trained-Ham`  — filter archives here after learning; retention -> Trash
 
-Bulk-train ham without losing your originals: in your mail client, select
-a known-good folder (e.g. `Archive/Family`) and **copy** to `Train-Ham`.
-The filter learns each copy as ham, moves them to `Trained-Ham`, and
-retention sweeps them to Trash after `trained_retention_days`. Originals
-in your folders are untouched.
+**Why copy for ham:** the copy in `Train-Ham` is destroyed by retention.
+If you **move** a legitimate mail into `Train-Ham` you lose your only
+copy. Bulk-train ham by selecting a known-good folder in your mail
+client (e.g. `Archive/Family`) and **Copy** to `Train-Ham` - the
+originals in your folders stay untouched.
 
 **b) bootstrap_train.py CLI (faster for one-off bulk runs)**
 
