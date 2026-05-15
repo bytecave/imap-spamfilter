@@ -778,12 +778,34 @@ def ensure_folders(client: IMAPClient, log: logging.Logger, fmap: dict[str, str]
     # Don't trust LIST alone: some servers return placeholders (\Noselect /
     # \NonExistent) for parents whose children we created earlier, which
     # confuses a name-only existence check. Probe with SELECT instead.
-    try:
-        client.select_folder(fmap["inbox"], readonly=True)
-    except IMAPClientError as ex:
-        raise RuntimeError(f"required folder missing on server: {fmap['inbox']} ({ex})") from ex
+    #
+    # Policy: refuse to create core user folders (inbox, junk, trash). If
+    # they don't already exist the operator has either picked the wrong
+    # account or misconfigured a name; auto-creating them silently can
+    # lead to two parallel "Junk" / "Spam" hierarchies and chaos in the
+    # user's mailbox (we hit this exact problem during initial setup).
+    # We only auto-create the filter-specific training folders.
+    REQUIRED = ("inbox", "junk", "trash")
+    AUTO_CREATE = ("spam_train", "trained_spam", "ham_train", "trained_ham")
 
-    for key in ("junk", "trash", "spam_train", "trained_spam", "ham_train", "trained_ham"):
+    missing: list[str] = []
+    for key in REQUIRED:
+        try:
+            client.select_folder(fmap[key], readonly=True)
+        except IMAPClientError:
+            missing.append(f"{key}={fmap[key]!r}")
+    if missing:
+        raise RuntimeError(
+            "required folder(s) missing on the IMAP server: "
+            + ", ".join(missing)
+            + ". The filter refuses to create core mailbox folders to avoid "
+            "creating duplicate junk/trash hierarchies. Either enable "
+            "auto_special_folders so SPECIAL-USE flags are honoured, or set "
+            "explicit junk/trash names in accounts.yml that match folders "
+            "that already exist on the server."
+        )
+
+    for key in AUTO_CREATE:
         f = fmap[key]
         try:
             client.select_folder(f, readonly=True)
