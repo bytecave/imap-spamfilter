@@ -27,13 +27,15 @@ Move-based training (no special folders needed in daily use):
 - IMAP keyword `$Junk` / `$NotJunk` skips the grace window
 
 Folder-based training (bootstrap and bulk corrections):
-- Drag suspected spam to `Junk/Train-Spam` -> filter learns, moves to `Junk/Trained-Spam`
-- `Junk/Trained-Spam` is swept to Trash after `trained_retention_days` (default 7)
+- Drag (or copy) **spam** to `Junk/Train-Spam` -> filter learns, moves to `Junk/Trained-Spam`
+- Drag (or copy) **known-good** mail to `Junk/Train-Ham` -> filter learns, moves to `Junk/Trained-Ham`
+- Both `Junk/Trained-*` folders are swept to Trash after `trained_retention_days` (default 7)
+- Copy instead of move when bulk-training ham from your sorted folders: originals stay put
 
 Hard rules:
 - **Never deletes.** Only IMAP MOVE. Trash retention is the mail provider's job.
 - **Fails closed.** rspamd unreachable / parse error / folder missing => message stays put.
-- **No autolearn.** Bayes only learns from explicit user moves or the Train-Spam folder.
+- **No autolearn.** Bayes only learns from explicit user moves or the Train-Spam / Train-Ham folders.
 
 ---
 
