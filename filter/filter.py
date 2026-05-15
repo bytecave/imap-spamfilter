@@ -1313,11 +1313,18 @@ def drain_train_spam(client: IMAPClient, db: Db, log: logging.Logger, acc: Accou
         with db.tx():
             for uid in learned_uids:
                 db.log_event("trained_moved", detail=f"uid={uid} -> {fmap['trained_spam']}")
-            placeholders = ",".join("?" * len(moved_msgids))
-            db.conn.execute(
-                f"UPDATE messages SET current_folder=? WHERE account=? AND message_id IN ({placeholders})",
-                (fmap["trained_spam"], db.account, *moved_msgids),
-            )
+            # Skip the bulk UPDATE entirely when nothing in this batch
+            # has a real Message-ID - SQL `IN ()` is a syntax error in
+            # SQLite, and synthetic-msgid messages are intentionally not
+            # tracked in the messages table so there is nothing to
+            # update for them. Same guard as retention_sweep below.
+            if moved_msgids:
+                placeholders = ",".join("?" * len(moved_msgids))
+                db.conn.execute(
+                    f"UPDATE messages SET current_folder=? WHERE account=? "
+                    f"AND message_id IN ({placeholders})",
+                    (fmap["trained_spam"], db.account, *moved_msgids),
+                )
     except sqlite3.Error as ex:
         log.error(
             "drain_train_spam: IMAP moved %d msgs to %s but DB update failed: %s",
