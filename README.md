@@ -462,19 +462,22 @@ recent scans, recent learns, per-account activity, rspamd Bayes
 counts, and active safe-mode entries. **Off by default.** No actions,
 no buttons — read-only.
 
+The container always listens internally on **port 8080**; pick any
+free host port in your orchestrator's port mapping.
+
 Enable on Unraid: in the spamfilter container template set
-`DASHBOARD_PORT=8080`, `DASHBOARD_USER=admin`, and
-`DASHBOARD_PASSWORD=<a-random-string>`. Apply. Open
-`http://<unraid-ip>:8080/`.
+`DASHBOARD_USER=admin` and `DASHBOARD_PASSWORD=<random>`, set the
+host port in the "Dashboard port" mapping, Apply. Open
+`http://<unraid-ip>:<host-port>/`.
 
-Enable via docker-compose: uncomment the three `DASHBOARD_*` lines
-under `spamfilter:` in `docker-compose.yml` plus the `ports:` block,
-fill in basic-auth creds in `.env`, recreate the container.
+Enable via docker-compose: uncomment `DASHBOARD_USER` and
+`DASHBOARD_PASSWORD` under `spamfilter:` in `docker-compose.yml`
+plus the `ports:` block, fill in basic-auth creds in `.env`,
+recreate the container.
 
-The dashboard refuses to start if `DASHBOARD_PORT` is set without
-both `DASHBOARD_USER` and `DASHBOARD_PASSWORD`. There is no TLS in
-the dashboard itself — terminate HTTPS at a reverse proxy if you
-expose it beyond your LAN.
+The dashboard refuses to start unless **both** basic-auth env vars
+are set. There is no TLS in the dashboard itself — terminate HTTPS
+at a reverse proxy if you expose it beyond your LAN.
 
 Pages:
 

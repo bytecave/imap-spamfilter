@@ -1744,9 +1744,9 @@ def main() -> int:
     install_signal_handlers()
 
     # Optional read-only dashboard (Flask + waitress). Disabled unless
-    # DASHBOARD_PORT is set, and refuses to start without
-    # DASHBOARD_USER / DASHBOARD_PASSWORD for basic auth.
-    if os.environ.get("DASHBOARD_PORT"):
+    # both DASHBOARD_USER and DASHBOARD_PASSWORD are set. Listens on a
+    # fixed internal port 8080; the orchestrator chooses the host port.
+    if os.environ.get("DASHBOARD_USER") and os.environ.get("DASHBOARD_PASSWORD"):
         try:
             import dashboard as _dashboard
             _dashboard.start()

@@ -28,7 +28,9 @@ RSPAMD_CONTROLLER_URL = os.environ.get(
 
 DASHBOARD_USER = os.environ.get("DASHBOARD_USER", "")
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
-DASHBOARD_PORT = os.environ.get("DASHBOARD_PORT", "")
+# Container-internal listen port is fixed. The orchestrator decides
+# what host port to map it to (e.g. 38080:8080 in compose / Unraid).
+DASHBOARD_PORT = 8080
 
 log = logging.getLogger("dashboard")
 app = Flask(__name__)
@@ -437,28 +439,22 @@ def accounts_view():
 
 
 def start() -> None:
-    """Spin up the dashboard. Called from filter.py main() when env says so."""
-    port_s = DASHBOARD_PORT
-    if not port_s:
-        return
+    """Spin up the dashboard. Caller decides whether to invoke (see
+    filter.py main()); we only refuse if basic auth credentials are
+    missing."""
     if not DASHBOARD_USER or not DASHBOARD_PASSWORD:
         logging.getLogger("dashboard").error(
-            "DASHBOARD_PORT set but DASHBOARD_USER/DASHBOARD_PASSWORD missing; "
-            "refusing to expose dashboard without basic auth"
+            "DASHBOARD_USER/DASHBOARD_PASSWORD missing; refusing to start "
+            "dashboard without basic auth"
         )
         return
-    try:
-        port = int(port_s)
-    except ValueError:
-        logging.getLogger("dashboard").error("DASHBOARD_PORT=%r is not an int", port_s)
-        return
     logging.getLogger("dashboard").info(
-        "starting on 0.0.0.0:%d (basic auth as %r)", port, DASHBOARD_USER
+        "starting on 0.0.0.0:%d (basic auth as %r)", DASHBOARD_PORT, DASHBOARD_USER
     )
 
     def _serve():
         try:
-            serve(app, host="0.0.0.0", port=port, threads=4)
+            serve(app, host="0.0.0.0", port=DASHBOARD_PORT, threads=4)
         except Exception as ex:  # noqa: BLE001
             logging.getLogger("dashboard").error("crashed: %s", ex)
 
