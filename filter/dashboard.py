@@ -25,10 +25,12 @@ import hashlib
 import hmac
 import logging
 import os
+import re
 import secrets
 import sqlite3
 import threading
 import time
+from dataclasses import dataclass
 from functools import wraps
 from pathlib import Path
 
@@ -93,21 +95,43 @@ def _verify_pbkdf2(stored: str, password: str) -> bool:
 USERS_FILE = STATE_DIR / "dashboard_users"
 
 
-def _parse_user_line(raw: str, users: dict[str, str]) -> None:
-    name, sep, verifier = raw.partition(":")
-    if name.strip() and sep and verifier.strip():
-        users[name.strip()] = verifier.strip()
+@dataclass(frozen=True)
+class _User:
+    name: str
+    verifier: str                 # pbkdf2 hash, or 'plain:<pw>' (legacy env)
+    admin: bool                   # admin sees every account
+    accounts: frozenset[str]      # account names a non-admin may see
 
 
-def _load_users() -> dict[str, str]:
-    """Map username -> verifier (a pbkdf2 hash, or 'plain:<password>'
-    for the legacy env vars). Sources, lowest precedence first:
-      1. the state/dashboard_users file - one `name:hash` per line,
+def _parse_user_line(raw: str, users: dict[str, "_User"]) -> None:
+    """Parse one `username:verifier[:scope]` record. `scope` is 'admin'
+    or a pipe/comma-separated list of account names; absent = admin.
+    The verifier is a pbkdf2 hash, which contains no ':'."""
+    parts = raw.split(":")
+    if len(parts) < 2:
+        return
+    name = parts[0].strip()
+    verifier = parts[1].strip()
+    scope = (parts[2].strip() if len(parts) >= 3 and parts[2].strip()
+             else "admin")
+    if not name or not verifier:
+        return
+    admin = scope.lower() == "admin"
+    accounts = frozenset() if admin else frozenset(
+        a.strip() for a in re.split(r"[|,]", scope) if a.strip())
+    users[name] = _User(name, verifier, admin, accounts)
+
+
+def _load_users() -> dict[str, "_User"]:
+    """Map username -> _User. Sources, lowest precedence first:
+      1. state/dashboard_users - `username:hash[:scope]` per line,
          `#` comments and blank lines ignored;
-      2. the DASHBOARD_USERS env var - comma-separated `name:hash`;
-      3. the legacy DASHBOARD_USER + DASHBOARD_PASSWORD pair.
-    Re-read on every login so edits apply without a restart."""
-    users: dict[str, str] = {}
+      2. the DASHBOARD_USERS env var - comma-separated entries;
+      3. the legacy DASHBOARD_USER + DASHBOARD_PASSWORD pair (admin).
+    `scope` is 'admin' or a pipe-separated list of account names a
+    non-admin user may see. Re-read on every login so edits apply
+    without a restart."""
+    users: dict[str, _User] = {}
     try:
         if USERS_FILE.is_file():
             for line in USERS_FILE.read_text().splitlines():
@@ -123,20 +147,43 @@ def _load_users() -> dict[str, str]:
     legacy_user = os.environ.get("DASHBOARD_USER", "").strip()
     legacy_pass = os.environ.get("DASHBOARD_PASSWORD", "")
     if legacy_user and legacy_pass and legacy_user not in users:
-        users[legacy_user] = "plain:" + legacy_pass
+        users[legacy_user] = _User(
+            legacy_user, "plain:" + legacy_pass, True, frozenset())
     return users
 
 
 def _check_login(username: str, password: str) -> bool:
-    stored = _load_users().get(username)
-    if stored is None:
+    u = _load_users().get(username)
+    if u is None:
         # Spend comparable effort on an unknown user so response timing
         # does not reveal which usernames exist.
         _verify_pbkdf2(f"pbkdf2${PBKDF2_ITERATIONS}$00$00", password)
         return False
-    if stored.startswith("plain:"):
-        return hmac.compare_digest(stored[len("plain:"):], password)
-    return _verify_pbkdf2(stored, password)
+    if u.verifier.startswith("plain:"):
+        return hmac.compare_digest(u.verifier[len("plain:"):], password)
+    return _verify_pbkdf2(u.verifier, password)
+
+
+def _current_scope() -> tuple[bool, frozenset[str]]:
+    """(is_admin, allowed_account_names) for the logged-in user. An
+    unknown session yields no access."""
+    u = _load_users().get(session.get("user", ""))
+    if u is None:
+        return (False, frozenset())
+    return (u.admin, u.accounts)
+
+
+def _scope_clause(prefix: str = "AND") -> tuple[str, list]:
+    """SQL fragment + params restricting the `account` column to the
+    current user's scope. Empty string for admins; '<prefix> 1=0' for
+    a non-admin with no accounts."""
+    admin, accts = _current_scope()
+    if admin:
+        return ("", [])
+    if not accts:
+        return (f" {prefix} 1=0", [])
+    return (f" {prefix} account IN ({','.join('?' * len(accts))})",
+            list(accts))
 
 
 def _load_secret() -> str:
@@ -469,7 +516,7 @@ BASE = """<!doctype html>
   <a href="/events" {% if active=='events' %}class="active"{% endif %}>Events</a>
   <a href="/accounts" {% if active=='accounts' %}class="active"{% endif %}>Accounts</a>
   <span class="spacer"></span>
-  {% if user %}<span class="who">{{ user }}</span>
+  {% if user %}<span class="who">{{ user }}{% if is_admin %} &middot; admin{% endif %}</span>
   <a href="/logout">Log out</a>{% endif %}
 </nav>
 <main>
@@ -510,7 +557,7 @@ LOGIN = """<!doctype html>
 def render(title, active, body_html):
     return render_template_string(
         BASE, title=title, active=active, body=body_html,
-        user=session.get("user"),
+        user=session.get("user"), is_admin=_current_scope()[0],
     )
 
 
@@ -556,9 +603,14 @@ def logout():
 def summary():
     now = int(time.time())
     day = 86400
+    admin, _accts = _current_scope()
+    # sc: AND-fragment for queries that already have a WHERE; scw: the
+    # WHERE-style fragment for the account-less safe_mode query.
+    sc, sp = _scope_clause("AND")
+    scw, scwp = _scope_clause("WHERE")
     with _db() as c:
         def one(sql, params=()):
-            return c.execute(sql, params).fetchone()[0]
+            return c.execute(sql + sc, (*params, *sp)).fetchone()[0]
 
         scanned_24h = one(
             "SELECT COUNT(*) FROM events WHERE event='scan' AND ts>=?",
@@ -586,15 +638,16 @@ def summary():
         learn_ham_total = one(
             "SELECT COUNT(*) FROM events WHERE event='learn_ham'")
         safe_modes = c.execute(
-            "SELECT account, scope, reason FROM safe_mode").fetchall()
+            "SELECT account, scope, reason FROM safe_mode" + scw,
+            scwp).fetchall()
         last_learns = c.execute(
             "SELECT ts, account, event, message_id, detail FROM events "
-            "WHERE event IN ('learn_spam','learn_ham') "
-            "ORDER BY ts DESC LIMIT 15").fetchall()
+            "WHERE event IN ('learn_spam','learn_ham')" + sc
+            + " ORDER BY ts DESC LIMIT 15", sp).fetchall()
         scan_by_day = dict(c.execute(
             "SELECT strftime('%Y-%m-%d', ts, 'unixepoch', 'localtime') d, "
-            "COUNT(*) FROM events WHERE event='scan' AND ts>=? GROUP BY d",
-            (now - 14 * day,)).fetchall())
+            "COUNT(*) FROM events WHERE event='scan' AND ts>=?" + sc
+            + " GROUP BY d", (now - 14 * day, *sp)).fetchall())
 
     # Health banner -----------------------------------------------------
     problems = []
@@ -637,9 +690,12 @@ def summary():
         f'{series[0]} &rarr; {series[-1]} per day</div></div>'
     )
 
-    # rspamd ------------------------------------------------------------
-    stats = _rspamd_stats()
-    if stats:
+    # rspamd lifetime totals and the Bayes table are system-wide
+    # aggregates - admin only. Non-admins get just their scoped views.
+    rspamd_block = ""
+    bayes_block = ""
+    stats = _rspamd_stats() if admin else None
+    if admin and stats:
         actions = stats.get("actions") or {}
         uptime_s = stats.get("uptime") or 0
         days = uptime_s // 86400
@@ -713,12 +769,11 @@ def summary():
             f"<th class=num>Learns</th><th>Progress (min "
             f"{BAYES_MIN_LEARNS})</th><th>Status</th></tr>"
             + "".join(rows) + f"</table></div>{balance}</div>")
-    else:
+    elif admin:
         rspamd_block = (
             '<div class="card"><h2>rspamd</h2>'
             '<p class="muted">rspamd controller unreachable - lifetime '
             'totals and Bayes stats unavailable.</p></div>')
-        bayes_block = ""
 
     # safe-mode ---------------------------------------------------------
     if safe_modes:
@@ -765,15 +820,16 @@ def messages():
         where = "AND our_score BETWEEN 4 AND 8"
     elif band == "low":
         where = "AND our_score < 4"
+    sc, sp = _scope_clause("AND")
     with _db() as c:
         rows = c.execute(
             f"""
             SELECT account, message_id, last_seen, our_score, our_action,
                    current_folder, sender, subject, learned_as
               FROM messages
-             WHERE our_score IS NOT NULL {where}
+             WHERE our_score IS NOT NULL {where}{sc}
              ORDER BY last_seen DESC LIMIT 200
-            """).fetchall()
+            """, sp).fetchall()
     body_rows = "".join(
         f'<tr><td>{_fmt_ts(r["last_seen"])}</td>'
         f'<td>{_h(r["account"])}</td>'
@@ -826,14 +882,13 @@ def _event_table(rows) -> str:
 @app.route("/learned")
 @_requires_auth
 def learned():
+    sc, sp = _scope_clause("AND")
     with _db() as c:
         rows = c.execute(
-            """
-            SELECT ts, account, event, message_id, detail FROM events
-             WHERE event IN ('learn_spam','learn_ham','learn_giveup',
-                             'learn_failed')
-             ORDER BY ts DESC LIMIT 300
-            """).fetchall()
+            "SELECT ts, account, event, message_id, detail FROM events "
+            "WHERE event IN ('learn_spam','learn_ham','learn_giveup',"
+            "'learn_failed')" + sc + " ORDER BY ts DESC LIMIT 300",
+            sp).fetchall()
     body = (
         '<div class="card"><div class="tw"><table>'
         "<tr><th>When</th><th>Age</th><th>Account</th><th>Event</th>"
@@ -847,10 +902,11 @@ def learned():
 @app.route("/events")
 @_requires_auth
 def events():
+    sc, sp = _scope_clause("WHERE")
     with _db() as c:
         rows = c.execute(
-            "SELECT ts, account, event, message_id, detail FROM events "
-            "ORDER BY ts DESC LIMIT 300").fetchall()
+            "SELECT ts, account, event, message_id, detail FROM events"
+            + sc + " ORDER BY ts DESC LIMIT 300", sp).fetchall()
     body = (
         '<div class="card"><div class="tw"><table>'
         "<tr><th>When</th><th>Age</th><th>Account</th><th>Event</th>"
@@ -890,7 +946,10 @@ def accounts_view():
         for r in c.execute("SELECT account, scope FROM safe_mode"):
             safe.setdefault(r[0], []).append(r[1])
 
+    admin, accts = _current_scope()
     names = sorted(set(last) | set(safe))
+    if not admin:
+        names = [n for n in names if n in accts]
     body_rows = "".join(
         f"<tr><td>{_h(n)}</td>"
         f'<td>{_fmt_ts(last.get(n))}</td>'
@@ -958,7 +1017,18 @@ if __name__ == "__main__":
         raise SystemExit("passwords do not match")
     if not pw1:
         raise SystemExit("password must not be empty")
-    entry = f"{name}:{_hash_password(pw1)}"
+    raw_scope = input(
+        "access scope - 'admin' for everything, or the account name(s) "
+        "this user may see (comma-separated) [admin]: ").strip() or "admin"
+    if raw_scope.lower() == "admin":
+        scope = "admin"
+    else:
+        # Normalise to pipe-separated; pipe is the on-disk separator so
+        # the value survives the comma-delimited DASHBOARD_USERS env too.
+        scope = "|".join(
+            a.strip() for a in re.split(r"[|,]", raw_scope) if a.strip()
+        ) or "admin"
+    entry = f"{name}:{_hash_password(pw1)}:{scope}"
     try:
         lines = []
         if USERS_FILE.exists():

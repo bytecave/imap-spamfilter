@@ -485,15 +485,28 @@ docker exec -it spamfilter python dashboard.py
 ```
 
 It adds (or updates) the user in `state/dashboard_users` — one
-`name:hash` line per user, passwords pbkdf2-hashed, `#` comments
-allowed. The dashboard re-reads that file on every login, so adding
-or changing a user takes effect **without a restart**. You can edit
-the file by hand too.
+`username:hash:scope` line per user, passwords pbkdf2-hashed, `#`
+comments allowed. The dashboard re-reads that file on every login, so
+adding or changing a user takes effect **without a restart**. You can
+edit the file by hand too.
+
+**Access levels.** The helper also asks for a scope:
+
+- `admin` — sees everything: all accounts plus the system-wide rspamd
+  lifetime totals and Bayes stats.
+- one or more **account names** (the `name:` values from
+  `accounts.yml`) — a restricted user who sees only those accounts'
+  scans, learns, events and per-account stats, and not the global
+  rspamd section. Handy for letting a household member watch the
+  filter on their own mailbox. Usernames are free-form, so an email
+  address works fine as the login name.
+
+A line with no scope field defaults to `admin`.
 
 Two env-var alternatives also work, if you prefer config over a file:
-`DASHBOARD_USERS` (comma-separated `name:hash` pairs) and the legacy
-single-user `DASHBOARD_USER` + `DASHBOARD_PASSWORD` (plaintext). All
-three sources merge.
+`DASHBOARD_USERS` (comma-separated `username:hash:scope` entries) and
+the legacy single-user `DASHBOARD_USER` + `DASHBOARD_PASSWORD`
+(plaintext, admin). All three sources merge.
 
 The session signing secret is generated once into
 `state/dashboard_secret` and reused across restarts.
