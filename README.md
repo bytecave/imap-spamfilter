@@ -482,13 +482,15 @@ at a reverse proxy if you expose it beyond your LAN.
 Pages:
 
 - `/`         filter KPIs (24h / 7d) + rspamd lifetime totals
-              (scanned, spam/ham counts, action breakdown) +
-              Bayes statfile learn counts + active safe-mode +
-              recent learns
+              (scanned, spam/ham counts, fuzzy hashes, connections,
+              action breakdown) + Bayes statfile learn counts with
+              per-class active status and learn-balance check +
+              active safe-mode + recent learns
 - `/messages` last 200 scored msgs with score-band filter
 - `/learned`  last 300 learn / learn_failed / learn_giveup events
 - `/events`   tail of the full events table
-- `/accounts` per-account scan / learn / fail counts plus safe-mode
+- `/accounts` per-account scan / learn / fail counts, total spam &
+              ham learns, plus safe-mode
 
 ---
 

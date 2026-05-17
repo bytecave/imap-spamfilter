@@ -28,6 +28,9 @@ RSPAMD_CONTROLLER_URL = os.environ.get(
 
 DASHBOARD_USER = os.environ.get("DASHBOARD_USER", "")
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
+# Mirrors min_learns in rspamd/local.d/classifier-bayes.conf. A Bayes
+# class scores nothing until it reaches this many learns.
+BAYES_MIN_LEARNS = int(os.environ.get("BAYES_MIN_LEARNS", "200"))
 # Container-internal listen port is fixed. The orchestrator decides
 # what host port to map it to (e.g. 38080:8080 in compose / Unraid).
 DASHBOARD_PORT = 8080
@@ -225,6 +228,13 @@ def summary():
         days = uptime_s // 86400
         hours = (uptime_s % 86400) // 3600
         uptime_str = f"{days}d {hours}h" if days else f"{hours}h"
+        # /stat reports fuzzy_hashes as a {storage: count} map; older
+        # builds return a plain int. Sum the map, pass an int through.
+        fuzzy = stats.get("fuzzy_hashes")
+        if isinstance(fuzzy, dict):
+            fuzzy_total = sum(v for v in fuzzy.values() if isinstance(v, (int, float)))
+        else:
+            fuzzy_total = fuzzy if fuzzy is not None else "?"
         rspamd_block = f"""
 <h2>rspamd lifetime totals (since rspamd start, uptime {uptime_str})</h2>
 <div class="kpi-row">
@@ -232,6 +242,9 @@ def summary():
   <div class="kpi"><div class="label">Identified spam</div><div class="value">{stats.get('spam_count', '?')}</div></div>
   <div class="kpi"><div class="label">Identified ham</div><div class="value">{stats.get('ham_count', '?')}</div></div>
   <div class="kpi"><div class="label">Total learns</div><div class="value">{stats.get('total_learns', '?')}</div></div>
+  <div class="kpi"><div class="label">Fuzzy hashes</div><div class="value">{fuzzy_total}</div></div>
+  <div class="kpi"><div class="label">Connections</div><div class="value">{stats.get('connections', '?')}</div></div>
+  <div class="kpi"><div class="label">Control conns</div><div class="value">{stats.get('control_connections', '?')}</div></div>
   <div class="kpi"><div class="label">Reject</div><div class="value">{actions.get('reject', 0)}</div></div>
   <div class="kpi"><div class="label">Add header</div><div class="value">{actions.get('add header', 0)}</div></div>
   <div class="kpi"><div class="label">Greylist</div><div class="value">{actions.get('greylist', 0)}</div></div>
@@ -239,30 +252,60 @@ def summary():
 </div>"""
         statfiles = (stats.get("statfiles") or []) if isinstance(stats, dict) else []
         rows = []
+        learns_by_symbol = {}
         for sf in statfiles:
             # rspamd /stat field names vary by version: "revision" or
             # "learns" or "total" all crop up in the wild. Try them in
-            # priority order; show "?" if none present.
-            learns = (
-                sf.get("revision")
-                or sf.get("learns")
-                or sf.get("total")
-                or 0
-            )
-            size_bytes = sf.get("size") or sf.get("length") or 0
+            # priority order; show 0 if none present.
+            try:
+                learns = int(
+                    sf.get("revision")
+                    or sf.get("learns")
+                    or sf.get("total")
+                    or 0
+                )
+            except (TypeError, ValueError):
+                learns = 0
+            symbol = sf.get("symbol", "?")
+            learns_by_symbol[symbol] = learns
+            if learns >= BAYES_MIN_LEARNS:
+                status = '<span class="pillok">active</span>'
+            else:
+                status = (
+                    f'<span class="pillmid">needs '
+                    f'{BAYES_MIN_LEARNS - learns} more</span>'
+                )
             rows.append(
-                f"<tr><td>{sf.get('symbol','?')}</td>"
+                f"<tr><td>{symbol}</td>"
                 f"<td>{sf.get('users','?')}</td>"
                 f"<td>{learns}</td>"
-                f"<td>{size_bytes/1024/1024:.2f} MiB</td>"
-                f"<td>{sf.get('languages',0)}</td></tr>"
+                f"<td>{status}</td></tr>"
             )
+        # Heavy spam/ham learn imbalance biases the classifier; flag it.
+        spam_l = learns_by_symbol.get("BAYES_SPAM", 0)
+        ham_l = learns_by_symbol.get("BAYES_HAM", 0)
+        balance_note = ""
+        if spam_l and ham_l:
+            lo, hi = sorted((spam_l, ham_l))
+            ratio = hi / lo
+            skewed = ratio >= 3
+            cls = "pillmid" if skewed else "pillok"
+            direction = "ham-skewed" if ham_l > spam_l else "spam-skewed"
+            label = f"{direction} {ratio:.1f}:1" if skewed else f"balanced {ratio:.1f}:1"
+            balance_note = f'<p>Learn balance: <span class="{cls}">{label}</span>'
+            if skewed:
+                balance_note += (
+                    " &mdash; heavy skew biases the classifier; "
+                    "feed more of the lighter class"
+                )
+            balance_note += "</p>"
         bayes_block = (
             "<h2>rspamd Bayes</h2>"
             "<table><tr><th>Symbol</th><th>Users</th><th>Total learns</th>"
-            "<th>Size</th><th>Languages</th></tr>"
+            f"<th>Status (min {BAYES_MIN_LEARNS})</th></tr>"
             + "".join(rows)
             + "</table>"
+            + balance_note
         )
 
     safe_block = ""
@@ -438,6 +481,14 @@ def accounts_view():
                 "SELECT COUNT(*) FROM events WHERE account=? AND event LIKE 'learn_%' AND ts>=?",
                 (name, now - day),
             ).fetchone()[0]
+            spam_total = c.execute(
+                "SELECT COUNT(*) FROM events WHERE account=? AND event='learn_spam'",
+                (name,),
+            ).fetchone()[0]
+            ham_total = c.execute(
+                "SELECT COUNT(*) FROM events WHERE account=? AND event='learn_ham'",
+                (name,),
+            ).fetchone()[0]
             failed = c.execute(
                 "SELECT COUNT(*) FROM events WHERE account=? AND event='scan_failed' AND ts>=?",
                 (name, now - day),
@@ -446,21 +497,26 @@ def accounts_view():
                 "SELECT scope FROM safe_mode WHERE account=?", (name,)
             ).fetchall()
             safe_str = ",".join(s["scope"] for s in safe) or "-"
-            rows.append((name, last, scans_24h, learns_24h, failed, safe_str))
+            rows.append(
+                (name, last, scans_24h, learns_24h, spam_total, ham_total, failed, safe_str)
+            )
     body_rows = "".join(
         f'<tr><td>{n}</td>'
         f'<td>{_fmt_ts(l)}</td>'
         f'<td>{s}</td>'
         f'<td>{lr}</td>'
+        f'<td>{st}</td>'
+        f'<td>{ht}</td>'
         f'<td class="{"pillbad" if f else ""}">{f}</td>'
         f'<td>{sm}</td></tr>'
-        for (n, l, s, lr, f, sm) in rows
+        for (n, l, s, lr, st, ht, f, sm) in rows
     )
     body = f"""
 <table>
 <tr><th>Account</th><th>Last activity</th><th>Scans 24h</th>
-    <th>Learns 24h</th><th>Scan fails 24h</th><th>Safe-mode</th></tr>
-{body_rows or '<tr><td colspan=6 class=muted>(no accounts seen yet)</td></tr>'}
+    <th>Learns 24h</th><th>Spam learns total</th><th>Ham learns total</th>
+    <th>Scan fails 24h</th><th>Safe-mode</th></tr>
+{body_rows or '<tr><td colspan=8 class=muted>(no accounts seen yet)</td></tr>'}
 </table>
 """
     return render("Accounts", "accounts", body)
