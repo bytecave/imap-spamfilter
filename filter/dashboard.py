@@ -51,6 +51,7 @@ from waitress import serve
 STATE_DIR = Path(os.environ.get("STATE_DIR", "/state"))
 DB_PATH = STATE_DIR / "spamfilter.db"
 SECRET_PATH = STATE_DIR / "dashboard_secret"
+CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/accounts.yml"))
 RSPAMD_CONTROLLER_URL = os.environ.get(
     "RSPAMD_LEARN_URL", "http://spamfilter-rspamd:11334"
 )
@@ -1001,6 +1002,24 @@ def start() -> None:
     threading.Thread(target=_serve, name="dashboard", daemon=True).start()
 
 
+def _known_accounts() -> set[str] | None:
+    """Account names declared in accounts.yml, or None if the file
+    cannot be read or parsed. Used by the user-add helper to list and
+    validate scopes so a typo'd account name is caught immediately."""
+    try:
+        import yaml
+
+        raw = yaml.safe_load(CONFIG_PATH.read_text()) or {}
+        names = {
+            str(a["name"]).strip()
+            for a in (raw.get("accounts") or [])
+            if isinstance(a, dict) and a.get("name")
+        }
+        return names or None
+    except Exception:  # noqa: BLE001 - any failure: skip validation
+        return None
+
+
 if __name__ == "__main__":
     # Interactive helper: add (or update) a dashboard user. Writes the
     # state/dashboard_users file directly when it can; otherwise prints
@@ -1017,17 +1036,25 @@ if __name__ == "__main__":
         raise SystemExit("passwords do not match")
     if not pw1:
         raise SystemExit("password must not be empty")
+    known = _known_accounts()
+    if known:
+        print("known accounts:", ", ".join(sorted(known)))
     raw_scope = input(
         "access scope - 'admin' for everything, or the account name(s) "
         "this user may see (comma-separated) [admin]: ").strip() or "admin"
     if raw_scope.lower() == "admin":
         scope = "admin"
     else:
+        wanted = [a.strip() for a in re.split(r"[|,]", raw_scope) if a.strip()]
+        if known:
+            unknown = sorted(a for a in wanted if a not in known)
+            if unknown:
+                raise SystemExit(
+                    f"unknown account(s): {', '.join(unknown)} - not in "
+                    f"{CONFIG_PATH}. Known: {', '.join(sorted(known))}")
         # Normalise to pipe-separated; pipe is the on-disk separator so
         # the value survives the comma-delimited DASHBOARD_USERS env too.
-        scope = "|".join(
-            a.strip() for a in re.split(r"[|,]", raw_scope) if a.strip()
-        ) or "admin"
+        scope = "|".join(wanted) or "admin"
     entry = f"{name}:{_hash_password(pw1)}:{scope}"
     try:
         lines = []

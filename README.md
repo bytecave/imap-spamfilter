@@ -501,7 +501,9 @@ edit the file by hand too.
   filter on their own mailbox. Usernames are free-form, so an email
   address works fine as the login name.
 
-A line with no scope field defaults to `admin`.
+The helper lists the account names from `accounts.yml` and rejects an
+unknown one, so a typo cannot silently bind a user to nothing. A line
+with no scope field defaults to `admin`.
 
 Two env-var alternatives also work, if you prefer config over a file:
 `DASHBOARD_USERS` (comma-separated `username:hash:scope` entries) and
