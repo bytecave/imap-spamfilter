@@ -139,9 +139,13 @@ The script is idempotent and does all of the following:
 
 - Creates the user-defined `spamnet` Docker network
 - Creates the `/mnt/user/appdata/spamfilter/{redis,state,rspamd/data,rspamd/local.d}` layout
+  (the `redis/` and `rspamd/data/` dirs are owned by the images' internal uids, mode 750)
 - Downloads the rspamd `local.d/*` configs from this repo (only if missing)
 - Seeds `accounts.yml` from `accounts.yml.example` (only if missing)
-- Generates a random rspamd controller password into `state/controller.password` (only if missing)
+- Generates random passwords into `state/controller.password` (rspamd controller)
+  and `state/redis.password` (Redis auth), only if missing
+- Renders `worker-controller.inc`, the rspamd `redis.conf` client config, and the
+  Redis server config `redis.conf` with those passwords substituted in
 
 Set the schedule to **"At First Array Start Only"** and click **Run Script**
 once to bootstrap immediately. It'll re-run on every array start, so the
@@ -200,8 +204,11 @@ Expect:
 [your_name] connected, delimiter='.', mode=shadow
 ```
 
-Browse the rspamd web UI on `http://<unraid-ip>:11334`. Login password is
-the auto-generated value:
+The rspamd controller (port 11334) is **not** published to the host — the
+stack deliberately keeps it on the internal `spamnet` network only. To
+reach rspamd's own web UI, either add an `11334:11334` port mapping to the
+rspamd container yourself, or use the read-only dashboard (see below). The
+controller password, if you need it, is the auto-generated value:
 
 ```bash
 cat /mnt/user/appdata/spamfilter/state/controller.password
@@ -563,7 +570,8 @@ backups of that whole tree preserve:
 - Redis AOF + RDB (Bayes tokens — the actual training)
 - rspamd `/var/lib/rspamd` cache (incl. neural-meta weights, which take
   days of confident decisions to rebuild from scratch)
-- accounts.yml and the rspamd controller password
+- accounts.yml, the rspamd controller password, and the Redis password
+  (`state/controller.password`, `state/redis.password`)
 
 On Unraid, install the **Appdata Backup** Community App (by `KluthR`)
 and schedule it nightly. Set "Stop container before backup" for all
@@ -604,7 +612,9 @@ Restore is the reverse: stop the four containers, extract the tar over
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   ├── filter.py
+│   ├── dashboard.py
 │   └── bootstrap_train.py
+├── redis/                        # Redis server config template
 ├── rspamd/local.d/               # drop into /mnt/user/appdata/spamfilter/rspamd/local.d/
 └── unraid/                       # Unraid Docker templates (one per container)
     ├── redis.xml
@@ -613,6 +623,7 @@ Restore is the reverse: stop the four containers, extract the tar over
     └── spamfilter.xml
 ```
 
-`.env`, `accounts.yml`, `state/`, `redis/`, `rspamd/data/`, and the rendered
-`worker-controller.inc` are gitignored. Nothing in version control contains
-secrets.
+`.env`, `accounts.yml`, `state/`, `rspamd/data/`, the appdata `redis/` data
+dir, and the rendered secret-bearing configs (`worker-controller.inc`,
+`rspamd/local.d/redis.conf`, `redis/redis.conf`) are gitignored. Only the
+`*.template` files are tracked; nothing in version control contains secrets.

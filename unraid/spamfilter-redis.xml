@@ -20,11 +20,12 @@
   <TemplateURL>https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/main/unraid/spamfilter-redis.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/main/assets/icon.png</Icon>
   <ExtraParams>--log-opt max-size=50m --log-opt max-file=5</ExtraParams>
-  <PostArgs>redis-server --appendonly yes --appendfsync everysec --save 300 10 --save 60 10000 --maxmemory 1gb --maxmemory-policy noeviction</PostArgs>
+  <PostArgs>redis-server /usr/local/etc/redis/redis.conf</PostArgs>
   <CPUset/>
   <DateInstalled/>
   <DonateText/>
   <DonateLink/>
-  <Requires>Custom network `spamnet` must exist before install: open the Unraid console and run `docker network create spamnet`.</Requires>
+  <Requires>Run unraid/bootstrap.sh first: it creates the `spamnet` network, the appdata layout, and renders the Redis server config (including the auth password) that this container starts from.</Requires>
   <Config Name="Data dir" Target="/data" Default="/mnt/user/appdata/spamfilter/redis" Mode="rw" Description="Redis AOF/RDB files. Critical to back up - losing this means retraining Bayes from zero." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/spamfilter/redis</Config>
+  <Config Name="Server config" Target="/usr/local/etc/redis/redis.conf" Default="/mnt/user/appdata/spamfilter/redis.conf" Mode="ro" Description="Redis server config rendered by bootstrap.sh (persistence, memory cap, requirepass auth). Read-only." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/spamfilter/redis.conf</Config>
 </Container>

@@ -1,13 +1,15 @@
 """Read-only web dashboard for the imap-spamfilter.
 
-Disabled by default. Set DASHBOARD_PORT (and DASHBOARD_USER /
-DASHBOARD_PASSWORD for basic auth) to enable. Reads the SQLite state
-DB read-only and queries rspamd /stat for Bayes counts. Intended for
+Disabled by default. Set both DASHBOARD_USER and DASHBOARD_PASSWORD to
+enable it (basic auth is mandatory). Listens on a fixed internal port
+8080; the orchestrator maps a host port. Reads the SQLite state DB
+read-only and queries rspamd /stat for Bayes counts. Intended for
 LAN-only access behind a reverse proxy if TLS is wanted.
 """
 
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 import sqlite3
@@ -17,7 +19,8 @@ from functools import wraps
 from pathlib import Path
 
 import requests
-from flask import Flask, Response, abort, request, render_template_string
+from flask import Flask, Response, request, render_template_string
+from markupsafe import escape
 from waitress import serve
 
 STATE_DIR = Path(os.environ.get("STATE_DIR", "/state"))
@@ -54,11 +57,12 @@ def _requires_auth(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
         auth = request.authorization
-        if (
-            not auth
-            or auth.username != DASHBOARD_USER
-            or auth.password != DASHBOARD_PASSWORD
-        ):
+        # Constant-time compare on both fields, evaluated unconditionally,
+        # so response timing does not leak how much of the credential
+        # matched.
+        user_ok = hmac.compare_digest((auth.username or "") if auth else "", DASHBOARD_USER)
+        pass_ok = hmac.compare_digest((auth.password or "") if auth else "", DASHBOARD_PASSWORD)
+        if not (auth and user_ok and pass_ok):
             return Response(
                 "Authentication required.\n",
                 401,
@@ -67,6 +71,14 @@ def _requires_auth(view):
         return view(*args, **kwargs)
 
     return wrapped
+
+
+def _h(value) -> str:
+    """HTML-escape a value for safe interpolation into the f-string page
+    bodies below. None renders as an empty string. Mail-derived values
+    (subject, sender, Message-Id, ...) are attacker-controlled, so every
+    such interpolation must pass through here."""
+    return str(escape("" if value is None else value))
 
 
 def _fmt_ts(ts):
@@ -111,6 +123,22 @@ def _rspamd_stats() -> dict | None:
         return r.json()
     except requests.RequestException:
         return None
+
+
+# ----- error handling -------------------------------------------------------
+
+
+@app.errorhandler(sqlite3.Error)
+def _on_db_error(ex: sqlite3.Error) -> Response:
+    """A locked DB, a missing table, or a mid-read failure should render a
+    plain 503 instead of leaking a stack trace through Flask's default
+    handler."""
+    log.error("dashboard DB error: %s", ex)
+    return Response(
+        "Dashboard temporarily unavailable (state DB error).\n",
+        503,
+        mimetype="text/plain",
+    )
 
 
 # ----- templates ------------------------------------------------------------
@@ -276,8 +304,8 @@ def summary():
                     f'{BAYES_MIN_LEARNS - learns} more</span>'
                 )
             rows.append(
-                f"<tr><td>{symbol}</td>"
-                f"<td>{sf.get('users','?')}</td>"
+                f"<tr><td>{_h(symbol)}</td>"
+                f"<td>{_h(sf.get('users','?'))}</td>"
                 f"<td>{learns}</td>"
                 f"<td>{status}</td></tr>"
             )
@@ -311,7 +339,8 @@ def summary():
     safe_block = ""
     if safe_modes:
         rows = "".join(
-            f"<tr><td>{r['account']}</td><td>{r['scope']}</td><td>{r['reason']}</td></tr>"
+            f"<tr><td>{_h(r['account'])}</td><td>{_h(r['scope'])}</td>"
+            f"<td>{_h(r['reason'])}</td></tr>"
             for r in safe_modes
         )
         safe_block = (
@@ -324,10 +353,10 @@ def summary():
         safe_block = '<h2>Safe-mode</h2><p class="muted">No active safe-mode entries.</p>'
 
     learns_rows = "".join(
-        f"<tr><td>{_fmt_ts(r['ts'])}</td><td>{r['account']}</td>"
+        f"<tr><td>{_fmt_ts(r['ts'])}</td><td>{_h(r['account'])}</td>"
         f"<td>{'<span class=pillbad>spam</span>' if r['event']=='learn_spam' else '<span class=pillok>ham</span>'}</td>"
-        f"<td><code>{(r['message_id'] or '')[:60]}</code></td>"
-        f"<td class=muted>{r['detail'] or ''}</td></tr>"
+        f"<td><code>{_h((r['message_id'] or '')[:60])}</code></td>"
+        f"<td class=muted>{_h(r['detail'])}</td></tr>"
         for r in last_learns
     )
     learns_block = (
@@ -379,13 +408,13 @@ def messages():
         ).fetchall()
     body_rows = "".join(
         f'<tr><td>{_fmt_ts(r["last_seen"])}</td>'
-        f'<td>{r["account"]}</td>'
+        f'<td>{_h(r["account"])}</td>'
         f'<td class="{_score_class(r["our_score"])}">{_fmt_score(r["our_score"])}</td>'
-        f'<td>{r["our_action"] or "-"}</td>'
-        f'<td>{r["current_folder"] or "-"}</td>'
-        f'<td>{r["learned_as"] or "-"}</td>'
-        f'<td><span class="muted">{(r["sender"] or "")[:50]}</span></td>'
-        f'<td><span class="subj">{(r["subject"] or "")}</span></td>'
+        f'<td>{_h(r["our_action"] or "-")}</td>'
+        f'<td>{_h(r["current_folder"] or "-")}</td>'
+        f'<td>{_h(r["learned_as"] or "-")}</td>'
+        f'<td><span class="muted">{_h((r["sender"] or "")[:50])}</span></td>'
+        f'<td><span class="subj">{_h(r["subject"])}</span></td>'
         "</tr>"
         for r in rows
     )
@@ -417,10 +446,10 @@ def learned():
         ).fetchall()
     body_rows = "".join(
         f'<tr><td>{_fmt_ts(r["ts"])}</td>'
-        f'<td>{r["account"]}</td>'
-        f'<td>{("<span class=pillbad>spam</span>" if r["event"]=="learn_spam" else "<span class=pillok>ham</span>" if r["event"]=="learn_ham" else "<span class=pillmid>"+r["event"]+"</span>")}</td>'
-        f'<td><code>{(r["message_id"] or "")[:80]}</code></td>'
-        f'<td class="muted">{r["detail"] or ""}</td></tr>'
+        f'<td>{_h(r["account"])}</td>'
+        f'<td>{("<span class=pillbad>spam</span>" if r["event"]=="learn_spam" else "<span class=pillok>ham</span>" if r["event"]=="learn_ham" else "<span class=pillmid>"+_h(r["event"])+"</span>")}</td>'
+        f'<td><code>{_h((r["message_id"] or "")[:80])}</code></td>'
+        f'<td class="muted">{_h(r["detail"])}</td></tr>'
         for r in rows
     )
     body = f"""
@@ -445,10 +474,10 @@ def events():
         ).fetchall()
     body_rows = "".join(
         f'<tr><td>{_fmt_ts(r["ts"])}</td>'
-        f'<td>{r["account"]}</td>'
-        f'<td>{r["event"]}</td>'
-        f'<td><code>{(r["message_id"] or "")[:80]}</code></td>'
-        f'<td class="muted">{r["detail"] or ""}</td></tr>'
+        f'<td>{_h(r["account"])}</td>'
+        f'<td>{_h(r["event"])}</td>'
+        f'<td><code>{_h((r["message_id"] or "")[:80])}</code></td>'
+        f'<td class="muted">{_h(r["detail"])}</td></tr>'
         for r in rows
     )
     body = f"""
@@ -501,14 +530,14 @@ def accounts_view():
                 (name, last, scans_24h, learns_24h, spam_total, ham_total, failed, safe_str)
             )
     body_rows = "".join(
-        f'<tr><td>{n}</td>'
+        f'<tr><td>{_h(n)}</td>'
         f'<td>{_fmt_ts(l)}</td>'
         f'<td>{s}</td>'
         f'<td>{lr}</td>'
         f'<td>{st}</td>'
         f'<td>{ht}</td>'
         f'<td class="{"pillbad" if f else ""}">{f}</td>'
-        f'<td>{sm}</td></tr>'
+        f'<td>{_h(sm)}</td></tr>'
         for (n, l, s, lr, st, ht, f, sm) in rows
     )
     body = f"""

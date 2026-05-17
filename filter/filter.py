@@ -1070,14 +1070,18 @@ def scan_inbox(
                 db.upsert_message(msgid, fmap["inbox"], sender, subject)
 
             # Detect Junk -> Inbox revert (user moved a message we
-            # previously placed in Junk, or a message that lived in Junk,
-            # back to Inbox).
+            # previously placed in Junk, or one that lived in Junk, back
+            # to Inbox). An IMAP move preserves the \Seen flag, so a
+            # reverted message the user already read in Junk arrives
+            # *seen*; gating this on `uid in unseen` would silently drop
+            # the most common ham signal. prior_folder flips to inbox
+            # after the upsert above, so this branch fires only once.
             reverted = prior_folder == fmap["junk"]
-            if reverted and uid in unseen:
-                # User intent confirmed by $NotJunk keyword skips grace.
+            if reverted:
                 if NOTJUNK_KEYWORD in flags:
+                    # User intent confirmed by $NotJunk keyword skips grace.
                     try_learn(db, log, acc, raw, msgid, "ham", reason="revert+notjunk_kw")
-                else:
+                elif prior["learned_as"] != "ham" and prior["pending_learn"] != "ham":
                     # Schedule ham learn after grace.
                     with db.tx():
                         db.update_message(msgid, pending_learn="ham", pending_learn_at=int(time.time()))
@@ -1174,8 +1178,14 @@ def execute_due_moves(client: IMAPClient, db: Db, log: logging.Logger, acc: Acco
     if not to_move:
         return
 
-    # Cap one batch to avoid blasting if many accumulated.
-    to_move = to_move[: acc.max_moves_per_hour]
+    # Cap this batch to the hourly quota still available. check_rate
+    # above only confirms at least one slot is free; without subtracting
+    # the moves already recorded this hour, a single batch could move a
+    # further max_moves_per_hour on top of them.
+    remaining = acc.max_moves_per_hour - db.rate_count("move", 3600)
+    to_move = to_move[: max(0, remaining)]
+    if not to_move:
+        return
     try:
         client.move(to_move, fmap["junk"])
     except IMAPClientError as ex:
@@ -1226,8 +1236,13 @@ def poll_junk(client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fma
         # Filter put it here: nothing to learn. Skip.
         if prior is not None and prior["our_action"] == "moved_to_junk":
             continue
-        # New-to-us-or-was-elsewhere: user must have moved this Inbox -> Junk.
-        if prior_folder == fmap["inbox"] or prior is None:
+        # Learn spam only from a confirmed user move Inbox -> Junk, i.e.
+        # we have a prior row showing the message was in Inbox. Mail with
+        # no prior row (delivered straight to Junk by the provider's own
+        # filter, never seen in Inbox) is NOT an explicit user move and
+        # is deliberately not learned - that would train Bayes on the
+        # provider's verdict, including its false positives.
+        if prior_folder == fmap["inbox"]:
             if JUNK_KEYWORD in flags:
                 try_learn(db, log, acc, raw, msgid, "spam", reason="user_move+junk_kw")
             else:

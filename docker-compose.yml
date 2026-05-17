@@ -16,23 +16,11 @@ services:
     logging: *log-rotate
     volumes:
       - /mnt/user/appdata/spamfilter/redis:/data
-    command:
-      - redis-server
-      - --appendonly
-      - "yes"
-      - --appendfsync
-      - everysec
-      - --save
-      - "300 10"
-      - --save
-      - "60 10000"
-      # Cap memory so a runaway never starves the host, and refuse new
-      # writes on OOM instead of silently evicting Bayes tokens with LRU
-      # (which would slowly destroy classifier accuracy).
-      - --maxmemory
-      - "1gb"
-      - --maxmemory-policy
-      - noeviction
+      # Server config (persistence, memory cap, requirepass) is rendered
+      # by unraid/bootstrap.sh from redis/redis.conf.template - run that
+      # script before bringing the stack up.
+      - /mnt/user/appdata/spamfilter/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
     networks: [spamnet]
 
   spamfilter-unbound:

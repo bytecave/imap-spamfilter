@@ -1,0 +1,23 @@
+# Redis server config for the imap-spamfilter stack. Rendered by
+# unraid/bootstrap.sh (requirepass substituted from the generated
+# state/redis.password) and mounted read-only into the redis container,
+# which starts with `redis-server /usr/local/etc/redis/redis.conf`.
+dir /data
+
+# Persistence: AOF + RDB so the Bayes corpus survives restarts.
+appendonly yes
+appendfsync everysec
+save 300 10
+save 60 10000
+
+# Cap memory so a runaway never starves the host, and refuse new writes
+# on OOM instead of evicting Bayes tokens with an LRU policy (which
+# would slowly destroy classifier accuracy).
+maxmemory 1gb
+maxmemory-policy noeviction
+
+# Auth. rspamd connects with the matching password from its rendered
+# local.d/redis.conf. Redis is not published to any host port; this
+# guards the Bayes corpus against a compromised peer on the docker
+# network.
+requirepass "${REDIS_PASSWORD}"

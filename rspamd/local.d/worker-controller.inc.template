@@ -1,7 +1,12 @@
-# Rendered at container start by envsubst (see docker-compose.yml).
-# Source of truth for the password is RSPAMD_PASSWORD in .env.
+# Rendered by unraid/bootstrap.sh (sed substitution) into
+# worker-controller.inc before the rspamd container starts. Source of
+# truth for the password is the generated state/controller.password.
 bind_socket = "*:11334";
 password = "${RSPAMD_PASSWORD}";
 enable_password = "${RSPAMD_PASSWORD}";
-secure_ip = "172.16.0.0/12";
+# Only the controller's own loopback is password-exempt. Every other
+# client (the filter container, the dashboard) authenticates with the
+# Password header. Do NOT add the docker bridge range (172.16.0.0/12)
+# here: that would grant password-free privileged controller access to
+# any container on the network.
 secure_ip = "127.0.0.1";
