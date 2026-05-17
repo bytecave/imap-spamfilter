@@ -884,6 +884,17 @@ def first_recipient(raw: bytes, fallback: str) -> str:
     return fallback
 
 
+def fetch_chunked(
+    client: IMAPClient, uids: list[int], items: list[bytes]
+) -> Iterator[tuple[int, dict]]:
+    """Yield (uid, data) pairs, FETCHing `uids` in SCAN_FETCH_CHUNK-sized
+    batches. A whole-folder FETCH of message bodies can otherwise hold
+    every body in memory at once; chunking caps peak use at one batch."""
+    for start in range(0, len(uids), SCAN_FETCH_CHUNK):
+        batch = client.fetch(uids[start : start + SCAN_FETCH_CHUNK], items)
+        yield from batch.items()
+
+
 # ---------------------------------------------------------------------------
 # Per-account worker
 # ---------------------------------------------------------------------------
@@ -1217,44 +1228,51 @@ def poll_junk(client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fma
         # Still process any time-due pending learns from DB even with no junk content.
         process_pending_learns(client, db, log, acc, fmap)
         return
-    fetched = client.fetch(uids, [b"BODY.PEEK[]", b"FLAGS"])
-    for uid, data in fetched.items():
+    # Chunk the FETCH so a very large Junk folder does not pull every
+    # message body into memory at once (same rationale as scan_inbox).
+    for chunk_start in range(0, len(uids), SCAN_FETCH_CHUNK):
         if SHUTDOWN.is_set():
             return
-        raw = data.get(b"BODY[]") or data.get(b"BODY.PEEK[]")
-        if not raw:
-            continue
-        flags = _kw(data.get(b"FLAGS", ()))
-        msgid, subject, sender = parse_envelope(raw)
-        if not msgid:
-            continue
-        prior = db.get_message(msgid)
-        prior_folder = prior["current_folder"] if prior else None
-        with db.tx():
-            db.upsert_message(msgid, fmap["junk"], sender, subject)
+        chunk = uids[chunk_start : chunk_start + SCAN_FETCH_CHUNK]
+        fetched = client.fetch(chunk, [b"BODY.PEEK[]", b"FLAGS"])
+        for uid, data in fetched.items():
+            if SHUTDOWN.is_set():
+                return
+            raw = data.get(b"BODY[]") or data.get(b"BODY.PEEK[]")
+            if not raw:
+                continue
+            flags = _kw(data.get(b"FLAGS", ()))
+            msgid, subject, sender = parse_envelope(raw)
+            if not msgid:
+                continue
+            prior = db.get_message(msgid)
+            prior_folder = prior["current_folder"] if prior else None
+            with db.tx():
+                db.upsert_message(msgid, fmap["junk"], sender, subject)
 
-        # Filter put it here: nothing to learn. Skip.
-        if prior is not None and prior["our_action"] == "moved_to_junk":
-            continue
-        # Learn spam only from a confirmed user move Inbox -> Junk, i.e.
-        # we have a prior row showing the message was in Inbox. Mail with
-        # no prior row (delivered straight to Junk by the provider's own
-        # filter, never seen in Inbox) is NOT an explicit user move and
-        # is deliberately not learned - that would train Bayes on the
-        # provider's verdict, including its false positives.
-        if prior_folder == fmap["inbox"]:
-            if JUNK_KEYWORD in flags:
-                try_learn(db, log, acc, raw, msgid, "spam", reason="user_move+junk_kw")
-            else:
-                with db.tx():
-                    if not prior or prior["pending_learn"] != "spam":
-                        db.update_message(
-                            msgid,
-                            pending_learn="spam",
-                            pending_learn_at=int(time.time()),
-                            moved_to_junk_at=int(time.time()),
-                        )
-                        db.log_event("pending_spam", msgid, detail="user move inbox->junk")
+            # Filter put it here: nothing to learn. Skip.
+            if prior is not None and prior["our_action"] == "moved_to_junk":
+                continue
+            # Learn spam only from a confirmed user move Inbox -> Junk,
+            # i.e. we have a prior row showing the message was in Inbox.
+            # Mail with no prior row (delivered straight to Junk by the
+            # provider's own filter, never seen in Inbox) is NOT an
+            # explicit user move and is deliberately not learned - that
+            # would train Bayes on the provider's verdict, including its
+            # false positives.
+            if prior_folder == fmap["inbox"]:
+                if JUNK_KEYWORD in flags:
+                    try_learn(db, log, acc, raw, msgid, "spam", reason="user_move+junk_kw")
+                else:
+                    with db.tx():
+                        if not prior or prior["pending_learn"] != "spam":
+                            db.update_message(
+                                msgid,
+                                pending_learn="spam",
+                                pending_learn_at=int(time.time()),
+                                moved_to_junk_at=int(time.time()),
+                            )
+                            db.log_event("pending_spam", msgid, detail="user move inbox->junk")
 
     process_pending_learns(client, db, log, acc, fmap)
 
@@ -1346,12 +1364,11 @@ def _drain_train_folder(
     if not uids:
         return
     uids = uids[: acc.max_train_per_run]
-    fetched = client.fetch(uids, [b"BODY.PEEK[]"])
     learned_uids: list[int] = []
     moved_msgids: list[str] = []
     log_tag = f"drain_train_{kind}"
     reason = f"train_{kind}_folder"
-    for uid, data in fetched.items():
+    for uid, data in fetch_chunked(client, uids, [b"BODY.PEEK[]"]):
         if SHUTDOWN.is_set():
             return
         raw = data.get(b"BODY[]") or data.get(b"BODY.PEEK[]")
@@ -1556,9 +1573,20 @@ def _sweep_folder_to_trash(
 
 
 def account_loop(acc: Account) -> None:
+    """Per-account thread entry point. Owns the thread's Db handle and
+    closes it even if the worker raises, so a crash + watchdog restart
+    does not leak a SQLite connection per cycle."""
+    db = Db(acc.name)
+    try:
+        _run_account(acc, db)
+    finally:
+        db.close()
+        logging.getLogger(acc.name).info("thread exiting")
+
+
+def _run_account(acc: Account, db: Db) -> None:
     log = logging.getLogger(acc.name)
     threading.current_thread().name = acc.name
-    db = Db(acc.name)
     state = AccountState()
     backoff = RECONNECT_MIN_BACKOFF
 
@@ -1721,9 +1749,6 @@ def account_loop(acc: Account) -> None:
             time.sleep(1)
         backoff = min(backoff * 2, RECONNECT_MAX_BACKOFF)
 
-    db.close()
-    log.info("thread exiting")
-
 
 # ---------------------------------------------------------------------------
 # main
@@ -1759,9 +1784,12 @@ def main() -> int:
     install_signal_handlers()
 
     # Optional read-only dashboard (Flask + waitress). Disabled unless
-    # both DASHBOARD_USER and DASHBOARD_PASSWORD are set. Listens on a
-    # fixed internal port 8080; the orchestrator chooses the host port.
-    if os.environ.get("DASHBOARD_USER") and os.environ.get("DASHBOARD_PASSWORD"):
+    # at least one dashboard user is configured - either DASHBOARD_USERS
+    # or the legacy DASHBOARD_USER + DASHBOARD_PASSWORD pair. Listens on
+    # a fixed internal port 8080; the orchestrator chooses the host port.
+    if os.environ.get("DASHBOARD_USERS") or (
+        os.environ.get("DASHBOARD_USER") and os.environ.get("DASHBOARD_PASSWORD")
+    ):
         try:
             import dashboard as _dashboard
             _dashboard.start()

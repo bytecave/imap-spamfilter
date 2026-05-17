@@ -465,34 +465,62 @@ sufficient.
 ## Web dashboard (optional)
 
 A small read-only Flask dashboard is available for at-a-glance stats:
-recent scans, recent learns, per-account activity, rspamd Bayes
-counts, and active safe-mode entries. **Off by default.** No actions,
-no buttons — read-only.
+a health banner, filter KPIs, a 14-day scan trend, rspamd Bayes
+progress, recent scans/learns, and per-account activity. Responsive,
+dark-mode aware. **Off by default.** No actions, no buttons —
+read-only.
 
 The container always listens internally on **port 8080**; pick any
 free host port in your orchestrator's port mapping.
 
-Enable on Unraid: in the spamfilter container template set
-`DASHBOARD_USER=admin` and `DASHBOARD_PASSWORD=<random>`, set the
-host port in the "Dashboard port" mapping, Apply. Open
-`http://<unraid-ip>:<host-port>/`.
+### Login
 
-Enable via docker-compose: uncomment `DASHBOARD_USER` and
-`DASHBOARD_PASSWORD` under `spamfilter:` in `docker-compose.yml`
-plus the `ports:` block, fill in basic-auth creds in `.env`,
-recreate the container.
+Access is gated by a real login form with a server-side session
+(no more browser-cached basic auth). Configure users with the
+`DASHBOARD_USERS` env var — comma-separated `name:hash` pairs.
+Generate a hash by running the bundled helper inside the container:
 
-The dashboard refuses to start unless **both** basic-auth env vars
-are set. There is no TLS in the dashboard itself — terminate HTTPS
-at a reverse proxy if you expose it beyond your LAN.
+```bash
+docker exec -it spamfilter python dashboard.py
+# prompts for a username + password, prints a  name:hash  line
+```
+
+Put one or more of those lines into `DASHBOARD_USERS`:
+
+```
+DASHBOARD_USERS=alice:pbkdf2$600000$...,bob:pbkdf2$600000$...
+```
+
+Passwords are pbkdf2-hashed; the plaintext never lands in env or
+config. The signing secret for sessions is generated once into
+`state/dashboard_secret` and reused across restarts.
+
+A legacy single-user mode still works: set `DASHBOARD_USER` +
+`DASHBOARD_PASSWORD` (plaintext) instead of `DASHBOARD_USERS`.
+Prefer `DASHBOARD_USERS`.
+
+Enable on Unraid: in the spamfilter container template fill in
+`DASHBOARD_USERS`, set the host port in the "Dashboard port"
+mapping, Apply. Open `http://<unraid-ip>:<host-port>/`.
+
+Enable via docker-compose: uncomment `DASHBOARD_USERS` under
+`spamfilter:` in `docker-compose.yml` plus the `ports:` block,
+set it in `.env`, recreate the container.
+
+The dashboard refuses to start unless at least one user is
+configured. There is no TLS in the dashboard itself — terminate
+HTTPS at a reverse proxy if you expose it beyond your LAN. If the
+proxy forwards HTTPS, set `DASHBOARD_COOKIE_SECURE=1` so the
+session cookie is marked Secure.
 
 Pages:
 
-- `/`         filter KPIs (24h / 7d) + rspamd lifetime totals
+- `/`         health banner + filter KPIs (24h / 7d, spam-catch rate)
+              + 14-day scan-per-day trend + rspamd lifetime totals
               (scanned, spam/ham counts, fuzzy hashes, connections,
-              action breakdown) + Bayes statfile learn counts with
-              per-class active status and learn-balance check +
-              active safe-mode + recent learns
+              action breakdown) + Bayes learn progress bars with
+              per-class status and learn-balance check + active
+              safe-mode + recent learns
 - `/messages` last 200 scored msgs with score-band filter
 - `/learned`  last 300 learn / learn_failed / learn_giveup events
 - `/events`   tail of the full events table
