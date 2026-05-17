@@ -16,10 +16,11 @@ services:
     logging: *log-rotate
     volumes:
       - /mnt/user/appdata/spamfilter/redis:/data
-      # Server config (persistence, memory cap, requirepass) is rendered
-      # by unraid/bootstrap.sh from redis/redis.conf.template - run that
-      # script before bringing the stack up.
-      - /mnt/user/appdata/spamfilter/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      # Server config dir (persistence, memory cap, requirepass) is
+      # rendered into redis-config/ by unraid/bootstrap.sh - run that
+      # script before bringing the stack up. A directory is mounted,
+      # not the single file, so Unraid's template path mapping is happy.
+      - /mnt/user/appdata/spamfilter/redis-config:/usr/local/etc/redis:ro
     command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
     networks: [spamnet]
 

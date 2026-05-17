@@ -27,5 +27,5 @@
   <DonateLink/>
   <Requires>Run unraid/bootstrap.sh first: it creates the `spamnet` network, the appdata layout, and renders the Redis server config (including the auth password) that this container starts from.</Requires>
   <Config Name="Data dir" Target="/data" Default="/mnt/user/appdata/spamfilter/redis" Mode="rw" Description="Redis AOF/RDB files. Critical to back up - losing this means retraining Bayes from zero." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/spamfilter/redis</Config>
-  <Config Name="Server config" Target="/usr/local/etc/redis/redis.conf" Default="/mnt/user/appdata/spamfilter/redis.conf" Mode="ro" Description="Redis server config rendered by bootstrap.sh (persistence, memory cap, requirepass auth). Read-only." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/spamfilter/redis.conf</Config>
+  <Config Name="Server config dir" Target="/usr/local/etc/redis" Default="/mnt/user/appdata/spamfilter/redis-config" Mode="ro" Description="Directory holding the bootstrap-rendered redis.conf (persistence, memory cap, requirepass auth). Read-only. Run bootstrap.sh before installing." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/spamfilter/redis-config</Config>
 </Container>

@@ -120,18 +120,26 @@ chmod 640 "$REDIS_PW_FILE"
 REDIS_PW="$(cat "$REDIS_PW_FILE")"
 
 # Redis server config: fetch the template if missing, substitute the
-# password. Owned by the redis uid + 0640 so only that container reads it.
+# password into a dedicated DIRECTORY. The redis container bind-mounts
+# that directory (not the single file) - Unraid handles directory
+# mounts reliably; single-file bind mounts it does not.
 REDIS_CONF_TEMPLATE="$APP/redis.conf.template"
-REDIS_CONF="$APP/redis.conf"
+REDIS_CONF_DIR="$APP/redis-config"
 if [ ! -f "$REDIS_CONF_TEMPLATE" ]; then
   echo "fetching redis/redis.conf.template"
   curl -fsSL "$BASE/redis/redis.conf.template" -o "$REDIS_CONF_TEMPLATE"
 fi
-sed "s|\${REDIS_PASSWORD}|${REDIS_PW}|g" "$REDIS_CONF_TEMPLATE" > "$REDIS_CONF"
+mkdir -p "$REDIS_CONF_DIR"
+sed "s|\${REDIS_PASSWORD}|${REDIS_PW}|g" \
+    "$REDIS_CONF_TEMPLATE" > "$REDIS_CONF_DIR/redis.conf"
 chown "$APP_UID:$APP_GID" "$REDIS_CONF_TEMPLATE"
 chmod 644 "$REDIS_CONF_TEMPLATE"
-chown "$REDIS_UID:$REDIS_UID" "$REDIS_CONF"
-chmod 640 "$REDIS_CONF"
+# Dir + file owned by the redis uid, private (only that container reads it).
+chown -R "$REDIS_UID:$REDIS_UID" "$REDIS_CONF_DIR"
+chmod 750 "$REDIS_CONF_DIR"
+chmod 640 "$REDIS_CONF_DIR/redis.conf"
+# Drop the pre-directory loose copy an earlier bootstrap may have left.
+rm -f "$APP/redis.conf"
 
 # rspamd redis client config: render the password into redis.conf from
 # redis.conf.template (downloaded with the other rspamd local.d files).

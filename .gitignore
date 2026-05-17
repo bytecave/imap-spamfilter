@@ -6,8 +6,9 @@ rspamd/local.d/redis.conf
 
 # Per-host data (Unraid appdata)
 state/
-# redis/ holds the appdata data dir and the rendered server config;
-# the checked-in server config template must stay tracked.
+redis-config/
+# redis/ holds the appdata data dir; the checked-in server config
+# template must stay tracked.
 redis/*
 !redis/redis.conf.template
 rspamd/data/

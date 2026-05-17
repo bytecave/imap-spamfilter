@@ -138,14 +138,14 @@ paste in the contents of
 The script is idempotent and does all of the following:
 
 - Creates the user-defined `spamnet` Docker network
-- Creates the `/mnt/user/appdata/spamfilter/{redis,state,rspamd/data,rspamd/local.d}` layout
+- Creates the `/mnt/user/appdata/spamfilter/{redis,redis-config,state,rspamd/data,rspamd/local.d}` layout
   (the `redis/` and `rspamd/data/` dirs are owned by the images' internal uids, mode 750)
 - Downloads the rspamd `local.d/*` configs from this repo (only if missing)
 - Seeds `accounts.yml` from `accounts.yml.example` (only if missing)
 - Generates random passwords into `state/controller.password` (rspamd controller)
   and `state/redis.password` (Redis auth), only if missing
 - Renders `worker-controller.inc`, the rspamd `redis.conf` client config, and the
-  Redis server config `redis.conf` with those passwords substituted in
+  Redis server config into `redis-config/redis.conf` with those passwords substituted in
 
 Set the schedule to **"At First Array Start Only"** and click **Run Script**
 once to bootstrap immediately. It'll re-run on every array start, so the
@@ -624,6 +624,7 @@ Restore is the reverse: stop the four containers, extract the tar over
 ```
 
 `.env`, `accounts.yml`, `state/`, `rspamd/data/`, the appdata `redis/` data
-dir, and the rendered secret-bearing configs (`worker-controller.inc`,
-`rspamd/local.d/redis.conf`, `redis/redis.conf`) are gitignored. Only the
-`*.template` files are tracked; nothing in version control contains secrets.
+dir and `redis-config/`, and the rendered secret-bearing configs
+(`worker-controller.inc`, `rspamd/local.d/redis.conf`) are gitignored. Only
+the `*.template` files are tracked; nothing in version control contains
+secrets.
