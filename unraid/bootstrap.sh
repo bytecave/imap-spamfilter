@@ -1,12 +1,14 @@
 #!/bin/bash
-# imap-spamfilter Unraid bootstrap.
-# Idempotent: safe to run any number of times. Set as User Scripts entry
-# scheduled "At First Array Start Only" so the appdata layout and the
-# shared `spamnet` Docker network are always in place before the
-# spamfilter-* containers start.
+# imap-spamfilter bootstrap.
+# Idempotent: safe to run any number of times. On Unraid, set it as a
+# User Scripts entry scheduled "At First Array Start Only" so the
+# appdata layout and the shared `spamnet` Docker network are always in
+# place before the spamfilter-* containers start. For a non-Unraid
+# host, run it once with SPAMFILTER_APP pointing at your appdata path.
 set -euo pipefail
 
-APP=/mnt/user/appdata/spamfilter
+# Appdata root. Override with SPAMFILTER_APP on non-Unraid hosts.
+APP="${SPAMFILTER_APP:-/mnt/user/appdata/spamfilter}"
 BASE=https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/main
 # Unraid container convention: appdata files belong to nobody:users.
 APP_UID=99

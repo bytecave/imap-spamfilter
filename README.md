@@ -3,6 +3,7 @@
 Docker-based IMAP spam filter for any IMAP server that supports IDLE.
 Designed to run 24/7 on Unraid (templates included) or any Linux host with
 Docker. Per-account modes, move-based Bayes training, never deletes mail.
+Optional read-only web dashboard with per-user access levels.
 Multi-arch image (`linux/amd64`, `linux/arm64`).
 
 ## Architecture
@@ -267,24 +268,30 @@ generic Linux servers, Raspberry Pi 4/5, ARM mini-PCs, etc.
 git clone https://github.com/marcelverdult/imap-spamfilter
 cd imap-spamfilter
 
-# pick a host path you want appdata under, and edit docker-compose.yml
-# to use it instead of /mnt/user/appdata/spamfilter (sed works fine):
-APP=/srv/spamfilter
-sed -i "s|/mnt/user/appdata/spamfilter|$APP|g" docker-compose.yml
+# Pick a host path for appdata and point docker-compose.yml at it:
+export SPAMFILTER_APP=/srv/spamfilter
+sed -i "s|/mnt/user/appdata/spamfilter|$SPAMFILTER_APP|g" docker-compose.yml
 
-mkdir -p $APP/{redis,state,rspamd/data,rspamd/local.d}
-cp rspamd/local.d/* $APP/rspamd/local.d/
-cp accounts.yml.example $APP/accounts.yml
-chmod 600 $APP/accounts.yml
-# edit $APP/accounts.yml + the fuzzy_check.conf encryption key
+# Run the bootstrap: it creates the directory layout, downloads and
+# renders the rspamd + redis configs, and generates the rspamd
+# controller and Redis passwords. SPAMFILTER_APP tells it where.
+bash unraid/bootstrap.sh
 
-cp .env.example .env
-# edit .env: set RSPAMD_PASSWORD
+# Edit the seeded account list (the only file you must touch by hand):
+nano $SPAMFILTER_APP/accounts.yml
 
 docker compose pull        # use the prebuilt ghcr image
 docker compose up -d
 docker compose logs -f spamfilter
 ```
+
+`bootstrap.sh` is the single source of the rendered configs — the
+rspamd `worker-controller.inc`, the rspamd Redis client config, and
+the Redis server config — so the compose stack just mounts what it
+produced, exactly like the Unraid path. Re-run it after pulling config
+changes from the repo. `.env` is optional: leave `RSPAMD_PASSWORD`
+unset and the filter reads the bootstrap-generated
+`state/controller.password`.
 
 The compose file matches the Unraid layout one-for-one, so backups,
 docs, and the SQLite audit queries all apply the same way. Pick one
@@ -448,17 +455,23 @@ Everything stateful lives under `/mnt/user/appdata/spamfilter/`:
 /mnt/user/appdata/spamfilter/
 ├── accounts.yml                # account list and per-account overrides (SECRETS)
 ├── redis/                      # Bayes corpus, fuzzy hashes, neural weights
+├── redis-config/redis.conf     # rendered Redis server config (bootstrap.sh)
 ├── state/
 │   ├── spamfilter.db           # SQLite audit log + state
-│   └── heartbeat               # epoch updated each loop (healthcheck source)
+│   ├── heartbeat               # epoch updated each loop (healthcheck source)
+│   ├── controller.password     # generated rspamd controller password
+│   ├── redis.password          # generated Redis password
+│   ├── dashboard_secret        # generated dashboard session secret
+│   └── dashboard_users         # dashboard logins (present once the dashboard is used)
 └── rspamd/
-    ├── local.d/                # rspamd configs (you populate from this repo)
+    ├── local.d/                # rspamd configs (downloaded + rendered by bootstrap.sh)
     └── data/                   # rspamd-managed caches
 ```
 
-Back up `redis/`, `state/`, and `accounts.yml`. Skip `rspamd/data/` (rebuilds
-itself). Unraid's built-in **CA Backup** plugin pointed at the appdata path is
-sufficient.
+Back up `redis/`, `state/`, and `accounts.yml`. Skip `rspamd/data/` and
+`redis-config/` (both regenerate — the latter is re-rendered by
+`bootstrap.sh` from `state/redis.password`). Unraid's built-in **CA
+Backup** plugin pointed at the appdata path is sufficient.
 
 ---
 
@@ -628,7 +641,8 @@ Restore is the reverse: stop the four containers, extract the tar over
 - **No allowlist.** Intentional. rspamd's DKIM/SPF symbols already give
   negative score to aligned mail. Fix misclassifications by training, not
   by allowlisting.
-- **No web UI for accounts.** All inspection via SQLite or the rspamd UI.
+- **Dashboard is read-only.** It shows activity; it has no controls to
+  move, learn, or change config. Inspect deeper via SQLite if needed.
 - **IDLE re-issued every `idle_timeout` (default 1500s).** Lower it if your
   server drops idle connections faster.
 - **No multi-host coordination.** Don't run two filter instances against
@@ -653,11 +667,12 @@ Restore is the reverse: stop the four containers, extract the tar over
 │   ├── dashboard.py
 │   └── bootstrap_train.py
 ├── redis/                        # Redis server config template
-├── rspamd/local.d/               # drop into /mnt/user/appdata/spamfilter/rspamd/local.d/
-└── unraid/                       # Unraid Docker templates (one per container)
-    ├── redis.xml
-    ├── unbound.xml
-    ├── rspamd.xml
+├── rspamd/local.d/               # rspamd config templates + static configs
+└── unraid/                       # bootstrap.sh + Unraid Docker templates
+    ├── bootstrap.sh
+    ├── spamfilter-redis.xml
+    ├── spamfilter-unbound.xml
+    ├── spamfilter-rspamd.xml
     └── spamfilter.xml
 ```
 
