@@ -1784,11 +1784,17 @@ def main() -> int:
     install_signal_handlers()
 
     # Optional read-only dashboard (Flask + waitress). Disabled unless
-    # at least one dashboard user is configured - either DASHBOARD_USERS
-    # or the legacy DASHBOARD_USER + DASHBOARD_PASSWORD pair. Listens on
-    # a fixed internal port 8080; the orchestrator chooses the host port.
-    if os.environ.get("DASHBOARD_USERS") or (
-        os.environ.get("DASHBOARD_USER") and os.environ.get("DASHBOARD_PASSWORD")
+    # at least one dashboard user is configured - via the
+    # state/dashboard_users file, the DASHBOARD_USERS env var, or the
+    # legacy DASHBOARD_USER + DASHBOARD_PASSWORD pair. dashboard.start()
+    # makes the final call; this gate just avoids importing Flask when
+    # the dashboard is clearly unused. Listens on a fixed internal port
+    # 8080; the orchestrator chooses the host port.
+    if (
+        os.environ.get("DASHBOARD_USERS")
+        or (os.environ.get("DASHBOARD_USER")
+            and os.environ.get("DASHBOARD_PASSWORD"))
+        or (STATE_DIR / "dashboard_users").is_file()
     ):
         try:
             import dashboard as _dashboard

@@ -90,16 +90,36 @@ def _verify_pbkdf2(stored: str, password: str) -> bool:
         return False
 
 
+USERS_FILE = STATE_DIR / "dashboard_users"
+
+
+def _parse_user_line(raw: str, users: dict[str, str]) -> None:
+    name, sep, verifier = raw.partition(":")
+    if name.strip() and sep and verifier.strip():
+        users[name.strip()] = verifier.strip()
+
+
 def _load_users() -> dict[str, str]:
-    """Map username -> verifier. Verifier is a pbkdf2 hash string, or
-    'plain:<password>' for the legacy single-user env vars."""
+    """Map username -> verifier (a pbkdf2 hash, or 'plain:<password>'
+    for the legacy env vars). Sources, lowest precedence first:
+      1. the state/dashboard_users file - one `name:hash` per line,
+         `#` comments and blank lines ignored;
+      2. the DASHBOARD_USERS env var - comma-separated `name:hash`;
+      3. the legacy DASHBOARD_USER + DASHBOARD_PASSWORD pair.
+    Re-read on every login so edits apply without a restart."""
     users: dict[str, str] = {}
-    raw = os.environ.get("DASHBOARD_USERS", "").strip()
-    if raw:
-        for entry in raw.split(","):
-            name, sep, verifier = entry.strip().partition(":")
-            if name and sep and verifier:
-                users[name.strip()] = verifier.strip()
+    try:
+        if USERS_FILE.is_file():
+            for line in USERS_FILE.read_text().splitlines():
+                s = line.strip()
+                if s and not s.startswith("#"):
+                    _parse_user_line(s, users)
+    except OSError as ex:
+        logging.getLogger("dashboard").warning(
+            "could not read %s: %s", USERS_FILE, ex)
+    for entry in os.environ.get("DASHBOARD_USERS", "").split(","):
+        if entry.strip():
+            _parse_user_line(entry.strip(), users)
     legacy_user = os.environ.get("DASHBOARD_USER", "").strip()
     legacy_pass = os.environ.get("DASHBOARD_PASSWORD", "")
     if legacy_user and legacy_pass and legacy_user not in users:
@@ -107,11 +127,8 @@ def _load_users() -> dict[str, str]:
     return users
 
 
-USERS = _load_users()
-
-
 def _check_login(username: str, password: str) -> bool:
-    stored = USERS.get(username)
+    stored = _load_users().get(username)
     if stored is None:
         # Spend comparable effort on an unknown user so response timing
         # does not reveal which usernames exist.
@@ -903,15 +920,17 @@ def accounts_view():
 def start() -> None:
     """Spin up the dashboard. Caller decides whether to invoke (see
     filter.py main()); we refuse only if no users are configured."""
-    if not USERS:
+    users = _load_users()
+    if not users:
         logging.getLogger("dashboard").error(
-            "no dashboard users configured (set DASHBOARD_USERS, or "
-            "DASHBOARD_USER + DASHBOARD_PASSWORD); refusing to start"
+            "no dashboard users configured (add to %s, or set "
+            "DASHBOARD_USERS / DASHBOARD_USER+DASHBOARD_PASSWORD); "
+            "refusing to start", USERS_FILE
         )
         return
     logging.getLogger("dashboard").info(
         "starting on 0.0.0.0:%d (%d user(s): %s)",
-        DASHBOARD_PORT, len(USERS), ", ".join(sorted(USERS)),
+        DASHBOARD_PORT, len(users), ", ".join(sorted(users)),
     )
 
     def _serve():
@@ -924,17 +943,37 @@ def start() -> None:
 
 
 if __name__ == "__main__":
-    # Interactive helper: hash a password for the DASHBOARD_USERS env var.
+    # Interactive helper: add (or update) a dashboard user. Writes the
+    # state/dashboard_users file directly when it can; otherwise prints
+    # a line for the DASHBOARD_USERS env var.
     import getpass
 
     name = input("username: ").strip()
-    if not name or ":" in name or "," in name:
-        raise SystemExit("username must be non-empty and contain no ':' or ','")
+    if not name or ":" in name or "," in name or name.startswith("#"):
+        raise SystemExit(
+            "username must be non-empty with no ':' ',' or leading '#'")
     pw1 = getpass.getpass("password: ")
     pw2 = getpass.getpass("repeat:   ")
     if pw1 != pw2:
         raise SystemExit("passwords do not match")
     if not pw1:
         raise SystemExit("password must not be empty")
-    print(f"\n{name}:{_hash_password(pw1)}\n")
-    print("Append that to DASHBOARD_USERS (comma-separate multiple users).")
+    entry = f"{name}:{_hash_password(pw1)}"
+    try:
+        lines = []
+        if USERS_FILE.exists():
+            for ln in USERS_FILE.read_text().splitlines():
+                s = ln.strip()
+                if (s and not s.startswith("#")
+                        and s.split(":", 1)[0].strip() == name):
+                    continue  # replace any existing entry for this user
+                lines.append(ln)
+        lines.append(entry)
+        USERS_FILE.write_text("\n".join(lines) + "\n")
+        USERS_FILE.chmod(0o600)
+        print(f"\nsaved user '{name}' to {USERS_FILE}")
+        print("no restart needed - the dashboard re-reads it on each login.")
+    except OSError as ex:
+        print(f"\ncould not write {USERS_FILE} ({ex}).")
+        print("add this line to the DASHBOARD_USERS env var instead:\n")
+        print(entry)

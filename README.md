@@ -476,42 +476,37 @@ free host port in your orchestrator's port mapping.
 ### Login
 
 Access is gated by a real login form with a server-side session
-(no more browser-cached basic auth). Configure users with the
-`DASHBOARD_USERS` env var — comma-separated `name:hash` pairs.
-Generate a hash by running the bundled helper inside the container:
+(no more browser-cached basic auth). Add users with the bundled
+helper inside the container:
 
 ```bash
 docker exec -it spamfilter python dashboard.py
-# prompts for a username + password, prints a  name:hash  line
+# prompts for a username + password, writes state/dashboard_users
 ```
 
-Put one or more of those lines into `DASHBOARD_USERS`:
+It adds (or updates) the user in `state/dashboard_users` — one
+`name:hash` line per user, passwords pbkdf2-hashed, `#` comments
+allowed. The dashboard re-reads that file on every login, so adding
+or changing a user takes effect **without a restart**. You can edit
+the file by hand too.
 
-```
-DASHBOARD_USERS=alice:pbkdf2$600000$...,bob:pbkdf2$600000$...
-```
+Two env-var alternatives also work, if you prefer config over a file:
+`DASHBOARD_USERS` (comma-separated `name:hash` pairs) and the legacy
+single-user `DASHBOARD_USER` + `DASHBOARD_PASSWORD` (plaintext). All
+three sources merge.
 
-Passwords are pbkdf2-hashed; the plaintext never lands in env or
-config. The signing secret for sessions is generated once into
+The session signing secret is generated once into
 `state/dashboard_secret` and reused across restarts.
 
-A legacy single-user mode still works: set `DASHBOARD_USER` +
-`DASHBOARD_PASSWORD` (plaintext) instead of `DASHBOARD_USERS`.
-Prefer `DASHBOARD_USERS`.
+The dashboard starts once at least one user exists (file or env). On
+Unraid set the host port in the "Dashboard port" mapping and Apply;
+via docker-compose uncomment the `ports:` block. Open
+`http://<host>:<port>/`.
 
-Enable on Unraid: in the spamfilter container template fill in
-`DASHBOARD_USERS`, set the host port in the "Dashboard port"
-mapping, Apply. Open `http://<unraid-ip>:<host-port>/`.
-
-Enable via docker-compose: uncomment `DASHBOARD_USERS` under
-`spamfilter:` in `docker-compose.yml` plus the `ports:` block,
-set it in `.env`, recreate the container.
-
-The dashboard refuses to start unless at least one user is
-configured. There is no TLS in the dashboard itself — terminate
-HTTPS at a reverse proxy if you expose it beyond your LAN. If the
-proxy forwards HTTPS, set `DASHBOARD_COOKIE_SECURE=1` so the
-session cookie is marked Secure.
+There is no TLS in the dashboard itself — terminate HTTPS at a
+reverse proxy if you expose it beyond your LAN. If the proxy forwards
+HTTPS, set `DASHBOARD_COOKIE_SECURE=1` so the session cookie is
+marked Secure.
 
 Pages:
 
