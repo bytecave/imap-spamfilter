@@ -19,12 +19,14 @@ from functools import wraps
 from pathlib import Path
 
 import requests
-from flask import Flask, Response, request, render_template_string
+from flask import Flask, Response, request, render_template_string, send_file
 from markupsafe import escape
 from waitress import serve
 
 STATE_DIR = Path(os.environ.get("STATE_DIR", "/state"))
 DB_PATH = STATE_DIR / "spamfilter.db"
+# Project logo, shipped into the image next to this module (see Dockerfile).
+FAVICON_PATH = Path(__file__).with_name("favicon.png")
 RSPAMD_CONTROLLER_URL = os.environ.get(
     "RSPAMD_LEARN_URL", "http://spamfilter-rspamd:11334"
 )
@@ -148,6 +150,8 @@ BASE = """<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
 <title>{{ title }} - spamfilter</title>
+<link rel="icon" type="image/png" href="/favicon.png">
+<link rel="apple-touch-icon" href="/favicon.png">
 <style>
 body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
        margin: 0; background: #f4f4f4; color: #222; }
@@ -207,6 +211,14 @@ def render(title, active, body_html):
 
 
 # ----- routes ---------------------------------------------------------------
+
+
+@app.route("/favicon.png")
+@app.route("/favicon.ico")
+def favicon():
+    """Serve the project logo as the favicon. No auth - it is only the
+    logo, and browsers request favicons without credentials."""
+    return send_file(FAVICON_PATH, mimetype="image/png", max_age=86400)
 
 
 @app.route("/")
