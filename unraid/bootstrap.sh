@@ -17,18 +17,18 @@ docker network create spamnet 2>/dev/null || true
 
 # 2. Directory layout under appdata.
 # - Most dirs owned by nobody:users (Unraid appdata convention).
-# - redis/ and rspamd/data/ are owned by the official images' internal
-#   uids (redis 999, rspamd _rspamd 102) and kept private (750) rather
-#   than world-writable (777), so a stray host process cannot tamper
-#   with the Bayes corpus or rspamd's runtime state.
+# - redis/ and rspamd/data/ are owned (recursively) by the official
+#   images' internal uids (redis 999, rspamd _rspamd 11333) and kept
+#   private (750) rather than world-writable (777), so a stray host
+#   process cannot tamper with the Bayes corpus or rspamd's state.
 # - state/ stays 755 (only the filter writes, runs as 99:100).
-REDIS_UID=999
-RSPAMD_UID=102
+REDIS_UID=999      # uid of the redis user in redis:*-alpine
+RSPAMD_UID=11333   # uid of _rspamd in rspamd/rspamd
 mkdir -p "$APP"/{redis,state,rspamd/data,rspamd/local.d}
 chown "$APP_UID:$APP_GID" "$APP" "$APP/state" "$APP/rspamd" "$APP/rspamd/local.d"
 chmod 755 "$APP" "$APP/state" "$APP/rspamd" "$APP/rspamd/local.d"
-chown "$REDIS_UID:$REDIS_UID" "$APP/redis"
-chown "$RSPAMD_UID:$RSPAMD_UID" "$APP/rspamd/data"
+chown -R "$REDIS_UID:$REDIS_UID" "$APP/redis"
+chown -R "$RSPAMD_UID:$RSPAMD_UID" "$APP/rspamd/data"
 chmod 750 "$APP/redis" "$APP/rspamd/data"
 
 # 3. rspamd local.d configs (download only what's missing)
