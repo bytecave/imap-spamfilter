@@ -825,14 +825,14 @@ def messages():
     with _db() as c:
         rows = c.execute(
             f"""
-            SELECT account, message_id, last_seen, our_score, our_action,
-                   current_folder, sender, subject, learned_as
+            SELECT account, message_id, last_seen, received_at, our_score,
+                   our_action, current_folder, sender, subject, learned_as
               FROM messages
              WHERE our_score IS NOT NULL {where}{sc}
-             ORDER BY last_seen DESC LIMIT 200
+             ORDER BY COALESCE(received_at, last_seen) DESC LIMIT 200
             """, sp).fetchall()
     body_rows = "".join(
-        f'<tr><td>{_fmt_ts(r["last_seen"])}</td>'
+        f'<tr><td>{_fmt_ts(r["received_at"] or r["last_seen"])}</td>'
         f'<td>{_h(r["account"])}</td>'
         f'<td class="num {_score_class(r["our_score"])}">'
         f'{_fmt_score(r["our_score"])}</td>'

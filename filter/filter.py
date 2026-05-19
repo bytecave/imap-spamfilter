@@ -360,6 +360,7 @@ CREATE TABLE IF NOT EXISTS messages (
     pending_learn_at   INTEGER,
     sender             TEXT,
     subject            TEXT,
+    received_at        INTEGER,      -- IMAP INTERNALDATE (unix); NULL if unknown
     PRIMARY KEY (account, message_id)
 );
 
@@ -411,6 +412,16 @@ def init_db() -> None:
     with sqlite3.connect(DB_PATH) as conn:
         conn.executescript("PRAGMA journal_mode=WAL;")
         conn.executescript(SCHEMA)
+        _migrate(conn)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after the original schema. CREATE TABLE IF
+    NOT EXISTS never alters an existing table, so new columns need an
+    explicit ADD COLUMN on databases created before they were added."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(messages)")}
+    if "received_at" not in cols:
+        conn.execute("ALTER TABLE messages ADD COLUMN received_at INTEGER")
 
 
 class Db:
@@ -454,19 +465,28 @@ class Db:
         )
         return cur.fetchone()
 
-    def upsert_message(self, msgid: str, folder: str, sender: str, subject: str) -> None:
+    def upsert_message(
+        self,
+        msgid: str,
+        folder: str,
+        sender: str,
+        subject: str,
+        received_at: int | None = None,
+    ) -> None:
         now = int(time.time())
         self.conn.execute(
             """
-            INSERT INTO messages(account, message_id, first_seen, last_seen, current_folder, sender, subject)
-            VALUES(?,?,?,?,?,?,?)
+            INSERT INTO messages(account, message_id, first_seen, last_seen,
+                                 current_folder, sender, subject, received_at)
+            VALUES(?,?,?,?,?,?,?,?)
             ON CONFLICT(account, message_id) DO UPDATE SET
                 last_seen=excluded.last_seen,
                 current_folder=excluded.current_folder,
                 sender=COALESCE(messages.sender, excluded.sender),
-                subject=COALESCE(messages.subject, excluded.subject)
+                subject=COALESCE(messages.subject, excluded.subject),
+                received_at=COALESCE(messages.received_at, excluded.received_at)
             """,
-            (self.account, msgid, now, now, folder, sender, subject),
+            (self.account, msgid, now, now, folder, sender, subject, received_at),
         )
 
     # Whitelist of message-table columns the rest of the filter is
@@ -895,6 +915,18 @@ def parse_envelope(raw: bytes) -> tuple[str | None, str, str]:
         return (None, "", "")
 
 
+def _internaldate_ts(data: dict) -> int | None:
+    """Convert an IMAP FETCH INTERNALDATE value to a unix timestamp.
+    IMAPClient yields it as a datetime; return None when absent or unparseable."""
+    dt = data.get(b"INTERNALDATE")
+    if dt is None:
+        return None
+    try:
+        return int(dt.timestamp())
+    except (AttributeError, OverflowError, OSError, ValueError):
+        return None
+
+
 def first_recipient(raw: bytes, fallback: str) -> str:
     try:
         msg = email.message_from_bytes(raw, policy=email.policy.compat32)
@@ -1099,7 +1131,7 @@ def scan_inbox(
         if SHUTDOWN.is_set():
             return
         chunk = candidates[chunk_start : chunk_start + SCAN_FETCH_CHUNK]
-        fetched = client.fetch(chunk, [b"BODY.PEEK[]", b"FLAGS"])
+        fetched = client.fetch(chunk, [b"BODY.PEEK[]", b"FLAGS", b"INTERNALDATE"])
         for uid, data in fetched.items():
             if SHUTDOWN.is_set():
                 return
@@ -1115,7 +1147,8 @@ def scan_inbox(
             prior = db.get_message(msgid)
             prior_folder = prior["current_folder"] if prior else None
             with db.tx():
-                db.upsert_message(msgid, fmap["inbox"], sender, subject)
+                db.upsert_message(msgid, fmap["inbox"], sender, subject,
+                                  _internaldate_ts(data))
 
             # Detect Junk -> Inbox revert (user moved a message we
             # previously placed in Junk, or one that lived in Junk, back
@@ -1271,7 +1304,7 @@ def poll_junk(client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fma
         if SHUTDOWN.is_set():
             return
         chunk = uids[chunk_start : chunk_start + SCAN_FETCH_CHUNK]
-        fetched = client.fetch(chunk, [b"BODY.PEEK[]", b"FLAGS"])
+        fetched = client.fetch(chunk, [b"BODY.PEEK[]", b"FLAGS", b"INTERNALDATE"])
         for uid, data in fetched.items():
             if SHUTDOWN.is_set():
                 return
@@ -1285,7 +1318,8 @@ def poll_junk(client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fma
             prior = db.get_message(msgid)
             prior_folder = prior["current_folder"] if prior else None
             with db.tx():
-                db.upsert_message(msgid, fmap["junk"], sender, subject)
+                db.upsert_message(msgid, fmap["junk"], sender, subject,
+                                  _internaldate_ts(data))
 
             # Filter put it here: nothing to learn. Skip.
             if prior is not None and prior["our_action"] == "moved_to_junk":
@@ -1426,7 +1460,7 @@ def _drain_train_folder(
     moved_msgids: list[str] = []
     log_tag = f"drain_train_{kind}"
     reason = f"train_{kind}_folder"
-    for uid, data in fetch_chunked(client, uids, [b"BODY.PEEK[]"]):
+    for uid, data in fetch_chunked(client, uids, [b"BODY.PEEK[]", b"INTERNALDATE"]):
         if SHUTDOWN.is_set():
             return
         raw = data.get(b"BODY[]") or data.get(b"BODY.PEEK[]")
@@ -1446,7 +1480,8 @@ def _drain_train_folder(
         else:
             synthetic = False
             with db.tx():
-                db.upsert_message(msgid, folder, sender, subject)
+                db.upsert_message(msgid, folder, sender, subject,
+                                  _internaldate_ts(data))
         ok = try_learn(db, log, acc, raw, msgid, kind, reason=reason)
         if ok:
             learned_uids.append(uid)
