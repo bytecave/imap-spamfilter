@@ -97,9 +97,11 @@ jobs:
               ET.parse(f); print(f, 'OK')
           PY
 
-  # Keep the Actions history small: after a build, delete every
-  # completed run of this workflow except the 5 most recent. Skipped
-  # on pull requests so a PR run never prunes main's history.
+  # Keep the Actions history small: after a build, prune completed
+  # runs down to the 4 most recent. The run doing the pruning is still
+  # in progress (so not in the completed list); once it finishes the
+  # history holds 5. Skipped on pull requests so a PR run never prunes
+  # main's history.
   cleanup:
     needs: [filter, lint]
     if: ${{ always() && github.event_name != 'pull_request' }}
@@ -114,7 +116,7 @@ jobs:
           gh run list --repo "$GITHUB_REPOSITORY" --workflow build.yml \
             --status completed --limit 1000 \
             --json databaseId --jq '.[].databaseId' \
-            | tail -n +6 \
+            | tail -n +5 \
             | while read -r id; do
                 echo "deleting run $id"
                 gh run delete --repo "$GITHUB_REPOSITORY" "$id" || true
