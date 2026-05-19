@@ -1693,7 +1693,15 @@ def _run_account(acc: Account, db: Db) -> None:
                             setattr(acc, key, remapped)
             acc.folder_map = build_folder_map(acc, delim)
             ensure_folders(client, log, acc.folder_map)
-            log.info("connected, delimiter=%r, mode=%s", delim, acc.mode)
+            idle_cap = client.has_capability("IDLE")
+            log.info("connected, delimiter=%r, mode=%s, IMAP IDLE=%s",
+                     delim, acc.mode, "yes" if idle_cap else "no")
+            if not idle_cap:
+                poll_s = min(acc.idle_timeout, max(30, acc.junk_poll_interval))
+                log.warning(
+                    "server %s does not advertise IMAP IDLE; new mail is "
+                    "detected by the %ds poll, not instant push",
+                    acc.imap_host, poll_s)
             backoff = RECONNECT_MIN_BACKOFF
 
             while not SHUTDOWN.is_set():

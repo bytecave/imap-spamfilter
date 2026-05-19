@@ -381,7 +381,7 @@ user's mailbox.
 
 | Key | Default | Notes |
 | --- | --- | --- |
-| `move_grace_seconds` | `60` | delay between flag and move (mode=move) |
+| `move_grace_seconds` | `60` | delay between flag and move (mode=move); `0` = move instantly |
 | `learn_grace_seconds` | `300` | undo window before any Bayes update |
 | `idle_timeout` | `1500` | IMAP IDLE re-issue interval (must be < 30 min) |
 | `poll_interval` | `600` | fallback poll when IDLE not supported |

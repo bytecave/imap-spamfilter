@@ -29,6 +29,8 @@ accounts:
     user: you@your-domain.example
     password: "REPLACE_ME"
     # mode: shadow     # default; uncomment to set or change
+    # move_grace_seconds: 0   # mode=move only; 0 = move spam out
+    #                         # instantly (use once Bayes is trained)
     # bayes_user: shared-pool   # optional; see below
 
 # Shared Bayes across multiple of your own accounts:
