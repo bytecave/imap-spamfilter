@@ -96,3 +96,26 @@ jobs:
           for f in sorted(glob.glob('unraid/*.xml')):
               ET.parse(f); print(f, 'OK')
           PY
+
+  # Keep the Actions history small: after a build, delete every
+  # completed run of this workflow except the 5 most recent. Skipped
+  # on pull requests so a PR run never prunes main's history.
+  cleanup:
+    needs: [filter, lint]
+    if: ${{ always() && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Delete old workflow runs (keep last 5)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run list --repo "$GITHUB_REPOSITORY" --workflow build.yml \
+            --status completed --limit 1000 \
+            --json databaseId --jq '.[].databaseId' \
+            | tail -n +6 \
+            | while read -r id; do
+                echo "deleting run $id"
+                gh run delete --repo "$GITHUB_REPOSITORY" "$id" || true
+              done
