@@ -95,14 +95,15 @@ def main() -> int:
                 print(f"[dry-run] would learn-{args.kind}: uid={uid} subj={short!r}")
                 ok_count += 1
                 continue
-            if rspamd_learn(raw, args.kind, user=acc.bayes_user or acc.user):
+            outcome = rspamd_learn(raw, args.kind, user=acc.bayes_user or acc.user)
+            if outcome in ("learned", "already", "declined"):
                 ok_count += 1
                 learned_uids.append(uid)
                 if ok_count % 25 == 0:
                     print(f"  learned {ok_count}/{len(uids)} so far")
             else:
                 fail_count += 1
-                print(f"  FAILED uid={uid} msgid={msgid}")
+                print(f"  FAILED uid={uid} msgid={msgid} ({outcome})")
 
         dt = time.time() - t0
         print(f"done: learned={ok_count} failed={fail_count} in {dt:.1f}s")

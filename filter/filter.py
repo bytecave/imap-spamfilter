@@ -703,8 +703,19 @@ def rspamd_scan(
         return None
 
 
-def rspamd_learn(raw: bytes, kind: str, user: str) -> bool:
-    """POST to /learnspam or /learnham. Accept 200 and 208 (already learned).
+def rspamd_learn(raw: bytes, kind: str, user: str) -> str:
+    """POST to /learnspam or /learnham; classify the controller's reply.
+
+    Returns one of:
+      * 'learned'  - HTTP 200, a fresh learn committed to Bayes;
+      * 'already'  - HTTP 208, the message was already learned;
+      * 'declined' - HTTP 204: rspamd processed the request and learned
+        nothing (too few tokens, or the message is already in that
+        class). Re-POSTing the identical bytes always yields the same
+        result, so the caller must treat this as terminal, not retry it;
+      * 'error'    - a network failure or any other status (5xx, or a
+        4xx such as a wrong controller password). Transient or operator-
+        fixable; the caller may retry, subject to its own cap.
 
     `user` becomes the classifier user for per-user Bayes
     (`users_enabled = true`) by prepending a `Delivered-To: <user>` header
@@ -720,9 +731,21 @@ def rspamd_learn(raw: bytes, kind: str, user: str) -> bool:
     body = f"Delivered-To: {user}\r\n".encode() + raw
     try:
         resp = requests.post(url, data=body, headers=headers, timeout=HTTP_TIMEOUT)
-    except requests.RequestException:
-        return False
-    return resp.status_code in (200, 208)
+    except requests.RequestException as ex:
+        logging.getLogger("filter").warning("rspamd learn POST failed: %s", ex)
+        return "error"
+    if resp.status_code == 200:
+        return "learned"
+    if resp.status_code == 208:
+        return "already"
+    if resp.status_code == 204:
+        return "declined"
+    # Any other status: log it so an unexpected reply (or a misconfigured
+    # controller password) is visible, and let the caller retry.
+    logging.getLogger("filter").warning(
+        "rspamd learn(%s) unexpected HTTP %s: %s",
+        kind, resp.status_code, (resp.text or "").strip()[:200])
+    return "error"
 
 
 # ---------------------------------------------------------------------------
@@ -1007,10 +1030,24 @@ def try_learn(
                 return False
     if not check_rate(db, log, "learn", acc.max_learns_per_hour):
         return False
-    if not rspamd_learn(raw, kind, user=acc.bayes_user or acc.user):
+    outcome = rspamd_learn(raw, kind, user=acc.bayes_user or acc.user)
+    if outcome == "error":
         log.warning("rspamd learn(%s) failed for %s", kind, msgid)
         db.log_event("learn_failed", msgid, detail=kind)
         return False
+    if outcome == "declined":
+        # rspamd processed the message and deliberately learned nothing
+        # (too few tokens, or already in that class). Retrying the same
+        # bytes is futile: mark it so try_learn short-circuits future
+        # calls, and report success so the caller moves it out.
+        log.info("rspamd declined to learn %s as %s", msgid, kind)
+        with db.tx():
+            db.update_message(msgid, learned_as="unlearnable",
+                              learned_at=int(time.time()),
+                              pending_learn=None, pending_learn_at=None)
+            db.log_event("learn_skipped", msgid, detail=kind)
+        return True
+    # 'learned' or 'already': the message is in the desired Bayes class.
     now = int(time.time())
     with db.tx():
         db.update_message(msgid, learned_as=kind, learned_at=now, pending_learn=None, pending_learn_at=None)
@@ -1333,7 +1370,28 @@ def process_pending_learns(
             raw = data.get(uid, {}).get(b"BODY[]") or data.get(uid, {}).get(b"BODY.PEEK[]")
             if not raw:
                 continue
-            try_learn(db, log, acc, raw, msgid, kind, reason="grace_elapsed")
+            if try_learn(db, log, acc, raw, msgid, kind, reason="grace_elapsed"):
+                continue
+            # try_learn returned False: a transient rspamd error left the
+            # pending_learn flag set. Without a cap the same message is
+            # re-POSTed every poll until the stale-pending sweep clears it
+            # (up to 24h). Give up after 3 failures, mirroring
+            # _drain_train_folder.
+            fails = db.conn.execute(
+                "SELECT COUNT(*) FROM events WHERE account=? AND "
+                "message_id=? AND event='learn_failed'",
+                (db.account, msgid),
+            ).fetchone()[0]
+            if fails >= 3:
+                with db.tx():
+                    db.update_message(
+                        msgid, learned_as="unlearnable",
+                        learned_at=int(time.time()),
+                        pending_learn=None, pending_learn_at=None)
+                    db.log_event("learn_giveup", msgid,
+                                 detail=f"{kind} after {fails} failures")
+                log.warning("pending learn: giving up on %s after %d "
+                            "failures", msgid, fails)
 
 
 def _drain_train_folder(
