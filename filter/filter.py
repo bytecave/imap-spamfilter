@@ -387,6 +387,20 @@ CREATE TABLE IF NOT EXISTS pending_move (
     PRIMARY KEY (account, uidvalidity, uid)
 );
 
+-- High-water UID per (account, folder, uidvalidity). scan_inbox uses
+-- this to ignore mail that already existed when the filter first saw
+-- the folder, so flipping the filter on against a populated Inbox does
+-- not score+act on years of historical mail. Initialized on the first
+-- pass per uidvalidity to the current max UID; advanced as new mail is
+-- processed. Cleared on UIDVALIDITY change (same trigger as pending_move).
+CREATE TABLE IF NOT EXISTS scan_bookmark (
+    account     TEXT NOT NULL,
+    folder      TEXT NOT NULL,
+    uidvalidity INTEGER NOT NULL,
+    max_uid     INTEGER NOT NULL,
+    PRIMARY KEY (account, folder, uidvalidity)
+);
+
 CREATE TABLE IF NOT EXISTS events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     account     TEXT NOT NULL,
@@ -565,6 +579,35 @@ class Db:
         self.conn.execute(
             "DELETE FROM pending_move WHERE account=? AND uidvalidity=? AND uid=?",
             (self.account, uidvalidity, uid),
+        )
+
+    # ----- scan bookmark ----------------------------------------------------
+
+    def get_scan_bookmark(self, folder: str, uidvalidity: int) -> int | None:
+        cur = self.conn.execute(
+            """
+            SELECT max_uid FROM scan_bookmark
+             WHERE account=? AND folder=? AND uidvalidity=?
+            """,
+            (self.account, folder, uidvalidity),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+
+    def set_scan_bookmark(self, folder: str, uidvalidity: int, max_uid: int) -> None:
+        # ON CONFLICT WHERE excluded.max_uid > scan_bookmark.max_uid keeps
+        # the bookmark monotonically increasing within a uidvalidity. UIDs
+        # only grow per RFC 3501, so a smaller value here would mean we
+        # are about to re-scan messages already past; refuse the regression.
+        self.conn.execute(
+            """
+            INSERT INTO scan_bookmark(account, folder, uidvalidity, max_uid)
+            VALUES(?,?,?,?)
+            ON CONFLICT(account, folder, uidvalidity) DO UPDATE SET
+                max_uid=excluded.max_uid
+                WHERE excluded.max_uid > scan_bookmark.max_uid
+            """,
+            (self.account, folder, uidvalidity, max_uid),
         )
 
     # ----- rate limiting ----------------------------------------------------
@@ -884,6 +927,15 @@ def select_with_uidvalidity_check(
                 "DELETE FROM pending_move WHERE account=? AND uidvalidity=?",
                 (db.account, stored),
             )
+            # Drop the scan_bookmark for the prior uidvalidity. The new
+            # uv has its own UID space starting at 1; without this delete
+            # the next scan_inbox would find no row for (folder, new_uv)
+            # and re-initialize correctly, but the stale row would leak
+            # forever. Clear it now alongside pending_move.
+            db.conn.execute(
+                "DELETE FROM scan_bookmark WHERE account=? AND folder=? AND uidvalidity=?",
+                (db.account, folder, stored),
+            )
             # pending_learn rows for messages that lived in this folder are
             # also unsafe: the UIDs they would have been promoted under no
             # longer exist, and Message-ID search may resolve to a stale or
@@ -1108,9 +1160,38 @@ def scan_inbox(
     state: "AccountState | None" = None,
 ) -> None:
     uv = select_with_uidvalidity_check(client, db, fmap["inbox"], log)
-    unseen = client.search(["UNSEEN"])
-    all_uids = client.search(["ALL"])  # also detect Junk->Inbox reverts that aren't unseen
-    candidates = sorted(set(unseen) | set(all_uids[-200:] if all_uids else []))
+    # High-water UID bookmark: the filter never scans mail that already
+    # existed when it first saw this (folder, uidvalidity). The first
+    # pass per uv records the current max UID and returns without
+    # processing; subsequent passes only look at UIDs above it. This
+    # protects an existing populated Inbox from being scored+acted on
+    # the day the filter is turned on. Reverts (user moves a junked
+    # message back to Inbox) still surface because an IMAP MOVE/COPY
+    # assigns a fresh UID at the destination, which lands above the
+    # bookmark by construction.
+    bookmark = db.get_scan_bookmark(fmap["inbox"], uv)
+    if bookmark is None:
+        existing = client.search(["ALL"])
+        init_uid = max(existing) if existing else 0
+        with db.tx():
+            db.set_scan_bookmark(fmap["inbox"], uv, init_uid)
+            db.log_event(
+                "scan_bookmark_init",
+                detail=f"uv={uv} max_uid={init_uid} skipped={len(existing) if existing else 0}",
+            )
+        log.info(
+            "scan_inbox: initialized bookmark for %s (uv=%d) at uid=%d, "
+            "skipping %d pre-existing messages",
+            fmap["inbox"], uv, init_uid, len(existing) if existing else 0,
+        )
+        return
+    # Only UIDs strictly above the bookmark are candidates. Server-side
+    # filter via UID range avoids transferring 40k+ UID lists for large
+    # mailboxes.
+    new_range = f"{bookmark + 1}:*"
+    unseen = client.search(["UNSEEN", "UID", new_range])
+    new_uids = client.search(["UID", new_range])
+    candidates = sorted(set(unseen) | set(new_uids))
     cap = acc.safe_mode_unseen_cap
     if len(unseen) > cap:
         reason = f"Inbox UNSEEN > {cap} ({len(unseen)}) - refusing to process"
@@ -1238,6 +1319,17 @@ def scan_inbox(
                         db.add_pending_move(uv, uid, msgid)
                         db.update_message(msgid, our_action="pending_move")
                         db.log_event("pending_move", msgid, detail=f"score={score:.2f}")
+
+    # Loop fell through naturally: every candidate UID was considered.
+    # Advance the bookmark past the highest one so the next pass starts
+    # above it. set_scan_bookmark refuses to regress, so an early SHUTDOWN
+    # that skipped this point (return statements above) just leaves the
+    # bookmark where it was - next iteration re-discovers the same UIDs
+    # via UID range and reprocesses idempotently.
+    if candidates:
+        new_max = max(candidates)
+        with db.tx():
+            db.set_scan_bookmark(fmap["inbox"], uv, new_max)
 
 
 def execute_due_moves(client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fmap: dict[str, str]) -> None:
