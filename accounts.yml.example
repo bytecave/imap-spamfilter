@@ -32,6 +32,8 @@ accounts:
     # move_grace_seconds: 0   # mode=move only; 0 = move spam out
     #                         # instantly (use once Bayes is trained)
     # bayes_user: shared-pool   # optional; see below
+    # safe_mode_unseen_cap: 100000   # default 500; raise if you
+    #                                # keep many unread mails in Inbox
 
 # Shared Bayes across multiple of your own accounts:
 #   With rspamd's `users_enabled = true` (this project's default) the Bayes

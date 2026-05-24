@@ -70,7 +70,7 @@ _ENV_DEFAULT_OVERRIDES: dict[str, str] = {
 
 FLIP_FLOP_COOLDOWN_S = 600       # 10 min between opposite learns for one msg
 UNLEARNABLE_RETRY_S = 30 * 86400 # retry messages marked 'unlearnable' after 30d
-SAFE_MODE_UNSEEN_CAP = 500       # refuse to process if Inbox unseen > this
+SAFE_MODE_UNSEEN_CAP = 500       # default Inbox-unseen cap; per-account override via safe_mode_unseen_cap
 SCAN_FETCH_CHUNK = 50            # max msgs fetched per scan_inbox FETCH call
 RECONNECT_MIN_BACKOFF = 5
 RECONNECT_MAX_BACKOFF = 300
@@ -122,6 +122,7 @@ class Account:
     max_moves_per_hour: int
     max_learns_per_hour: int
     max_train_per_run: int
+    safe_mode_unseen_cap: int
 
     junk_retention_days: int
     trained_retention_days: int
@@ -170,6 +171,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "max_moves_per_hour": 30,
     "max_learns_per_hour": 50,
     "max_train_per_run": 100,
+    "safe_mode_unseen_cap": SAFE_MODE_UNSEEN_CAP,
     "junk_retention_days": 10,
     "trained_retention_days": 7,
     "learn_from_moves": True,
@@ -268,6 +270,7 @@ def load_accounts(path: Path) -> list[Account]:
                 max_moves_per_hour=int(merged["max_moves_per_hour"]),
                 max_learns_per_hour=int(merged["max_learns_per_hour"]),
                 max_train_per_run=int(merged["max_train_per_run"]),
+                safe_mode_unseen_cap=int(merged["safe_mode_unseen_cap"]),
                 junk_retention_days=int(merged["junk_retention_days"]),
                 trained_retention_days=int(merged["trained_retention_days"]),
                 learn_from_moves=bool(merged["learn_from_moves"]),
@@ -334,6 +337,10 @@ def validate_account(acc: Account) -> None:
         raise SystemExit(f"{acc.name}: max_learns_per_hour out of range")
     if not 1 <= acc.max_train_per_run <= 5000:
         raise SystemExit(f"{acc.name}: max_train_per_run out of range")
+    if acc.safe_mode_unseen_cap < 1:
+        raise SystemExit(
+            f"{acc.name}: safe_mode_unseen_cap must be >= 1 ({acc.safe_mode_unseen_cap})"
+        )
     if acc.learn_grace_seconds < 0 or acc.move_grace_seconds < 0:
         raise SystemExit(f"{acc.name}: grace values must be >= 0")
     if acc.junk_retention_days < 0 or acc.trained_retention_days < 0:
@@ -1104,8 +1111,9 @@ def scan_inbox(
     unseen = client.search(["UNSEEN"])
     all_uids = client.search(["ALL"])  # also detect Junk->Inbox reverts that aren't unseen
     candidates = sorted(set(unseen) | set(all_uids[-200:] if all_uids else []))
-    if len(unseen) > SAFE_MODE_UNSEEN_CAP:
-        reason = f"Inbox UNSEEN > {SAFE_MODE_UNSEEN_CAP} ({len(unseen)}) - refusing to process"
+    cap = acc.safe_mode_unseen_cap
+    if len(unseen) > cap:
+        reason = f"Inbox UNSEEN > {cap} ({len(unseen)}) - refusing to process"
         log.error(reason)
         with db.tx():
             db.enter_safe_mode("all", reason)
@@ -1116,7 +1124,7 @@ def scan_inbox(
     # so observing unseen <= cap is sufficient to know it is safe to resume.
     if db.in_safe_mode("all"):
         log.info("exiting safe mode (unseen=%d back under cap=%d)",
-                 len(unseen), SAFE_MODE_UNSEEN_CAP)
+                 len(unseen), cap)
         with db.tx():
             db.exit_safe_mode("all")
             db.log_event("safe_mode_exit", detail=f"unseen={len(unseen)}")

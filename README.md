@@ -395,6 +395,7 @@ user's mailbox.
 | `max_moves_per_hour` | `30` | breach triggers safe-mode for the account |
 | `max_learns_per_hour` | `50` | breach triggers learning-only safe-mode |
 | `max_train_per_run` | `100` | cap per `drain_train_spam` batch |
+| `safe_mode_unseen_cap` | `500` | sticky safe-mode if Inbox UNSEEN exceeds this; raise for accounts that normally keep many unread |
 
 ### Retention
 
@@ -594,9 +595,11 @@ old entries roll out of the window. No DB state, no manual recovery.
 ### Safe-mode (sticky-ish, scoped)
 
 The only sticky safe-mode is `scope="all"` triggered when Inbox UNSEEN
-exceeds `SAFE_MODE_UNSEEN_CAP` (500 messages) - a sanity check that
+exceeds `safe_mode_unseen_cap` (default 500) - a sanity check that
 something is wrong with the mailbox (mass-import, server restored from
-backup, etc.). Scanning halts for that account.
+backup, etc.). Scanning halts for that account. Raise the per-account
+override in `accounts.yml` for inboxes that legitimately keep a large
+unread backlog.
 
 It **auto-exits** on the next `scan_inbox` pass once UNSEEN drops back
 under the cap, so the typical "I marked everything read" recovery is
