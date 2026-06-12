@@ -1,0 +1,18 @@
+<CommunityApplications>
+  <Profile>
+IMAP spam filter for any IMAP/IDLE-capable mailbox — works with any mail provider, no MTA changes needed.
+
+This repository ships a four-container stack:
+
+- **spamfilter** — the filter itself: one thread per account, IDLE on Inbox, scores via rspamd, moves and learns
+- **spamfilter-rspamd** — scoring engine (Bayes, RBL, SPF/DKIM/DMARC, neural)
+- **spamfilter-redis** — Bayes tokens and rate-limit state
+- **spamfilter-unbound** — local DNS resolver for reliable RBL lookups
+
+Safety first: mail is never deleted (IMAP MOVE only), Bayes learns only from your explicit moves, and filtering is promoted manually through shadow → flag → move modes.
+
+Install **spamfilter** first — its template documents the stack; the other three are companions it depends on. Support via GitHub issues.
+  </Profile>
+  <Icon>https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/main/assets/icon.png</Icon>
+  <WebPage>https://github.com/marcelverdult/imap-spamfilter</WebPage>
+</CommunityApplications>
