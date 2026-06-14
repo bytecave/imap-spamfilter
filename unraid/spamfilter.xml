@@ -22,7 +22,7 @@
     Requires the companion containers spamfilter-redis,
     spamfilter-rspamd, and spamfilter-unbound on the `spamnet` network.
   </Overview>
-  <Category>Productivity Security Network-Other</Category>
+  <Category>Productivity Security Network:Other</Category>
   <WebUI>http://[IP]:[PORT:8080]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/main/unraid/spamfilter.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/main/assets/icon.png</Icon>

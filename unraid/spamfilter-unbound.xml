@@ -15,7 +15,7 @@
     rate-limits that public/shared resolvers impose. Required for the RBL
     module to actually contribute signal.
   </Overview>
-  <Category>Network-DNS</Category>
+  <Category>Network:DNS</Category>
   <WebUI/>
   <TemplateURL>https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/main/unraid/spamfilter-unbound.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/main/assets/icon.png</Icon>

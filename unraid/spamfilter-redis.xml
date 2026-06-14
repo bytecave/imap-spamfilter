@@ -15,7 +15,7 @@
     the corpus survives container restarts. Install on the spamnet network
     alongside spamfilter-rspamd, spamfilter-unbound, and spamfilter.
   </Overview>
-  <Category>Productivity Network-Other</Category>
+  <Category>Productivity Network:Other</Category>
   <WebUI/>
   <TemplateURL>https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/main/unraid/spamfilter-redis.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/main/assets/icon.png</Icon>
