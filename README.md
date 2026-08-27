@@ -560,20 +560,28 @@ edit the file by hand too.
 
 The helper lists the account names from `accounts.yml` and rejects an
 unknown one, so a typo cannot silently bind a user to nothing. A line
-with no scope field defaults to `admin`.
+with no scope field is **ignored** (fail closed). Write `:admin`
+explicitly. The helper always includes a scope.
 
 Two env-var alternatives also work, if you prefer config over a file:
 `DASHBOARD_USERS` (comma-separated `username:hash:scope` entries) and
 the legacy single-user `DASHBOARD_USER` + `DASHBOARD_PASSWORD`
-(plaintext, admin). All three sources merge.
+(plaintext, admin). All three sources merge. Prefer the hashed-users
+file over the legacy plaintext env pair.
 
 The session signing secret is generated once into
-`state/dashboard_secret` and reused across restarts.
+`state/dashboard_secret` (mode 600) and reused across restarts.
+Sessions expire after 8 hours idle or 24 hours absolute. Logout is a
+POST (the nav button). GET `/logout` does not end the session.
 
 The dashboard starts once at least one user exists (file or env). On
-Unraid set the host port in the "Dashboard port" mapping and Apply;
-via docker-compose uncomment the `ports:` block. Open
-`http://<host>:<port>/`.
+Unraid set the host port in the "Dashboard port" mapping and Apply
+(LAN access). On a VPS publish loopback only, for example
+`127.0.0.1:8080:8080` in Compose, and put a reverse proxy in front if
+you need remote access. Do not publish `8080:8080` on a public
+interface.
+
+Open `http://<host>:<port>/` (or `http://127.0.0.1:<port>/` on a VPS).
 
 There is no TLS in the dashboard itself — terminate HTTPS at a
 reverse proxy if you expose it beyond your LAN. If the proxy forwards

@@ -72,11 +72,13 @@ services:
       # dashboard.py`. (Legacy single-user DASHBOARD_USER +
       # DASHBOARD_PASSWORD still works.) The container always listens
       # internally on 8080; map a host port in the ports: block below.
+      # On a VPS bind the host side to loopback, not all interfaces:
+      #   "127.0.0.1:8080:8080"
       # - DASHBOARD_USERS=${DASHBOARD_USERS:-}
       # - DASHBOARD_USER=${DASHBOARD_USER:-}
       # - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:-}
     # ports:
-    #   - "8080:8080"
+    #   - "127.0.0.1:8080:8080"
     # Healthcheck baked into the image (see filter/Dockerfile). Compose
     # used to shadow it with a shell-string form that broke under Unraid
     # `--health-cmd`; the image definition works the same everywhere.

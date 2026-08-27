@@ -31,6 +31,7 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass
+from datetime import timedelta
 from functools import wraps
 from pathlib import Path
 
@@ -63,9 +64,16 @@ BAYES_MIN_LEARNS = int(os.environ.get("BAYES_MIN_LEARNS", "200"))
 # Container-internal listen port is fixed; the orchestrator maps a host port.
 DASHBOARD_PORT = 8080
 PBKDF2_ITERATIONS = 600_000
+SESSION_IDLE_S = 8 * 3600
+SESSION_ABS_S = 24 * 3600
+LOGIN_FAIL_LIMIT = 5
+LOGIN_LOCKOUT_S = 60.0
+_NEXT_OK = re.compile(r"^/(?:[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*)?$")
 
 log = logging.getLogger("dashboard")
 app = Flask(__name__)
+_login_lock = threading.Lock()
+_login_fails: dict[tuple[str, str], list[float]] = {}
 
 
 # ----- auth -----------------------------------------------------------------
@@ -96,6 +104,26 @@ def _verify_pbkdf2(stored: str, password: str) -> bool:
 USERS_FILE = STATE_DIR / "dashboard_users"
 
 
+def _write_private(path: Path, text: str) -> None:
+    """Create or replace `path` with mode 0600 from the first byte.
+
+    chmod-after-write leaves a world-readable window; open with 0o600.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, text.encode())
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
+
+
+def _safe_next(dest: str | None) -> str:
+    if dest and _NEXT_OK.fullmatch(dest):
+        return dest
+    return "/"
+
+
 @dataclass(frozen=True)
 class _User:
     name: str
@@ -105,33 +133,38 @@ class _User:
 
 
 def _parse_user_line(raw: str, users: dict[str, "_User"]) -> None:
-    """Parse one `username:verifier[:scope]` record. `scope` is 'admin'
-    or a pipe/comma-separated list of account names; absent = admin.
+    """Parse one `username:verifier:scope` record. `scope` is 'admin'
+    or a pipe/comma-separated list of account names. Missing scope is
+    fail-closed (line skipped) — do not default to admin.
     The verifier is a pbkdf2 hash, which contains no ':'."""
     parts = raw.split(":")
-    if len(parts) < 2:
+    if len(parts) < 3:
+        log.warning("dashboard user line ignored (missing scope): %s", raw.split(":", 1)[0])
         return
     name = parts[0].strip()
     verifier = parts[1].strip()
-    scope = (parts[2].strip() if len(parts) >= 3 and parts[2].strip()
-             else "admin")
-    if not name or not verifier:
+    scope = parts[2].strip()
+    if not name or not verifier or not scope:
+        log.warning("dashboard user line ignored (empty field): %s", name or "?")
         return
     admin = scope.lower() == "admin"
     accounts = frozenset() if admin else frozenset(
         a.strip() for a in re.split(r"[|,]", scope) if a.strip())
+    if not admin and not accounts:
+        log.warning("dashboard user line ignored (empty account scope): %s", name)
+        return
     users[name] = _User(name, verifier, admin, accounts)
 
 
 def _load_users() -> dict[str, "_User"]:
     """Map username -> _User. Sources, lowest precedence first:
-      1. state/dashboard_users - `username:hash[:scope]` per line,
+      1. state/dashboard_users - `username:hash:scope` per line,
          `#` comments and blank lines ignored;
       2. the DASHBOARD_USERS env var - comma-separated entries;
       3. the legacy DASHBOARD_USER + DASHBOARD_PASSWORD pair (admin).
     `scope` is 'admin' or a pipe-separated list of account names a
-    non-admin user may see. Re-read on every login so edits apply
-    without a restart."""
+    non-admin user may see. A line with no scope is ignored. Re-read
+    on every login so edits apply without a restart."""
     users: dict[str, _User] = {}
     try:
         if USERS_FILE.is_file():
@@ -194,10 +227,13 @@ def _load_secret() -> str:
         if SECRET_PATH.is_file():
             existing = SECRET_PATH.read_text().strip()
             if existing:
+                try:
+                    os.chmod(SECRET_PATH, 0o600)
+                except OSError:
+                    pass
                 return existing
         fresh = secrets.token_hex(32)
-        SECRET_PATH.write_text(fresh)
-        SECRET_PATH.chmod(0o600)
+        _write_private(SECRET_PATH, fresh + "\n")
         return fresh
     except OSError as ex:
         logging.getLogger("dashboard").warning(
@@ -211,6 +247,8 @@ app.secret_key = _load_secret()
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
+    PERMANENT_SESSION_LIFETIME=timedelta(seconds=SESSION_IDLE_S),
+    SESSION_REFRESH_ON_EACH_REQUEST=True,
     # TLS is terminated upstream; only mark the cookie Secure when the
     # operator confirms the proxy forwards HTTPS to this app.
     SESSION_COOKIE_SECURE=os.environ.get("DASHBOARD_COOKIE_SECURE", "")
@@ -218,11 +256,60 @@ app.config.update(
 )
 
 
+@app.after_request
+def _security_headers(resp: Response) -> Response:
+    resp.headers["Content-Security-Policy"] = (
+        "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; "
+        "form-action 'self'; base-uri 'none'"
+    )
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+def _client_ip() -> str:
+    forwarded = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+    return forwarded or (request.remote_addr or "unknown")
+
+
+def _login_blocked(ip: str, username: str) -> bool:
+    key = (ip, username.lower())
+    now = time.monotonic()
+    with _login_lock:
+        times = [t for t in _login_fails.get(key, []) if now - t < LOGIN_LOCKOUT_S]
+        _login_fails[key] = times
+        return len(times) >= LOGIN_FAIL_LIMIT
+
+
+def _record_login_failure(ip: str, username: str) -> None:
+    key = (ip, username.lower())
+    now = time.monotonic()
+    with _login_lock:
+        times = [t for t in _login_fails.get(key, []) if now - t < LOGIN_LOCKOUT_S]
+        times.append(now)
+        _login_fails[key] = times
+
+
+def _clear_login_failures(ip: str, username: str) -> None:
+    key = (ip, username.lower())
+    with _login_lock:
+        _login_fails.pop(key, None)
+
+
 def _requires_auth(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
         if not session.get("user"):
             return redirect(url_for("login", next=request.path))
+        now = int(time.time())
+        issued = int(session.get("issued") or 0)
+        last = int(session.get("last") or 0)
+        if (now - issued) > SESSION_ABS_S or (now - last) > SESSION_IDLE_S:
+            session.clear()
+            return redirect(url_for("login", next=request.path))
+        session["last"] = now
         return view(*args, **kwargs)
 
     return wrapped
@@ -334,9 +421,20 @@ def _sparkline(values: list[int], width: int = 168, height: int = 38) -> str:
 
 def _rspamd_stats() -> dict | None:
     try:
+        from filter import _load_rspamd_password
+        password = _load_rspamd_password()
+    except Exception:  # noqa: BLE001
+        password = os.environ.get("RSPAMD_PASSWORD", "").strip()
+        pwfile = STATE_DIR / "controller.password"
+        if not password and pwfile.is_file():
+            try:
+                password = pwfile.read_text().strip()
+            except OSError:
+                password = ""
+    try:
         r = requests.get(
             f"{RSPAMD_CONTROLLER_URL}/stat",
-            headers={"Password": os.environ.get("RSPAMD_PASSWORD", "")},
+            headers={"Password": password},
             timeout=3,
         )
         if r.status_code != 200:
@@ -347,10 +445,11 @@ def _rspamd_stats() -> dict | None:
 
 
 def _kpi(label: str, value, sub: str = "", cls: str = "") -> str:
-    sub_html = f'<div class="sub">{sub}</div>' if sub else ""
+    safe_cls = "".join(c for c in cls if c.isalnum() or c in "-_")
+    sub_html = f'<div class="sub">{_h(sub)}</div>' if sub else ""
     return (
-        f'<div class="kpi {cls}"><div class="label">{label}</div>'
-        f'<div class="value">{value}</div>{sub_html}</div>'
+        f'<div class="kpi {safe_cls}"><div class="label">{_h(label)}</div>'
+        f'<div class="value">{_h(value)}</div>{sub_html}</div>'
     )
 
 
@@ -421,6 +520,11 @@ nav a.active { opacity:1; background:rgba(255,255,255,0.14);
   color:var(--nav-active); }
 nav .spacer { flex:1 1 auto; }
 nav .who { opacity:0.7; font-size:0.85em; padding:0.35em 0.5em; }
+nav form.logout { margin:0; display:inline; }
+nav form.logout button { color:var(--nav-fg); background:transparent; border:0;
+  font:inherit; font-weight:500; padding:0.35em 0.7em; border-radius:6px;
+  cursor:pointer; opacity:0.78; }
+nav form.logout button:hover { opacity:1; background:rgba(255,255,255,0.08); }
 main { padding:1.1em 1.3em; max-width:1320px; margin:0 auto; }
 h1 { font-size:1.35em; margin:0.1em 0 0.7em; }
 h2 { font-size:1.02em; margin:0 0 0.6em; color:var(--muted);
@@ -518,7 +622,9 @@ BASE = """<!doctype html>
   <a href="/accounts" {% if active=='accounts' %}class="active"{% endif %}>Accounts</a>
   <span class="spacer"></span>
   {% if user %}<span class="who">{{ user }}{% if is_admin %} &middot; admin{% endif %}</span>
-  <a href="/logout">Log out</a>{% endif %}
+  <form method="post" action="/logout" class="logout">
+    <button type="submit">Log out</button>
+  </form>{% endif %}
 </nav>
 <main>
 <h1>{{ title }}</h1>
@@ -579,21 +685,30 @@ def login():
     if request.method == "POST":
         username = (request.form.get("username") or "").strip()
         password = request.form.get("password") or ""
-        if _check_login(username, password):
+        ip = _client_ip()
+        locked = _login_blocked(ip, username)
+        if locked:
+            _verify_pbkdf2(f"pbkdf2${PBKDF2_ITERATIONS}$00$00", password)
+            error = "Invalid username or password."
+        elif _check_login(username, password):
+            _clear_login_failures(ip, username)
             session.clear()
+            now = int(time.time())
             session["user"] = username
-            dest = request.args.get("next", "/")
-            # Only allow same-site relative redirects.
-            if not dest.startswith("/") or dest.startswith("//"):
-                dest = "/"
+            session["issued"] = now
+            session["last"] = now
+            session.permanent = True
+            dest = _safe_next(request.args.get("next"))
             return redirect(dest)
-        error = "Invalid username or password."
+        else:
+            _record_login_failure(ip, username)
+            error = "Invalid username or password."
     if session.get("user"):
         return redirect("/")
     return render_template_string(LOGIN, error=error)
 
 
-@app.route("/logout")
+@app.route("/logout", methods=["POST"])
 def logout():
     session.clear()
     return redirect(url_for("login"))
@@ -1066,8 +1181,7 @@ if __name__ == "__main__":
                     continue  # replace any existing entry for this user
                 lines.append(ln)
         lines.append(entry)
-        USERS_FILE.write_text("\n".join(lines) + "\n")
-        USERS_FILE.chmod(0o600)
+        _write_private(USERS_FILE, "\n".join(lines) + "\n")
         print(f"\nsaved user '{name}' to {USERS_FILE}")
         print("no restart needed - the dashboard re-reads it on each login.")
     except OSError as ex:

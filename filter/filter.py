@@ -63,6 +63,20 @@ def _load_rspamd_password() -> str:
 RSPAMD_PASSWORD = _load_rspamd_password()
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 
+
+def redact_log(text: str, *secrets: str, limit: int = 200) -> str:
+    """Strip secrets and IMAP LOGIN payloads before they hit logs/events.
+
+    Truncation alone is not enough: some servers echo LOGIN arguments
+    in the error text, which can sit inside the first 200 characters.
+    """
+    out = str(text)
+    for s in (*secrets, RSPAMD_PASSWORD):
+        if s:
+            out = out.replace(s, "***")
+    out = re.sub(r"(?i)\bLOGIN\b[\s\S]*", "LOGIN ***", out)
+    return out[:limit]
+
 # Optional env overrides for accounts.yml `defaults` (Unraid template uses these
 # so the user can set retention windows without editing YAML). Unset = ignore.
 _ENV_DEFAULT_OVERRIDES: dict[str, str] = {
@@ -385,7 +399,7 @@ def wait_between_scans(
         try:
             client.idle_done()
         except (IMAPClientError, OSError) as ex:
-            log.warning("idle_done failed: %s; forcing reconnect", ex)
+            log.warning("idle_done failed: %s; forcing reconnect", redact_log(str(ex), acc.password))
             idle_failed = True
     if idle_failed:
         raise IMAPClientError("idle_done failed")
@@ -1017,10 +1031,10 @@ class Db:
             # the next vacuum window rolls around.
             logging.getLogger("main").error(
                 "vacuum failed for %s; next attempt in %dd: %s",
-                self.account, every_s // 86400, ex,
+                self.account, every_s // 86400, redact_log(str(ex)),
             )
             try:
-                self.log_event("vacuum_failed", detail=str(ex)[:300])
+                self.log_event("vacuum_failed", detail=redact_log(str(ex)))
             except sqlite3.Error:
                 pass
 
@@ -1226,7 +1240,7 @@ def ensure_folders(client: IMAPClient, log: logging.Logger, fmap: dict[str, str]
             client.create_folder(f)
             client.subscribe_folder(f)
         except IMAPClientError as ex:
-            log.warning("create_folder(%s) failed: %s", f, ex)
+            log.warning("create_folder(%s) failed: %s", f, redact_log(str(ex)))
 
 
 def select_with_uidvalidity_check(
@@ -1829,8 +1843,9 @@ def execute_due_moves(client: IMAPClient, db: Db, log: logging.Logger, acc: Acco
     try:
         client.move(to_move, fmap["junk"])
     except IMAPClientError as ex:
-        log.warning("move to junk failed: %s", ex)
-        db.log_event("move_failed", detail=str(ex)[:200])
+        detail = redact_log(str(ex), acc.password)
+        log.warning("move to junk failed: %s", detail)
+        db.log_event("move_failed", detail=detail)
         return
 
     now = int(time.time())
@@ -1977,7 +1992,7 @@ def process_pending_learns(
         try:
             client.select_folder(folder, readonly=True)
         except IMAPClientError as ex:
-            log.warning("select %s for pending learn failed: %s", folder, ex)
+            log.warning("select %s for pending learn failed: %s", folder, redact_log(str(ex), acc.password))
             continue
         for r in rows:
             if SHUTDOWN.is_set():
@@ -2077,7 +2092,7 @@ def _drain_train_folder(
     try:
         uv = select_with_uidvalidity_check(client, db, folder, log)
     except IMAPClientError as ex:
-        log.warning("select %s failed: %s", folder, ex)
+        log.warning("select %s failed: %s", folder, redact_log(str(ex), acc.password))
         return
     uids = client.search(["ALL"])
     if not uids:
@@ -2142,7 +2157,7 @@ def _drain_train_folder(
     try:
         client.move(learned_uids, fmap[dst_key])
     except IMAPClientError as ex:
-        log.warning("move %s -> %s failed: %s", folder, fmap[dst_key], ex)
+        log.warning("move %s -> %s failed: %s", folder, fmap[dst_key], redact_log(str(ex), acc.password))
         return
     try:
         with db.tx():
@@ -2154,7 +2169,7 @@ def _drain_train_folder(
     except sqlite3.Error as ex:
         log.error(
             "%s: IMAP moved %d msgs to %s but DB update failed: %s",
-            log_tag, len(learned_uids), fmap[dst_key], ex,
+            log_tag, len(learned_uids), fmap[dst_key], redact_log(str(ex)),
         )
         return
     log.info("%s: learned+moved %d", log_tag, len(learned_uids))
@@ -2216,10 +2231,10 @@ def _sweep_folder_to_trash(
         info = client.select_folder(src)
         uv = int(info[b"UIDVALIDITY"])
     except IMAPClientError as ex:
-        log.warning("retention: select %s failed: %s", src, ex)
+        log.warning("retention: select %s failed: %s", src, redact_log(str(ex), acc.password))
         return
     except (KeyError, TypeError, ValueError) as ex:
-        log.warning("retention: UIDVALIDITY missing for %s: %s", src, ex)
+        log.warning("retention: UIDVALIDITY missing for %s: %s", src, redact_log(str(ex)))
         return
     # IMAP `BEFORE <date>` is interpreted by the SERVER in its local
     # timezone (RFC 3501 4.3 - dates have no time, server compares
@@ -2235,7 +2250,7 @@ def _sweep_folder_to_trash(
     try:
         uids = client.search(["BEFORE", cutoff_date])
     except IMAPClientError as ex:
-        log.warning("retention: search BEFORE %s failed: %s", cutoff_date, ex)
+        log.warning("retention: search BEFORE %s failed: %s", cutoff_date, redact_log(str(ex), acc.password))
         return
     if not uids:
         return
@@ -2252,7 +2267,7 @@ def _sweep_folder_to_trash(
     try:
         client.move(to_move, fmap["trash"])
     except IMAPClientError as ex:
-        log.warning("retention: move %s -> %s failed: %s", src, fmap["trash"], ex)
+        log.warning("retention: move %s -> %s failed: %s", src, fmap["trash"], redact_log(str(ex), acc.password))
         return
     try:
         with db.tx():
@@ -2264,7 +2279,7 @@ def _sweep_folder_to_trash(
     except sqlite3.Error as ex:
         log.error(
             "retention sweep %s: IMAP moved %d msgs to %s but DB update failed: %s",
-            tag, len(to_move), fmap["trash"], ex,
+            tag, len(to_move), fmap["trash"], redact_log(str(ex)),
         )
         return
     log.info("retention sweep %s: moved %d %s -> %s", tag, len(to_move), src, fmap["trash"])
@@ -2397,18 +2412,18 @@ def _run_account(acc: Account, db: Db) -> None:
                 # any server-side IDLE cap (RFC 2177 mentions 29 min).
                 wait_between_scans(client, acc, idle_cap=idle_cap, log=log)
         except (IMAPClientError, OSError) as ex:
-            log.warning("connection error: %s (backoff %ds)", ex, backoff)
-            db.log_event("conn_error", detail=str(ex)[:300])
+            detail = redact_log(str(ex), acc.password)
+            log.warning("connection error: %s (backoff %ds)", detail, backoff)
+            db.log_event("conn_error", detail=detail)
         except Exception as ex:  # noqa: BLE001 - last-resort guard
-            # Use error+truncated str rather than log.exception(): the full
-            # traceback can echo the IMAP password back if the underlying
-            # exception text contains it (some servers reflect the LOGIN
-            # arguments in their error response).
+            # redact_log strips LOGIN echoes / passwords; do not use
+            # log.exception() (traceback can include LOGIN arguments).
+            detail = redact_log(str(ex), acc.password)
             log.error(
                 "unhandled error in account loop (%s): %s",
-                type(ex).__name__, str(ex)[:300],
+                type(ex).__name__, detail,
             )
-            db.log_event("unhandled_error", detail=str(ex)[:300])
+            db.log_event("unhandled_error", detail=detail)
         finally:
             if client is not None:
                 try:
@@ -2474,7 +2489,7 @@ def main() -> int:
             import dashboard as _dashboard
             _dashboard.start()
         except Exception as ex:  # noqa: BLE001
-            log.error("failed to start dashboard: %s", ex)
+            log.error("failed to start dashboard: %s", redact_log(str(ex)))
 
     accounts = load_accounts(CONFIG_PATH)
     log.info("loaded %d account(s): %s", len(accounts), ", ".join(a.name for a in accounts))

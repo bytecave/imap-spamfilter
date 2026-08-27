@@ -43,7 +43,7 @@ Slices 1-3 are the PoC-critical path (do these before connecting real mailboxes,
 | 5 - Message identity | done | [`slice5_message_identity.md`](slice5_message_identity.md) |
 | 6 - Rspamd scan metadata | done | [`slice6_rspamd_scan_metadata.md`](slice6_rspamd_scan_metadata.md) |
 | 7 - Ops / secrets / supply chain | done | [`slice7_ops_secrets_supply_chain.md`](slice7_ops_secrets_supply_chain.md) |
-| 8 - Dashboard + log redaction | pending | (write before implementing) |
+| 8 - Dashboard + log redaction | done | [`slice8_dashboard_hardening.md`](slice8_dashboard_hardening.md) |
 
 ---
 
@@ -205,7 +205,7 @@ Production env file is `/opt/bytelord/secrets/imap-spamfilter.env`. Point Compos
 
 ---
 
-## Slice 8 — Dashboard hardening + log redaction
+**Spec:** [`slice8_dashboard_hardening.md`](slice8_dashboard_hardening.md) (architecture, call sites, tests, acceptance).
 
 Only matters if the dashboard is used. Several of these are bugs on the default Unraid path, not just "if Internet-exposed."
 
