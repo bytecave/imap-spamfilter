@@ -146,14 +146,16 @@ The script is idempotent and does all of the following:
 - Copies rspamd `local.d/*` from the git checkout when present; otherwise fetches a
   **pinned commit** (`SPAMFILTER_REF`, never floating `/main`)
 - Seeds `accounts.yml` from `accounts.yml.example` (only if missing)
-- Generates random passwords into `state/controller.password` (rspamd controller)
-  and `state/redis.password` (Redis auth), only if missing
+- Reads `RSPAMD_PASSWORD` and `REDIS_PASSWORD` from `SPAMFILTER_SECRETS`
+  (`/opt/bytelord/secrets/imap-spamfilter.env` on ByteLord). Both keys are
+  required. It does **not** write `state/controller.password` or
+  `state/redis.password`.
 - Renders `worker-controller.inc`, the rspamd `redis.conf` client config, and the
   Redis server config into `redis-config/redis.conf` with those passwords substituted
-  in (awk reads the password file; secrets never appear on `ps`)
+  in (awk reads a temp password file; secrets never appear on `ps`)
 - Writes `$APP/.bootstrap.version` from `unraid/bootstrap.version`. A missing or
   different stamp refreshes static `local.d` files and templates, then re-renders
-  secret files. It never overwrites `accounts.yml` or `state/*.password`.
+  secret files. It never overwrites `accounts.yml`.
 
 Set the schedule to **"At First Array Start Only"** and click **Run Script**
 once to bootstrap immediately. It'll re-run on every array start, so the
@@ -286,16 +288,15 @@ Follows the same layout as gitea, pgadmin, and aidm on this host:
 
 | Path | Role |
 | --- | --- |
-| `/opt/bytelord/secrets/imap-spamfilter.env` | `RSPAMD_PASSWORD` (required), `REDIS_PASSWORD` (optional) |
+| `/opt/bytelord/secrets/imap-spamfilter.env` | `RSPAMD_PASSWORD` and `REDIS_PASSWORD` (both required) |
 | `/opt/bytelord/data/imap-spamfilter/` | redis, rspamd configs, SQLite state (not accounts) |
 | `/opt/bytelord/projects/imap-spamfilter/accounts.yml` | account list (gitignored; Dummy passwords until OAuth proxy) |
 | `/opt/bytelord/compose/imap-spamfilter/compose.yaml` | production compose (source: `deploy/bytelord-compose.yaml`) |
 | `/opt/bytelord/projects/imap-spamfilter/` | git checkout |
 
-Put your rspamd controller password in the secrets file (you likely already
-have). Bootstrap reads it and renders rspamd/redis configs so the filter,
-dashboard, and rspamd all use the **same** password — no duplicate
-`state/controller.password` to keep in sync.
+Put `RSPAMD_PASSWORD` and `REDIS_PASSWORD` in the secrets file. Bootstrap
+renders rspamd/redis configs from that file only — no copies under
+`data/.../state/`.
 
 ```bash
 # One-time layout + render configs from /opt/bytelord/secrets/imap-spamfilter.env
@@ -310,13 +311,12 @@ docker compose -f /opt/bytelord/compose/imap-spamfilter/compose.yaml up -d --bui
 docker compose -f /opt/bytelord/compose/imap-spamfilter/compose.yaml logs -f spamfilter
 ```
 
-After changing `RSPAMD_PASSWORD` in the secrets file, re-run
-`deploy/vps-bootstrap.sh` and restart the stack so rspamd's rendered
-config picks up the new value.
+After changing `RSPAMD_PASSWORD` or `REDIS_PASSWORD` in the secrets file,
+re-run `deploy/vps-bootstrap.sh` and restart the stack so rendered configs
+pick up the new values.
 
 The filter reads secrets in this order: `RSPAMD_PASSWORD` env var (from
-compose `env_file`), then the mounted secrets file (`SECRETS_FILE`), then
-`state/controller.password` (Unraid fallback).
+compose `env_file`), then the mounted secrets file (`SECRETS_FILE`).
 
 Dashboard is on `127.0.0.1:8080` only. Add users with
 `docker exec -it spamfilter python dashboard.py`.

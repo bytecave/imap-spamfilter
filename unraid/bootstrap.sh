@@ -157,30 +157,30 @@ fi
 chown "$APP_UID:$APP_GID" "$SPAMFILTER_ACCOUNTS"
 chmod 640 "$SPAMFILTER_ACCOUNTS"
 
-# 5. rspamd controller password. ByteLord VPS: take RSPAMD_PASSWORD from
-# SPAMFILTER_SECRETS so rspamd and the filter agree. Unraid: generate once.
-PW_FILE="$APP/state/controller.password"
-SEC_RSPAMD=""
-if [ -f "$SPAMFILTER_SECRETS" ]; then
-  SEC_RSPAMD="$(read_env_secret RSPAMD_PASSWORD || true)"
+# 5. Passwords come only from SPAMFILTER_SECRETS (ByteLord:
+# /opt/bytelord/secrets/imap-spamfilter.env). Do not write copies into
+# state/. Temp files for awk substitution are unlinked before exit.
+if [ ! -f "$SPAMFILTER_SECRETS" ]; then
+  echo "error: secrets file missing: $SPAMFILTER_SECRETS" >&2
+  echo "  Required keys: RSPAMD_PASSWORD, REDIS_PASSWORD" >&2
+  exit 1
 fi
-if [ -n "$SEC_RSPAMD" ]; then
-  echo "using RSPAMD_PASSWORD from $SPAMFILTER_SECRETS"
-  write_password_file "$PW_FILE" "$SEC_RSPAMD"
-elif [ ! -f "$PW_FILE" ]; then
-  echo "generating rspamd controller password"
-  # Write to a temp file then rename so the password file is never
-  # observable in a partially-written state, and append a trailing
-  # newline so common tools (cat, less, while-read) handle it cleanly.
-  ( umask 077 && {
-      openssl rand -base64 48 | tr -d '\n'
-      echo
-    } > "$PW_FILE.tmp"
-  )
-  mv "$PW_FILE.tmp" "$PW_FILE"
+SEC_RSPAMD="$(read_env_secret RSPAMD_PASSWORD || true)"
+SEC_REDIS="$(read_env_secret REDIS_PASSWORD || true)"
+if [ -z "$SEC_RSPAMD" ] || [ -z "$SEC_REDIS" ]; then
+  echo "error: $SPAMFILTER_SECRETS must set both RSPAMD_PASSWORD and REDIS_PASSWORD" >&2
+  exit 1
 fi
-chown "$APP_UID:$APP_GID" "$PW_FILE"
-chmod 640 "$PW_FILE"
+echo "using RSPAMD_PASSWORD and REDIS_PASSWORD from $SPAMFILTER_SECRETS"
+TMP_RSPAMD="$(mktemp)"
+TMP_REDIS="$(mktemp)"
+cleanup_pw_tmp() { rm -f "$TMP_RSPAMD" "$TMP_REDIS"; }
+trap cleanup_pw_tmp EXIT
+write_password_file "$TMP_RSPAMD" "$SEC_RSPAMD"
+write_password_file "$TMP_REDIS" "$SEC_REDIS"
+unset SEC_RSPAMD SEC_REDIS
+# Drop leftover Unraid-style copies if present.
+rm -f "$APP/state/controller.password" "$APP/state/redis.password"
 
 # 6. Render worker-controller.inc from the .template now (host side),
 #    so the rspamd container can mount local.d/ as read-only and start
@@ -188,39 +188,14 @@ chmod 640 "$PW_FILE"
 TEMPLATE="$APP/rspamd/local.d/worker-controller.inc.template"
 TARGET="$APP/rspamd/local.d/worker-controller.inc"
 if [ -f "$TEMPLATE" ]; then
-  render_subst "$TEMPLATE" "$TARGET" '${RSPAMD_PASSWORD}' "$PW_FILE"
-  # rspamd is uid 11333; 640 so the secret is not world-readable.
+  render_subst "$TEMPLATE" "$TARGET" '${RSPAMD_PASSWORD}' "$TMP_RSPAMD"
   chown "$RSPAMD_UID:$RSPAMD_UID" "$TARGET" 2>/dev/null || chown "$APP_UID:$APP_GID" "$TARGET"
-  chmod 640 "$TARGET"
+  # 644: Docker user-ns maps container uids; 640 on host-owned files is unreadable.
+  chmod 644 "$TARGET"
   echo "rendered worker-controller.inc"
 fi
 
-# 7. Redis auth. VPS: REDIS_PASSWORD from SPAMFILTER_SECRETS when set.
-REDIS_PW_FILE="$APP/state/redis.password"
-SEC_REDIS=""
-if [ -f "$SPAMFILTER_SECRETS" ]; then
-  SEC_REDIS="$(read_env_secret REDIS_PASSWORD || true)"
-fi
-if [ -n "$SEC_REDIS" ]; then
-  echo "using REDIS_PASSWORD from $SPAMFILTER_SECRETS"
-  write_password_file "$REDIS_PW_FILE" "$SEC_REDIS"
-elif [ ! -f "$REDIS_PW_FILE" ]; then
-  echo "generating Redis password"
-  ( umask 077 && {
-      openssl rand -base64 48 | tr -d '\n'
-      echo
-    } > "$REDIS_PW_FILE.tmp"
-  )
-  mv "$REDIS_PW_FILE.tmp" "$REDIS_PW_FILE"
-fi
-chown "$APP_UID:$APP_GID" "$REDIS_PW_FILE"
-chmod 640 "$REDIS_PW_FILE"
-
-# Redis server config: fetch the template if missing (or on version
-# refresh), substitute the password into a dedicated DIRECTORY. The
-# redis container bind-mounts that directory (not the single file) -
-# Unraid handles directory mounts reliably; single-file bind mounts it
-# does not.
+# 7. Redis server + rspamd Redis client configs.
 REDIS_CONF_TEMPLATE="$APP/redis.conf.template"
 REDIS_CONF_DIR="$APP/redis-config"
 force_redis=0
@@ -230,26 +205,22 @@ fi
 install_file "redis/redis.conf.template" "$REDIS_CONF_TEMPLATE" "$force_redis"
 mkdir -p "$REDIS_CONF_DIR"
 render_subst "$REDIS_CONF_TEMPLATE" "$REDIS_CONF_DIR/redis.conf" \
-  '${REDIS_PASSWORD}' "$REDIS_PW_FILE"
+  '${REDIS_PASSWORD}' "$TMP_REDIS"
 chown "$APP_UID:$APP_GID" "$REDIS_CONF_TEMPLATE"
 chmod 644 "$REDIS_CONF_TEMPLATE"
-# Dir + file owned by the redis uid, private (only that container reads it).
 chown -R "$REDIS_UID:$REDIS_UID" "$REDIS_CONF_DIR" 2>/dev/null \
   || chown -R "$APP_UID:$APP_GID" "$REDIS_CONF_DIR"
-chmod 750 "$REDIS_CONF_DIR"
-chmod 640 "$REDIS_CONF_DIR/redis.conf"
-# Drop the pre-directory loose copy an earlier bootstrap may have left.
+chmod 755 "$REDIS_CONF_DIR"
+chmod 644 "$REDIS_CONF_DIR/redis.conf"
 rm -f "$APP/redis.conf"
 
-# rspamd redis client config: render the password into redis.conf from
-# redis.conf.template (downloaded with the other rspamd local.d files).
 REDIS_CLIENT_TEMPLATE="$APP/rspamd/local.d/redis.conf.template"
 if [ -f "$REDIS_CLIENT_TEMPLATE" ]; then
   render_subst "$REDIS_CLIENT_TEMPLATE" "$APP/rspamd/local.d/redis.conf" \
-    '${REDIS_PASSWORD}' "$REDIS_PW_FILE"
+    '${REDIS_PASSWORD}' "$TMP_REDIS"
   chown "$RSPAMD_UID:$RSPAMD_UID" "$APP/rspamd/local.d/redis.conf" 2>/dev/null \
     || chown "$APP_UID:$APP_GID" "$APP/rspamd/local.d/redis.conf"
-  chmod 640 "$APP/rspamd/local.d/redis.conf"
+  chmod 644 "$APP/rspamd/local.d/redis.conf"
   echo "rendered redis.conf (server + rspamd client)"
 fi
 
@@ -260,5 +231,4 @@ chmod 644 "$STAMP"
 echo "spamfilter bootstrap complete (config version $BOOTSTRAP_VERSION)."
 echo "Next:"
 echo "  1. Edit $SPAMFILTER_ACCOUNTS (IMAP host, credentials)."
-echo "  2. Unraid: install the four Docker templates."
-echo "     ByteLord VPS: docker compose -f /opt/bytelord/compose/imap-spamfilter/compose.yaml up -d --build"
+echo "  2. docker compose -f /opt/bytelord/compose/imap-spamfilter/compose.yaml up -d --build"

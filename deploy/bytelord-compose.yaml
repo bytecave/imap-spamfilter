@@ -13,9 +13,9 @@
 #   export SPAMFILTER_UID=$(id -u) SPAMFILTER_GID=$(id -g)
 #   docker compose -f /opt/bytelord/compose/imap-spamfilter/compose.yaml up -d --build
 #
-# Secrets file keys (RSPAMD_PASSWORD required on VPS; REDIS_PASSWORD optional):
+# Secrets file keys (both required):
 #   RSPAMD_PASSWORD=...     rspamd controller + filter auth
-#   REDIS_PASSWORD=...      optional; bootstrap generates if omitted
+#   REDIS_PASSWORD=...      redis requirepass + rspamd redis client
 
 x-logging: &log-rotate
   driver: json-file
@@ -63,8 +63,10 @@ services:
     restart: unless-stopped
     logging: *log-rotate
     depends_on: [spamfilter-rspamd]
+    # Note: do not use YAML aliases like "*secrets-file:/path:ro" — go-yaml
+    # rejects alias+suffix in sequence items. Keep the path literal here.
     env_file:
-      - *secrets-file
+      - /opt/bytelord/secrets/imap-spamfilter.env
     environment:
       SECRETS_FILE: /run/secrets/imap-spamfilter.env
       RSPAMD_SCAN_URL: http://spamfilter-rspamd:11333/checkv2
@@ -74,7 +76,7 @@ services:
       TZ: Europe/Berlin
     user: "${SPAMFILTER_UID:-1001}:${SPAMFILTER_GID:-1001}"
     volumes:
-      - *secrets-file:/run/secrets/imap-spamfilter.env:ro
+      - /opt/bytelord/secrets/imap-spamfilter.env:/run/secrets/imap-spamfilter.env:ro
       - /opt/bytelord/projects/imap-spamfilter/accounts.yml:/app/accounts.yml:ro
       - /opt/bytelord/data/imap-spamfilter/state:/state
     ports:
@@ -83,5 +85,6 @@ services:
 
 networks:
   spamnet:
+    # Shared with email-oauth2-proxy compose.
+    external: true
     name: spamnet
-    driver: bridge

@@ -425,12 +425,6 @@ def _rspamd_stats() -> dict | None:
         password = _load_rspamd_password()
     except Exception:  # noqa: BLE001
         password = os.environ.get("RSPAMD_PASSWORD", "").strip()
-        pwfile = STATE_DIR / "controller.password"
-        if not password and pwfile.is_file():
-            try:
-                password = pwfile.read_text().strip()
-            except OSError:
-                password = ""
     try:
         r = requests.get(
             f"{RSPAMD_CONTROLLER_URL}/stat",

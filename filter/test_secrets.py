@@ -41,11 +41,11 @@ def test_load_rspamd_password_reads_secrets_file(tmp_path, monkeypatch):
     assert f._load_rspamd_password() == "controller-secret"
 
 
-def test_load_rspamd_password_falls_back_to_controller_file(tmp_path, monkeypatch):
+def test_load_rspamd_password_ignores_state_controller_file(tmp_path, monkeypatch):
     state = tmp_path / "state"
     state.mkdir()
     (state / "controller.password").write_text("appdata-secret\n")
     monkeypatch.delenv("RSPAMD_PASSWORD", raising=False)
     monkeypatch.setenv("SECRETS_FILE", str(tmp_path / "missing.env"))
     monkeypatch.setenv("STATE_DIR", str(state))
-    assert f._load_rspamd_password() == "appdata-secret"
+    assert f._load_rspamd_password() == ""

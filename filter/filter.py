@@ -49,7 +49,6 @@ RSPAMD_SCAN_URL = os.environ.get("RSPAMD_SCAN_URL", "http://spamfilter-rspamd:11
 RSPAMD_LEARN_URL = os.environ.get("RSPAMD_LEARN_URL", "http://spamfilter-rspamd:11334")
 
 # ByteLord VPS: /opt/bytelord/secrets/imap-spamfilter.env (mounted in compose).
-# Unraid: bootstrap-generated state/controller.password.
 DEFAULT_SECRETS_FILE = Path("/opt/bytelord/secrets/imap-spamfilter.env")
 
 
@@ -94,14 +93,8 @@ def _load_secret(key: str) -> str:
 
 
 def _load_rspamd_password() -> str:
-    val = _load_secret("RSPAMD_PASSWORD")
-    if val:
-        return val
-    # Fallback: appdata file written by bootstrap when secrets file is absent.
-    pwfile = Path(os.environ.get("STATE_DIR", "/state")) / "controller.password"
-    if pwfile.is_file():
-        return pwfile.read_text().strip()
-    return ""
+    """Resolve rspamd controller password from env or SECRETS_FILE only."""
+    return _load_secret("RSPAMD_PASSWORD")
 
 
 RSPAMD_PASSWORD = _load_rspamd_password()
