@@ -427,7 +427,7 @@ in `accounts.yml` trains its own Bayes namespace keyed by its `user`.
 
 | Key | Default | Notes |
 | --- | --- | --- |
-| `bayes_user` | unset | rspamd `User` header used for both scan and learn; overrides the per-recipient default |
+| `bayes_user` | unset | HTTP `Rcpt` on scan (and `Delivered-To` on learn); overrides the per-recipient default |
 
 Use `bayes_user` to pool training across several of your own mailboxes
 while leaving other users (e.g. family members) isolated. Set the same
@@ -659,6 +659,12 @@ Restore is the reverse: stop the four containers, extract the tar over
 - **No allowlist.** Intentional. rspamd's DKIM/SPF symbols already give
   negative score to aligned mail. Fix misclassifications by training, not
   by allowlisting.
+- **IMAP scoring has no SMTP client IP.** The filter does not send `Ip`
+  or `Helo` to `/checkv2`. RBL `from` lookups, SPF, and DMARC envelope
+  alignment are degraded; they rely on `Received:` chains in the message
+  plus Bayes/fuzzy/neural. HTTP `From` is the message From (not the IMAP
+  recipient). `Rcpt` remains the Bayes identity (`bayes_user` or the
+  account user).
 - **Dashboard is read-only.** It shows activity; it has no controls to
   move, learn, or change config. Inspect deeper via SQLite if needed.
 - **IDLE re-issued every `idle_timeout` (default 1500s).** Lower it if your

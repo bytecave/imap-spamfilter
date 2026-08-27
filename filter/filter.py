@@ -1048,10 +1048,17 @@ def rspamd_scan(
     per-user classifier (with `users_enabled = true`) looks up Bayes data
     under that identity instead of the message recipient. Multiple accounts
     using the same `bayes_user` share a Bayes namespace.
+
+    HTTP `From` is the message From address (rspamd treats it as
+    envelope-from for SPF/DMARC). It is omitted when From is empty.
+    IMAP has no SMTP client IP — do not send `Ip` or `Helo`.
     """
     try:
         rcpt = bayes_user or recipient
-        headers = {"Rcpt": rcpt, "From": recipient}
+        headers: dict[str, str] = {"Rcpt": rcpt}
+        _msgid, _subject, sender = parse_envelope(raw)
+        if sender:
+            headers["From"] = sender
         resp = requests.post(RSPAMD_SCAN_URL, data=raw, headers=headers, timeout=HTTP_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
