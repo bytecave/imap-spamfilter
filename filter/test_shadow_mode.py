@@ -123,9 +123,34 @@ class RecordingIMAP:
         return list(self.search_uids)
 
     def fetch(self, uids, parts):
+        parts_b = [p if isinstance(p, bytes) else str(p).encode() for p in parts]
+        wants_body = any(p in (b"BODY[]", b"BODY.PEEK[]") for p in parts_b)
         out = {}
         for u in uids:
-            out[u] = dict(self.fetch_by_uid.get(u, {}))
+            stored = dict(self.fetch_by_uid.get(u, {}))
+            body = stored.get(b"BODY[]") or stored.get(b"BODY.PEEK[]")
+            size = stored.get(b"RFC822.SIZE")
+            if size is None and body is not None:
+                size = len(body)
+            if wants_body and size is not None and int(size) > f.MAX_FETCH_BYTES:
+                raise AssertionError(
+                    f"BODY fetch for oversize uid={u} size={size}"
+                )
+            rec = {}
+            for p in parts_b:
+                if p == b"RFC822.SIZE":
+                    if size is not None:
+                        rec[p] = int(size)
+                elif p in (b"BODY[]", b"BODY.PEEK[]"):
+                    if body is not None:
+                        rec[b"BODY[]"] = body
+                elif p == b"FLAGS":
+                    rec[p] = stored.get(b"FLAGS", ())
+                elif p == b"INTERNALDATE":
+                    rec[p] = stored.get(b"INTERNALDATE")
+                elif p in stored:
+                    rec[p] = stored[p]
+            out[u] = rec
         return out
 
 

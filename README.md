@@ -658,6 +658,10 @@ Restore is the reverse: stop the four containers, extract the tar over
   server drops idle connections faster.
 - **No multi-host coordination.** Don't run two filter instances against
   the same mailbox.
+- **Messages larger than 5 MiB are not fully downloaded.** They stay in
+  place, are never auto-moved or scored, and are logged as
+  `skipped_oversize`. Train-* oversize is moved to Trained-* unlearned
+  so drain cannot loop.
 
 ---
 

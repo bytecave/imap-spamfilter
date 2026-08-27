@@ -90,10 +90,22 @@ class _FakeIMAP:
         return []
 
     def fetch(self, uids, parts):
+        parts_b = [p if isinstance(p, bytes) else str(p).encode() for p in parts]
         out = {}
         for u in uids:
             mid = next(m for m, uu in self._uid.items() if uu == u)
-            out[u] = {b"BODY[]": self._raw[mid]}
+            raw = self._raw[mid]
+            rec = {}
+            for p in parts_b:
+                if p == b"RFC822.SIZE":
+                    rec[p] = len(raw)
+                elif p in (b"BODY[]", b"BODY.PEEK[]"):
+                    rec[b"BODY[]"] = raw
+                elif p == b"FLAGS":
+                    rec[p] = ()
+                elif p == b"INTERNALDATE":
+                    rec[p] = None
+            out[u] = rec
         return out
 
 

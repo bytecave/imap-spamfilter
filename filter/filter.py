@@ -1024,6 +1024,73 @@ def fetch_chunked(
         yield from batch.items()
 
 
+def _rfc822_size(data: dict) -> int | None:
+    """Parse IMAP FETCH RFC822.SIZE. None if absent or unparseable."""
+    v = data.get(b"RFC822.SIZE")
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _body_bytes(data: dict) -> bytes | None:
+    raw = data.get(b"BODY[]") or data.get(b"BODY.PEEK[]")
+    return raw if raw else None
+
+
+def _log_skipped_oversize(
+    db: "Db",
+    log: logging.Logger,
+    *,
+    uid: int,
+    folder: str,
+    size: int | None,
+    msgid: str | None = None,
+) -> None:
+    log.info("skipped_oversize uid=%s folder=%s size=%s", uid, folder, size)
+    db.log_event(
+        "skipped_oversize",
+        msgid,
+        detail=f"uid={uid} folder={folder} size={size}",
+    )
+
+
+def fetch_under_cap(
+    client: IMAPClient, uids: list[int]
+) -> Iterator[tuple[int, dict, bool]]:
+    """Yield (uid, merged_data, oversize) in SCAN_FETCH_CHUNK batches.
+
+    Phase 1 FETCHes RFC822.SIZE, FLAGS, INTERNALDATE. Phase 2 FETCHes
+    BODY.PEEK[] only for messages whose SIZE is known and <= MAX_FETCH_BYTES.
+    oversize=True when SIZE is missing or exceeds the cap; data then has
+    no body. Fail closed: never download an unbounded payload.
+    """
+    meta_items = [b"RFC822.SIZE", b"FLAGS", b"INTERNALDATE"]
+    for start in range(0, len(uids), SCAN_FETCH_CHUNK):
+        if SHUTDOWN.is_set():
+            return
+        chunk = uids[start : start + SCAN_FETCH_CHUNK]
+        meta = client.fetch(chunk, meta_items)
+        under: list[int] = []
+        oversize_uids: set[int] = set()
+        for uid in chunk:
+            data = meta.get(uid) or {}
+            size = _rfc822_size(data)
+            if size is None or size > MAX_FETCH_BYTES:
+                oversize_uids.add(uid)
+            else:
+                under.append(uid)
+        bodies = client.fetch(under, [b"BODY.PEEK[]"]) if under else {}
+        for uid in chunk:
+            data = dict(meta.get(uid) or {})
+            extra = bodies.get(uid)
+            if extra:
+                data.update(extra)
+            yield uid, data, uid in oversize_uids
+
+
 # ---------------------------------------------------------------------------
 # Per-account worker
 # ---------------------------------------------------------------------------
@@ -1237,11 +1304,15 @@ def scan_inbox(
         if SHUTDOWN.is_set():
             return
         chunk = candidates[chunk_start : chunk_start + SCAN_FETCH_CHUNK]
-        fetched = client.fetch(chunk, [b"BODY.PEEK[]", b"FLAGS", b"INTERNALDATE"])
-        for uid, data in fetched.items():
+        for uid, data, oversize in fetch_under_cap(client, chunk):
             if SHUTDOWN.is_set():
                 return
-            raw = data.get(b"BODY[]") or data.get(b"BODY.PEEK[]")
+            if oversize:
+                _log_skipped_oversize(
+                    db, log, uid=uid, folder=fmap["inbox"], size=_rfc822_size(data),
+                )
+                continue
+            raw = _body_bytes(data)
             if not raw:
                 continue
             flags = _kw(data.get(b"FLAGS", ()))
@@ -1409,60 +1480,81 @@ def execute_due_moves(client: IMAPClient, db: Db, log: logging.Logger, acc: Acco
 
 
 def poll_junk(client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fmap: dict[str, str]) -> None:
-    select_with_uidvalidity_check(
+    uv = select_with_uidvalidity_check(
         client, db, fmap["junk"], log, readonly=True
     )
-    uids = client.search(["ALL"])
-    if not uids:
-        # Still process any time-due pending learns from DB even with no junk content.
+    junk = fmap["junk"]
+    bookmark = db.get_scan_bookmark(junk, uv)
+    if bookmark is None:
+        existing = client.search(["ALL"])
+        init_uid = max(existing) if existing else 0
+        with db.tx():
+            db.set_scan_bookmark(junk, uv, init_uid)
+            db.log_event(
+                "scan_bookmark_init",
+                detail=f"junk uv={uv} max_uid={init_uid} skipped={len(existing) if existing else 0}",
+            )
+        log.info(
+            "poll_junk: initialized bookmark for %s (uv=%d) at uid=%d, "
+            "skipping %d pre-existing messages",
+            junk, uv, init_uid, len(existing) if existing else 0,
+        )
         process_pending_learns(client, db, log, acc, fmap)
         return
-    # Chunk the FETCH so a very large Junk folder does not pull every
-    # message body into memory at once (same rationale as scan_inbox).
-    for chunk_start in range(0, len(uids), SCAN_FETCH_CHUNK):
-        if SHUTDOWN.is_set():
-            return
-        chunk = uids[chunk_start : chunk_start + SCAN_FETCH_CHUNK]
-        fetched = client.fetch(chunk, [b"BODY.PEEK[]", b"FLAGS", b"INTERNALDATE"])
-        for uid, data in fetched.items():
+
+    new_range = f"{bookmark + 1}:*"
+    uids = sorted(u for u in (client.search(["UID", new_range]) or []) if u > bookmark)
+    if uids:
+        for chunk_start in range(0, len(uids), SCAN_FETCH_CHUNK):
             if SHUTDOWN.is_set():
                 return
-            raw = data.get(b"BODY[]") or data.get(b"BODY.PEEK[]")
-            if not raw:
-                continue
-            flags = _kw(data.get(b"FLAGS", ()))
-            msgid, subject, sender = parse_envelope(raw)
-            if not msgid:
-                continue
-            prior = db.get_message(msgid)
-            prior_folder = prior["current_folder"] if prior else None
-            with db.tx():
-                db.upsert_message(msgid, fmap["junk"], sender, subject,
-                                  _internaldate_ts(data))
+            chunk = uids[chunk_start : chunk_start + SCAN_FETCH_CHUNK]
+            for uid, data, oversize in fetch_under_cap(client, chunk):
+                if SHUTDOWN.is_set():
+                    return
+                if oversize:
+                    _log_skipped_oversize(
+                        db, log, uid=uid, folder=junk, size=_rfc822_size(data),
+                    )
+                    continue
+                raw = _body_bytes(data)
+                if not raw:
+                    continue
+                flags = _kw(data.get(b"FLAGS", ()))
+                msgid, subject, sender = parse_envelope(raw)
+                if not msgid:
+                    continue
+                prior = db.get_message(msgid)
+                prior_folder = prior["current_folder"] if prior else None
+                with db.tx():
+                    db.upsert_message(msgid, junk, sender, subject,
+                                      _internaldate_ts(data))
 
-            # Filter put it here: nothing to learn. Skip.
-            if prior is not None and prior["our_action"] == "moved_to_junk":
-                continue
-            # Learn spam only from a confirmed user move Inbox -> Junk,
-            # i.e. we have a prior row showing the message was in Inbox.
-            # Mail with no prior row (delivered straight to Junk by the
-            # provider's own filter, never seen in Inbox) is NOT an
-            # explicit user move and is deliberately not learned - that
-            # would train Bayes on the provider's verdict, including its
-            # false positives.
-            if prior_folder == fmap["inbox"]:
-                if JUNK_KEYWORD in flags:
-                    try_learn(db, log, acc, raw, msgid, "spam", reason="user_move+junk_kw")
-                else:
-                    with db.tx():
-                        if not prior or prior["pending_learn"] != "spam":
-                            db.update_message(
-                                msgid,
-                                pending_learn="spam",
-                                pending_learn_at=int(time.time()),
-                                moved_to_junk_at=int(time.time()),
-                            )
-                            db.log_event("pending_spam", msgid, detail="user move inbox->junk")
+                # Filter put it here: nothing to learn. Skip.
+                if prior is not None and prior["our_action"] == "moved_to_junk":
+                    continue
+                # Learn spam only from a confirmed user move Inbox -> Junk,
+                # i.e. we have a prior row showing the message was in Inbox.
+                # Mail with no prior row (delivered straight to Junk by the
+                # provider's own filter, never seen in Inbox) is NOT an
+                # explicit user move and is deliberately not learned - that
+                # would train Bayes on the provider's verdict, including its
+                # false positives.
+                if prior_folder == fmap["inbox"]:
+                    if JUNK_KEYWORD in flags:
+                        try_learn(db, log, acc, raw, msgid, "spam", reason="user_move+junk_kw")
+                    else:
+                        with db.tx():
+                            if not prior or prior["pending_learn"] != "spam":
+                                db.update_message(
+                                    msgid,
+                                    pending_learn="spam",
+                                    pending_learn_at=int(time.time()),
+                                    moved_to_junk_at=int(time.time()),
+                                )
+                                db.log_event("pending_spam", msgid, detail="user move inbox->junk")
+        with db.tx():
+            db.set_scan_bookmark(junk, uv, max(uids))
 
     process_pending_learns(client, db, log, acc, fmap)
 
@@ -1519,8 +1611,18 @@ def process_pending_learns(
                     db.log_event("pending_lost", msgid, detail=f"not found in {folder}")
                 continue
             uid = uids[0]
-            data = client.fetch([uid], [b"BODY.PEEK[]"])
-            raw = data.get(uid, {}).get(b"BODY[]") or data.get(uid, {}).get(b"BODY.PEEK[]")
+            fetched = list(fetch_under_cap(client, [uid]))
+            if not fetched:
+                continue
+            _uid, data, oversize = fetched[0]
+            if oversize:
+                _log_skipped_oversize(
+                    db, log, uid=uid, folder=folder, size=_rfc822_size(data), msgid=msgid,
+                )
+                with db.tx():
+                    db.update_message(msgid, pending_learn=None, pending_learn_at=None)
+                continue
+            raw = _body_bytes(data)
             if not raw:
                 continue
             if try_learn(db, log, acc, raw, msgid, kind, reason="grace_elapsed"):
@@ -1579,10 +1681,16 @@ def _drain_train_folder(
     moved_msgids: list[str] = []
     log_tag = f"drain_train_{kind}"
     reason = f"train_{kind}_folder"
-    for uid, data in fetch_chunked(client, uids, [b"BODY.PEEK[]", b"INTERNALDATE"]):
+    for uid, data, oversize in fetch_under_cap(client, uids):
         if SHUTDOWN.is_set():
             return
-        raw = data.get(b"BODY[]") or data.get(b"BODY.PEEK[]")
+        if oversize:
+            _log_skipped_oversize(
+                db, log, uid=uid, folder=folder, size=_rfc822_size(data),
+            )
+            learned_uids.append(uid)
+            continue
+        raw = _body_bytes(data)
         if not raw:
             continue
         msgid, subject, sender = parse_envelope(raw)
