@@ -1,0 +1,87 @@
+# ByteLord VPS deployment for imap-spamfilter.
+#
+# Deployed location: /opt/bytelord/compose/imap-spamfilter/compose.yaml
+# Source of truth:   imap-spamfilter/deploy/bytelord-compose.yaml
+# Secrets:           /opt/bytelord/secrets/imap-spamfilter.env  (mode 600)
+# Data:              /opt/bytelord/data/imap-spamfilter/  (redis, rspamd, state)
+# Accounts:          /opt/bytelord/projects/imap-spamfilter/accounts.yml (gitignored)
+# Repo checkout:     /opt/bytelord/projects/imap-spamfilter
+#
+# First-time setup:
+#   bash /opt/bytelord/projects/imap-spamfilter/deploy/vps-bootstrap.sh
+#   nano /opt/bytelord/projects/imap-spamfilter/accounts.yml
+#   export SPAMFILTER_UID=$(id -u) SPAMFILTER_GID=$(id -g)
+#   docker compose -f /opt/bytelord/compose/imap-spamfilter/compose.yaml up -d --build
+#
+# Secrets file keys (RSPAMD_PASSWORD required on VPS; REDIS_PASSWORD optional):
+#   RSPAMD_PASSWORD=...     rspamd controller + filter auth
+#   REDIS_PASSWORD=...      optional; bootstrap generates if omitted
+
+x-logging: &log-rotate
+  driver: json-file
+  options:
+    max-size: 50m
+    max-file: "5"
+
+x-secrets-file: &secrets-file /opt/bytelord/secrets/imap-spamfilter.env
+
+services:
+  spamfilter-redis:
+    image: redis:8-alpine
+    container_name: spamfilter-redis
+    restart: unless-stopped
+    logging: *log-rotate
+    volumes:
+      - /opt/bytelord/data/imap-spamfilter/redis:/data
+      - /opt/bytelord/data/imap-spamfilter/redis-config:/usr/local/etc/redis:ro
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    networks: [spamnet]
+
+  spamfilter-unbound:
+    image: mvance/unbound:1.22.0
+    container_name: spamfilter-unbound
+    restart: unless-stopped
+    logging: *log-rotate
+    networks: [spamnet]
+
+  spamfilter-rspamd:
+    image: rspamd/rspamd:4.1.3
+    container_name: spamfilter-rspamd
+    restart: unless-stopped
+    logging: *log-rotate
+    depends_on: [spamfilter-redis, spamfilter-unbound]
+    volumes:
+      - /opt/bytelord/data/imap-spamfilter/rspamd/local.d:/etc/rspamd/local.d:ro
+      - /opt/bytelord/data/imap-spamfilter/rspamd/data:/var/lib/rspamd
+    networks: [spamnet]
+
+  spamfilter:
+    build:
+      context: /opt/bytelord/projects/imap-spamfilter/filter
+    image: ghcr.io/marcelverdult/imap-spamfilter:latest
+    container_name: spamfilter
+    restart: unless-stopped
+    logging: *log-rotate
+    depends_on: [spamfilter-rspamd]
+    env_file:
+      - *secrets-file
+    environment:
+      SECRETS_FILE: /run/secrets/imap-spamfilter.env
+      RSPAMD_SCAN_URL: http://spamfilter-rspamd:11333/checkv2
+      RSPAMD_LEARN_URL: http://spamfilter-rspamd:11334
+      STATE_DIR: /state
+      LOG_LEVEL: INFO
+      TZ: Europe/Berlin
+    user: "${SPAMFILTER_UID:-1001}:${SPAMFILTER_GID:-1001}"
+    volumes:
+      - *secrets-file:/run/secrets/imap-spamfilter.env:ro
+      - /opt/bytelord/projects/imap-spamfilter/accounts.yml:/app/accounts.yml:ro
+      - /opt/bytelord/data/imap-spamfilter/state:/state
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks: [spamnet]
+
+networks:
+  spamnet:
+    name: spamnet
+    driver: bridge

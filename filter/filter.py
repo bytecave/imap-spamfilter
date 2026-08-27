@@ -48,12 +48,56 @@ HEARTBEAT_PATH = STATE_DIR / "heartbeat"
 RSPAMD_SCAN_URL = os.environ.get("RSPAMD_SCAN_URL", "http://spamfilter-rspamd:11333/checkv2")
 RSPAMD_LEARN_URL = os.environ.get("RSPAMD_LEARN_URL", "http://spamfilter-rspamd:11334")
 
+# ByteLord VPS: /opt/bytelord/secrets/imap-spamfilter.env (mounted in compose).
+# Unraid: bootstrap-generated state/controller.password.
+DEFAULT_SECRETS_FILE = Path("/opt/bytelord/secrets/imap-spamfilter.env")
 
-def _load_rspamd_password() -> str:
-    val = os.environ.get("RSPAMD_PASSWORD", "").strip()
+
+def _parse_env_file(path: Path) -> dict[str, str]:
+    """Parse a shell-style KEY=VALUE env file (no variable expansion)."""
+    out: dict[str, str] = {}
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if s.startswith("export "):
+            s = s[7:].strip()
+        if "=" not in s:
+            continue
+        key, _, val = s.partition("=")
+        key = key.strip()
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+            val = val[1:-1]
+        if key:
+            out[key] = val
+    return out
+
+
+def _secrets_file_path() -> Path:
+    raw = os.environ.get("SECRETS_FILE", "").strip()
+    if raw:
+        return Path(raw)
+    return DEFAULT_SECRETS_FILE
+
+
+def _load_secret(key: str) -> str:
+    """Resolve a secret: process env, then SECRETS_FILE, then empty."""
+    val = os.environ.get(key, "").strip()
     if val:
         return val
-    # Fallback: shared appdata file written by the Unraid bootstrap script.
+    return _parse_env_file(_secrets_file_path()).get(key, "").strip()
+
+
+def _load_rspamd_password() -> str:
+    val = _load_secret("RSPAMD_PASSWORD")
+    if val:
+        return val
+    # Fallback: appdata file written by bootstrap when secrets file is absent.
     pwfile = Path(os.environ.get("STATE_DIR", "/state")) / "controller.password"
     if pwfile.is_file():
         return pwfile.read_text().strip()

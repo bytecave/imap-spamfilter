@@ -280,54 +280,70 @@ the first `flag`/`move` retention pass will honour `junk_retention_days`
 
 ---
 
+## ByteLord VPS install
+
+Follows the same layout as gitea, pgadmin, and aidm on this host:
+
+| Path | Role |
+| --- | --- |
+| `/opt/bytelord/secrets/imap-spamfilter.env` | `RSPAMD_PASSWORD` (required), `REDIS_PASSWORD` (optional) |
+| `/opt/bytelord/data/imap-spamfilter/` | redis, rspamd configs, SQLite state (not accounts) |
+| `/opt/bytelord/projects/imap-spamfilter/accounts.yml` | account list (gitignored; Dummy passwords until OAuth proxy) |
+| `/opt/bytelord/compose/imap-spamfilter/compose.yaml` | production compose (source: `deploy/bytelord-compose.yaml`) |
+| `/opt/bytelord/projects/imap-spamfilter/` | git checkout |
+
+Put your rspamd controller password in the secrets file (you likely already
+have). Bootstrap reads it and renders rspamd/redis configs so the filter,
+dashboard, and rspamd all use the **same** password — no duplicate
+`state/controller.password` to keep in sync.
+
+```bash
+# One-time layout + render configs from /opt/bytelord/secrets/imap-spamfilter.env
+bash /opt/bytelord/projects/imap-spamfilter/deploy/vps-bootstrap.sh
+
+# Edit accounts in the repo checkout (gitignored):
+nano /opt/bytelord/projects/imap-spamfilter/accounts.yml
+
+# Build and start (env_file + secrets mount wired in compose):
+export SPAMFILTER_UID=$(id -u) SPAMFILTER_GID=$(id -g)
+docker compose -f /opt/bytelord/compose/imap-spamfilter/compose.yaml up -d --build
+docker compose -f /opt/bytelord/compose/imap-spamfilter/compose.yaml logs -f spamfilter
+```
+
+After changing `RSPAMD_PASSWORD` in the secrets file, re-run
+`deploy/vps-bootstrap.sh` and restart the stack so rspamd's rendered
+config picks up the new value.
+
+The filter reads secrets in this order: `RSPAMD_PASSWORD` env var (from
+compose `env_file`), then the mounted secrets file (`SECRETS_FILE`), then
+`state/controller.password` (Unraid fallback).
+
+Dashboard is on `127.0.0.1:8080` only. Add users with
+`docker exec -it spamfilter python dashboard.py`.
+
+---
+
 ## Alternative install: any Linux host with Docker (no Unraid)
 
 The published `ghcr.io/marcelverdult/imap-spamfilter` image is multi-arch
 (`linux/amd64` and `linux/arm64`), so the same stack runs on Synology,
 generic Linux servers, Raspberry Pi 4/5, ARM mini-PCs, etc.
 
+For a generic host, use the repo-root `docker-compose.yml` (Unraid paths)
+or copy `deploy/bytelord-compose.yaml` and adjust paths.
+
 ```bash
 git clone https://github.com/marcelverdult/imap-spamfilter
 cd imap-spamfilter
 
-# Pick a host path for appdata and point docker-compose.yml at it:
 export SPAMFILTER_APP=/srv/spamfilter
-sed -i "s|/mnt/user/appdata/spamfilter|$SPAMFILTER_APP|g" docker-compose.yml
+bash deploy/vps-bootstrap.sh   # or unraid/bootstrap.sh with SPAMFILTER_APP set
 
-# Run the bootstrap: it creates the directory layout, copies (or fetches
-# a pinned commit of) the rspamd + redis configs, and generates the
-# rspamd controller and Redis passwords. SPAMFILTER_APP tells it where.
-bash unraid/bootstrap.sh
-
-# Edit the seeded account list (the only file you must touch by hand):
 nano $SPAMFILTER_APP/accounts.yml
-
-# Production secrets live outside the git tree (mode 600). Do not rely
-# on a compose-adjacent .env (gitignored; easy to recreate empty).
-sudo install -d -m 700 /opt/bytelord/secrets
-sudo install -m 600 /dev/null /opt/bytelord/secrets/imap-spamfilter.env
-# Optional: put RSPAMD_PASSWORD=... there only if you are not using
-# bootstrap's state/controller.password. Dashboard vars go here too.
-
-docker compose pull        # use the prebuilt ghcr image
-docker compose --env-file /opt/bytelord/secrets/imap-spamfilter.env up -d
-docker compose --env-file /opt/bytelord/secrets/imap-spamfilter.env logs -f spamfilter
+docker compose up -d --build
 ```
 
-`bootstrap.sh` is the single source of the rendered configs — the
-rspamd `worker-controller.inc`, the rspamd Redis client config, and
-the Redis server config — so the compose stack just mounts what it
-produced, exactly like the Unraid path. Re-run it after pulling config
-changes from the repo; a new `unraid/bootstrap.version` refreshes
-templates without touching `accounts.yml` or generated passwords.
-
-Leave `RSPAMD_PASSWORD` unset in the env file and the filter reads the
-bootstrap-generated `state/controller.password`. A compose-adjacent
-`.env` is fine for a laptop/dev clone only.
-
-The compose file matches the Unraid layout one-for-one, so backups,
-docs, and the SQLite audit queries all apply the same way. Pick one
-install path; don't run both against the same mailbox.
+On Unraid, use the templates under `unraid/` instead.
 
 ---
 
