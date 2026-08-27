@@ -1,6 +1,11 @@
 # Optional: brings the same four containers up via Compose Manager.
 # The recommended install path on Unraid is via Community Applications
 # (one template per container). See unraid/*.xml and README.md.
+#
+# Production secrets (VPS): do not rely on a compose-adjacent .env
+# (gitignored; easy to recreate empty). Use mode 600:
+#   docker compose --env-file /opt/bytelord/secrets/imap-spamfilter.env up -d
+# A local .env is fine for a laptop/dev clone only.
 
 x-logging: &log-rotate
   driver: json-file
@@ -25,14 +30,14 @@ services:
     networks: [spamnet]
 
   spamfilter-unbound:
-    image: mvance/unbound:latest
+    image: mvance/unbound:1.22.0
     container_name: spamfilter-unbound
     restart: unless-stopped
     logging: *log-rotate
     networks: [spamnet]
 
   spamfilter-rspamd:
-    image: rspamd/rspamd:latest
+    image: rspamd/rspamd:4.1.3
     container_name: spamfilter-rspamd
     restart: unless-stopped
     logging: *log-rotate

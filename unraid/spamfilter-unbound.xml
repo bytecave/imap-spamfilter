@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <Container version="2">
   <Name>spamfilter-unbound</Name>
-  <Repository>mvance/unbound:latest</Repository>
+  <Repository>mvance/unbound:1.22.0</Repository>
   <Registry>https://hub.docker.com/r/mvance/unbound</Registry>
   <Network>spamnet</Network>
   <MyIP/>

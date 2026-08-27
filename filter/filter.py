@@ -216,9 +216,21 @@ def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]
     return out
 
 
-def _apply_env_overrides(defaults: dict[str, Any]) -> dict[str, Any]:
+def _apply_env_overrides(
+    defaults: dict[str, Any], yaml_keys: set[str] | None = None
+) -> dict[str, Any]:
+    """Apply Unraid/container env vars onto merged defaults.
+
+    Keys present in YAML ``defaults:`` win. Env fills only keys the
+    operator did not set in accounts.yml, so a template
+    DEFAULT_JUNK_RETENTION_DAYS=10 cannot clobber
+    ``defaults.junk_retention_days: 30``.
+    """
     out = dict(defaults)
+    skip = yaml_keys or set()
     for cfg_key, env_key in _ENV_DEFAULT_OVERRIDES.items():
+        if cfg_key in skip:
+            continue
         val = os.environ.get(env_key)
         if val is None or val == "":
             continue
@@ -383,11 +395,14 @@ def load_accounts(path: Path) -> list[Account]:
     raw = yaml.safe_load(path.read_text())
     if not isinstance(raw, dict) or "accounts" not in raw:
         raise SystemExit(f"{path}: missing 'accounts' key")
-    # Built-ins, then user defaults, then env overrides.
-    defaults = _apply_env_overrides(_deep_merge(BUILTIN_DEFAULTS, raw.get("defaults") or {}))
     user_defaults = raw.get("defaults") or {}
     if not isinstance(user_defaults, dict):
         raise SystemExit(f"{path}: 'defaults' must be a mapping")
+    # Built-ins, then YAML defaults, then env only for keys YAML omitted.
+    defaults = _apply_env_overrides(
+        _deep_merge(BUILTIN_DEFAULTS, user_defaults),
+        yaml_keys=set(user_defaults),
+    )
     out: list[Account] = []
     seen: set[str] = set()
     for entry in raw["accounts"]:

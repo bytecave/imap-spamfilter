@@ -13,8 +13,8 @@ Four containers on a shared `spamnet` Docker network:
 | Container          | Image                  | Role |
 | ------------------ | ---------------------- | ---- |
 | spamfilter-redis   | `redis:8-alpine`       | Persists rspamd Bayes tokens, fuzzy hashes, neural weights (AOF + RDB). |
-| spamfilter-unbound | `mvance/unbound:latest`| Local recursive DNS. Keeps DNSBL lookups out of shared-resolver quotas. |
-| spamfilter-rspamd  | `rspamd/rspamd:latest` | Scores messages: Bayes / fuzzy / neural / RBL. No autolearn. |
+| spamfilter-unbound | `mvance/unbound:1.22.0`| Local recursive DNS. Keeps DNSBL lookups out of shared-resolver quotas. |
+| spamfilter-rspamd  | `rspamd/rspamd:4.1.3` | Scores messages: Bayes / fuzzy / neural / RBL. No autolearn. |
 | spamfilter         | this repo (custom)     | Python service. One thread per account, IDLE on Inbox, polls Junk, scores, moves, learns. |
 
 Per-account operating modes (set in `accounts.yml`, promoted manually):
@@ -143,21 +143,34 @@ The script is idempotent and does all of the following:
 - Creates the user-defined `spamnet` Docker network
 - Creates the `/mnt/user/appdata/spamfilter/{redis,redis-config,state,rspamd/data,rspamd/local.d}` layout
   (the `redis/` and `rspamd/data/` dirs are owned by the images' internal uids, mode 750)
-- Downloads the rspamd `local.d/*` configs from this repo (only if missing)
+- Copies rspamd `local.d/*` from the git checkout when present; otherwise fetches a
+  **pinned commit** (`SPAMFILTER_REF`, never floating `/main`)
 - Seeds `accounts.yml` from `accounts.yml.example` (only if missing)
 - Generates random passwords into `state/controller.password` (rspamd controller)
   and `state/redis.password` (Redis auth), only if missing
 - Renders `worker-controller.inc`, the rspamd `redis.conf` client config, and the
-  Redis server config into `redis-config/redis.conf` with those passwords substituted in
+  Redis server config into `redis-config/redis.conf` with those passwords substituted
+  in (awk reads the password file; secrets never appear on `ps`)
+- Writes `$APP/.bootstrap.version` from `unraid/bootstrap.version`. A missing or
+  different stamp refreshes static `local.d` files and templates, then re-renders
+  secret files. It never overwrites `accounts.yml` or `state/*.password`.
 
 Set the schedule to **"At First Array Start Only"** and click **Run Script**
 once to bootstrap immediately. It'll re-run on every array start, so the
 network/layout are recreated automatically after a USB reformat or migration.
+After pulling template/config fixes, re-run the script so the version stamp
+can refresh `local.d` (your accounts and generated passwords stay put).
 
-If you'd rather not use User Scripts, run the same script over SSH:
+If you'd rather not use User Scripts, clone the repo and run the script over SSH
+(preferred: copies configs from disk). Do not pipe bootstrap.sh from
+`.../main` — that ref floats. Without a clone, curl a **commit SHA**:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/main/unraid/bootstrap.sh | bash
+# From a checkout:
+bash unraid/bootstrap.sh
+
+# No checkout: pin the script URL to a commit (same idea as SPAMFILTER_REF).
+# curl -fsSL https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/<commit>/unraid/bootstrap.sh | bash
 ```
 
 ### 1. Edit `accounts.yml`
@@ -181,7 +194,8 @@ local template), import each XML from this repo's `unraid/` directory:
    the bootstrap-generated `state/controller.password` file)
 4. `unraid/spamfilter.xml`         -> set `DEFAULT_JUNK_RETENTION_DAYS` and
    `DEFAULT_TRAINED_RETENTION_DAYS` if you want non-defaults (defaults
-   10 / 7), install
+   10 / 7) **and** `accounts.yml` `defaults:` omits those keys. Explicit YAML
+   wins. Then install.
 
 Each template defaults its paths under `/mnt/user/appdata/spamfilter/<service>`,
 matches typical Unraid conventions, and references `Network=spamnet`.
@@ -280,26 +294,36 @@ cd imap-spamfilter
 export SPAMFILTER_APP=/srv/spamfilter
 sed -i "s|/mnt/user/appdata/spamfilter|$SPAMFILTER_APP|g" docker-compose.yml
 
-# Run the bootstrap: it creates the directory layout, downloads and
-# renders the rspamd + redis configs, and generates the rspamd
-# controller and Redis passwords. SPAMFILTER_APP tells it where.
+# Run the bootstrap: it creates the directory layout, copies (or fetches
+# a pinned commit of) the rspamd + redis configs, and generates the
+# rspamd controller and Redis passwords. SPAMFILTER_APP tells it where.
 bash unraid/bootstrap.sh
 
 # Edit the seeded account list (the only file you must touch by hand):
 nano $SPAMFILTER_APP/accounts.yml
 
+# Production secrets live outside the git tree (mode 600). Do not rely
+# on a compose-adjacent .env (gitignored; easy to recreate empty).
+sudo install -d -m 700 /opt/bytelord/secrets
+sudo install -m 600 /dev/null /opt/bytelord/secrets/imap-spamfilter.env
+# Optional: put RSPAMD_PASSWORD=... there only if you are not using
+# bootstrap's state/controller.password. Dashboard vars go here too.
+
 docker compose pull        # use the prebuilt ghcr image
-docker compose up -d
-docker compose logs -f spamfilter
+docker compose --env-file /opt/bytelord/secrets/imap-spamfilter.env up -d
+docker compose --env-file /opt/bytelord/secrets/imap-spamfilter.env logs -f spamfilter
 ```
 
 `bootstrap.sh` is the single source of the rendered configs — the
 rspamd `worker-controller.inc`, the rspamd Redis client config, and
 the Redis server config — so the compose stack just mounts what it
 produced, exactly like the Unraid path. Re-run it after pulling config
-changes from the repo. `.env` is optional: leave `RSPAMD_PASSWORD`
-unset and the filter reads the bootstrap-generated
-`state/controller.password`.
+changes from the repo; a new `unraid/bootstrap.version` refreshes
+templates without touching `accounts.yml` or generated passwords.
+
+Leave `RSPAMD_PASSWORD` unset in the env file and the filter reads the
+bootstrap-generated `state/controller.password`. A compose-adjacent
+`.env` is fine for a laptop/dev clone only.
 
 The compose file matches the Unraid layout one-for-one, so backups,
 docs, and the SQLite audit queries all apply the same way. Pick one
@@ -416,8 +440,11 @@ user's mailbox.
 | `learn_from_moves` | `true` | set `false` to disable all learning (scan-only) |
 
 The `DEFAULT_JUNK_RETENTION_DAYS` and `DEFAULT_TRAINED_RETENTION_DAYS`
-environment variables on the filter container override `defaults:` for
-those two keys (useful for the Unraid template form).
+environment variables on the filter container apply **only when that key
+is absent from YAML `defaults:`**. An explicit
+`defaults.junk_retention_days: 30` wins over a template field of `10`.
+Per-account keys still win via the usual merge. The Unraid form fills
+the gap when YAML omits the key.
 
 ### Bayes identity (sharing or isolating training across accounts)
 
@@ -483,6 +510,12 @@ Back up `redis/`, `state/`, and `accounts.yml`. Skip `rspamd/data/` and
 `redis-config/` (both regenerate — the latter is re-rendered by
 `bootstrap.sh` from `state/redis.password`). Unraid's built-in **CA
 Backup** plugin pointed at the appdata path is sufficient.
+
+Redis is capped at 1 GB with `maxmemory-policy noeviction` and Bayes
+`expire = 0`. That is intentional: LRU would silently drop tokens and
+degrade accuracy. Monitor Redis memory (`INFO memory`); if it approaches
+the cap, raise `maxmemory` in `redis/redis.conf.template` and re-run
+bootstrap. A full Redis **fails writes** (learns), it does not evict.
 
 ---
 
@@ -698,6 +731,7 @@ Restore is the reverse: stop the four containers, extract the tar over
 ├── rspamd/local.d/               # rspamd config templates + static configs
 └── unraid/                       # bootstrap.sh + Unraid Docker templates
     ├── bootstrap.sh
+    ├── bootstrap.version         # bump to refresh installed local.d/templates
     ├── spamfilter-redis.xml
     ├── spamfilter-unbound.xml
     ├── spamfilter-rspamd.xml

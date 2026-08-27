@@ -65,7 +65,10 @@ accounts:
 #       # no bayes_user -> isolated, keyed by kid@verdult.de
 
 # Optional: shared overrides for all accounts above. Most users don't need this.
-# Per-account values still take precedence.
+# Per-account values still take precedence. YAML `defaults:` for
+# junk_retention_days / trained_retention_days wins over the Unraid
+# template env (DEFAULT_JUNK_RETENTION_DAYS / DEFAULT_TRAINED_RETENTION_DAYS).
+# Those env vars apply only when the corresponding YAML key is omitted.
 # defaults:
 #   threshold: 9.0
 #   junk_retention_days: 30
