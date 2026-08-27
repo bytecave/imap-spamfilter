@@ -603,11 +603,12 @@ old entries roll out of the window. No DB state, no manual recovery.
 ### Safe-mode (sticky-ish, scoped)
 
 The only sticky safe-mode is `scope="all"` triggered when Inbox UNSEEN
-exceeds `safe_mode_unseen_cap` (default 500) - a sanity check that
-something is wrong with the mailbox (mass-import, server restored from
-backup, etc.). Scanning halts for that account. Raise the per-account
-override in `accounts.yml` for inboxes that legitimately keep a large
-unread backlog.
+*above the scan bookmark* exceeds `safe_mode_unseen_cap` (default 500) -
+a sanity check that something is wrong with the mailbox (mass-import,
+server restored from backup, etc.). Historical unread mail below the
+bookmark does not count. Scanning halts for that account. Raise the
+per-account override in `accounts.yml` for inboxes that legitimately
+keep a large unread backlog of *new* mail.
 
 It **auto-exits** on the next `scan_inbox` pass once UNSEEN drops back
 under the cap, so the typical "I marked everything read" recovery is

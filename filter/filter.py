@@ -1300,9 +1300,17 @@ def scan_inbox(
     # Chunk the FETCH so a single oversized inbox does not allocate up
     # to len(candidates) * MAX_FETCH_BYTES at once. With 200 candidates
     # and 5 MB cap that would be 1 GB of resident memory.
+    #
+    # Bookmark advance is a prefix of terminally handled UIDs, not
+    # max(candidates). A rspamd blip / missing body must not skip mail
+    # forever. SHUTDOWN returns immediately without writing.
+    last_terminal: int | None = None
+    halted = False
     for chunk_start in range(0, len(candidates), SCAN_FETCH_CHUNK):
         if SHUTDOWN.is_set():
             return
+        if halted:
+            break
         chunk = candidates[chunk_start : chunk_start + SCAN_FETCH_CHUNK]
         for uid, data, oversize in fetch_under_cap(client, chunk):
             if SHUTDOWN.is_set():
@@ -1311,14 +1319,18 @@ def scan_inbox(
                 _log_skipped_oversize(
                     db, log, uid=uid, folder=fmap["inbox"], size=_rfc822_size(data),
                 )
+                last_terminal = uid
                 continue
             raw = _body_bytes(data)
             if not raw:
-                continue
+                halted = True
+                break
             flags = _kw(data.get(b"FLAGS", ()))
             msgid, subject, sender = parse_envelope(raw)
             if not msgid:
                 log.debug("inbox uid %s: no Message-ID, skipping", uid)
+                db.log_event("no_message_id", detail=f"uid={uid}")
+                last_terminal = uid
                 continue
 
             prior = db.get_message(msgid)
@@ -1344,13 +1356,16 @@ def scan_inbox(
                     with db.tx():
                         db.update_message(msgid, pending_learn="ham", pending_learn_at=int(time.time()))
                         db.log_event("pending_ham", msgid, detail="user revert")
+                last_terminal = uid
                 continue
 
             # Skip scoring on already-scored messages (avoid duplicate moves).
             if prior is not None and prior["our_score"] is not None:
+                last_terminal = uid
                 continue
             # Only score unseen messages on first appearance.
             if uid not in unseen:
+                last_terminal = uid
                 continue
 
             recipient = first_recipient(raw, acc.user)
@@ -1371,7 +1386,8 @@ def scan_inbox(
                             state.scan_fail_streak,
                         )
                         db.log_event("scan_fail_streak", detail=str(state.scan_fail_streak))
-                continue
+                halted = True
+                break
             if state is not None and state.scan_fail_streak:
                 log.info("rspamd scan recovered after %d failures", state.scan_fail_streak)
                 db.log_event("scan_recovered", detail=str(state.scan_fail_streak))
@@ -1383,6 +1399,7 @@ def scan_inbox(
             log.debug("scored %s = %.2f", msgid, score)
 
             if score < acc.threshold:
+                last_terminal = uid
                 continue
 
             # Over threshold: act according to mode.
@@ -1407,17 +1424,11 @@ def scan_inbox(
                         db.add_pending_move(uv, uid, msgid)
                         db.update_message(msgid, our_action="pending_move")
                         db.log_event("pending_move", msgid, detail=f"score={score:.2f}")
+            last_terminal = uid
 
-    # Loop fell through naturally: every candidate UID was considered.
-    # Advance the bookmark past the highest one so the next pass starts
-    # above it. set_scan_bookmark refuses to regress, so an early SHUTDOWN
-    # that skipped this point (return statements above) just leaves the
-    # bookmark where it was - next iteration re-discovers the same UIDs
-    # via UID range and reprocesses idempotently.
-    if candidates:
-        new_max = max(candidates)
+    if last_terminal is not None:
         with db.tx():
-            db.set_scan_bookmark(fmap["inbox"], uv, new_max)
+            db.set_scan_bookmark(fmap["inbox"], uv, last_terminal)
 
 
 def execute_due_moves(client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fmap: dict[str, str]) -> None:
