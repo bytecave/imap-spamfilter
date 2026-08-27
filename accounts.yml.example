@@ -27,6 +27,22 @@
 #     under whatever the server reports as Junk via SPECIAL-USE.
 #   - INBOX must already exist (RFC).
 #   - Override with `auto_special_folders: false` + explicit junk/trash.
+#
+# OAuth via email-oauth2-proxy (ByteLord / Docker):
+#   Point imap_host at the proxy service on spamnet. Local LOGIN password
+#   is Dummy (encrypts cached tokens); real auth is XOAUTH2 in the proxy.
+#   tls_mode: none requires allow_insecure_tls when the host is not
+#   loopback (Docker DNS names are not loopback).
+#
+#   accounts:
+#     - name: rich_bytecave
+#       imap_host: email-oauth2-proxy
+#       imap_port: 1993
+#       tls_mode: none
+#       allow_insecure_tls: true
+#       user: rich@bytecave.net
+#       password: "Dummy"
+#       mode: shadow
 
 accounts:
   - name: your_name

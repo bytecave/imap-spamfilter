@@ -1,6 +1,6 @@
 # Session handoff — imap-spamfilter (ByteLord VPS)
 
-**Last updated:** 2026-08-26  
+**Last updated:** 2026-08-27  
 **Repo:** `/opt/bytelord/projects/imap-spamfilter`  
 **Remote:** `github.com:bytecave/imap-spamfilter.git` (branch `main`)  
 **Upstream fork of:** marcelverdult/imap-spamfilter  
@@ -15,18 +15,16 @@ Self-hosted IMAP spam filter: Python filter + Rspamd + Redis + Unbound.
 One thread per mailbox; scores via Rspamd; moves/learns from Inbox↔Junk.
 Designed for ~16 IMAP accounts on this headless Ubuntu VPS (bytelord).
 
-**OAuth is not in this repo.** Real mailbox auth will go through
-`email-oauth2-proxy` (to be cloned as a **sibling** under
-`/opt/bytelord/projects/`). This filter will LOGIN with plaintext to the
-proxy on localhost/docker network; the proxy speaks XOAUTH2 to providers.
+**OAuth is not in this repo.** Mailbox auth goes through sibling
+`email-oauth2-proxy`. The filter LOGINs with plaintext Dummy to the proxy
+on `spamnet`; the proxy speaks XOAUTH2 to providers.
 
 ---
 
-## What we accomplished (slices 1–8 + VPS layout)
+## What we accomplished (slices 1–8 + VPS layout + OAuth PoC)
 
 All eight code-review slices are **implemented and pushed** to `origin/main`
-(through `61c05fd`). Local uncommitted work may also include VPS secrets
-alignment and project-dir `accounts.yml` — check `git status`.
+(through `61c05fd`). Check `git status` for local uncommitted work.
 
 | Slice | Spec | Summary |
 |---|---|---|
@@ -41,24 +39,35 @@ alignment and project-dir `accounts.yml` — check `git status`.
 
 Parent plan: `design-arch/sliced_plan_code_review_fixes.md` (status table = done).
 
+### OAuth PoC (2026-08-27) — working
+
+- `email-oauth2-proxy` on `spamnet`, M365 **app-only** (CCG) for
+  `rich@bytecave.net` only.
+- Filter in **shadow**: connected, IDLE yes, folder discovery (Junk Email /
+  Deleted Items), Train-* created, scoring live (`[shadow] would flag …`).
+- Filter image pinned to **Python 3.12** (imapclient 3.1.0 + Python 3.14
+  breaks `tls_mode: none` / `IMAP4WithTimeout`).
+
 ### ByteLord layout (current)
 
 | Path | Role |
 |---|---|
 | `/opt/bytelord/projects/imap-spamfilter/` | Git checkout + **accounts.yml** (gitignored) |
-| `/opt/bytelord/secrets/imap-spamfilter.env` | `RSPAMD_PASSWORD` (required); optional `REDIS_PASSWORD` |
+| `/opt/bytelord/projects/email-oauth2-proxy/` | Upstream clone + local Dockerfile/deploy overlay |
+| `/opt/bytelord/secrets/imap-spamfilter.env` | `RSPAMD_PASSWORD` and `REDIS_PASSWORD` (both required) |
+| `/opt/bytelord/secrets/email-oauth2-proxy.config` | Proxy INI (tenant, client_id, client_secret); mode 600 |
 | `/opt/bytelord/data/imap-spamfilter/` | redis data, redis-config, rspamd local.d+data, SQLite **state** |
-| `/opt/bytelord/compose/imap-spamfilter/compose.yaml` | Live compose (copy of `deploy/bytelord-compose.yaml`) |
+| `/opt/bytelord/data/email-oauth2-proxy/cache/` | proxy token cache + logs |
+| `/opt/bytelord/compose/imap-spamfilter/compose.yaml` | Live filter stack (`spamnet` **external**) |
+| `/opt/bytelord/compose/email-oauth2-proxy/compose.yaml` | Live proxy (`spamnet` external; `127.0.0.1:1993`) |
 
-**Secret resolution (filter):** env `RSPAMD_PASSWORD` → mounted `SECRETS_FILE`
-→ `$STATE_DIR/controller.password`. Bootstrap on VPS **copies**
-`RSPAMD_PASSWORD` from the secrets file into rendered rspamd configs so
-filter and rspamd agree.
+**accounts.yml:** project dir, mode 640, gitignored. PoC entry uses
+`imap_host: email-oauth2-proxy`, `imap_port: 1993`, `tls_mode: none`,
+`allow_insecure_tls: true` (required for Docker DNS names),
+`password: "Dummy"`, `mode: shadow`.
 
-**accounts.yml:** lives in the **project directory**, mode 640, listed in
-`.gitignore`. Passwords are `"Dummy"` until the OAuth proxy is wired.
-Compose bind-mounts:
-`/opt/bytelord/projects/imap-spamfilter/accounts.yml` → `/app/accounts.yml`.
+**Compose note:** do not use YAML aliases like `*secrets-file:/path:ro`
+(go-yaml rejects alias+suffix). Keep secret paths literal in volumes.
 
 Workspace rule: use `graphify query` before exploring; `graphify update .`
 after code edits. Graph lives in `graphify-out/` (gitignored).
@@ -68,30 +77,25 @@ after code edits. Graph lives in `graphify-out/` (gitignored).
 ## How to deploy (VPS)
 
 ```bash
-# 1. Secrets already exist; ensure RSPAMD_PASSWORD is set:
-#    /opt/bytelord/secrets/imap-spamfilter.env  (prefer mode 600)
+# Proxy first (secrets already filled):
+docker compose -f /opt/bytelord/compose/email-oauth2-proxy/compose.yaml up -d --build
 
-# 2. Bootstrap data dirs + render rspamd/redis from secrets:
-bash /opt/bytelord/projects/imap-spamfilter/deploy/vps-bootstrap.sh
-
-# 3. Edit accounts (gitignored):
-nano /opt/bytelord/projects/imap-spamfilter/accounts.yml
-
-# 4. Start stack:
+# Filter stack:
 export SPAMFILTER_UID=$(id -u) SPAMFILTER_GID=$(id -g)
 docker compose -f /opt/bytelord/compose/imap-spamfilter/compose.yaml up -d --build
 
-# 5. Logs:
+# Logs:
 docker compose -f /opt/bytelord/compose/imap-spamfilter/compose.yaml logs -f spamfilter
+docker compose -f /opt/bytelord/compose/email-oauth2-proxy/compose.yaml logs -f
 ```
 
-If you change `RSPAMD_PASSWORD`, re-run `vps-bootstrap.sh` then restart.
+If you change `RSPAMD_PASSWORD` or `REDIS_PASSWORD`, re-run
+`vps-bootstrap.sh` then restart. Bootstrap renders redis/rspamd configs
+from the secrets file only; it does **not** write
+`data/imap-spamfilter/state/{controller,redis}.password`.
 
 Dashboard (optional): `127.0.0.1:8080`  
 `docker exec -it spamfilter python dashboard.py` to add a user.
-
-After editing `deploy/bytelord-compose.yaml`, copy to
-`/opt/bytelord/compose/imap-spamfilter/compose.yaml` (or keep them in sync).
 
 ---
 
@@ -102,46 +106,53 @@ cd /opt/bytelord/projects/imap-spamfilter/filter
 uv run --with pytest --with-requirements requirements.txt python -m pytest -q
 ```
 
-Expect ~63+ tests. No system `pip`; use `uv`.
-
-Python via `uv`. Do **not** commit unless asked. Keep slice-style commits
-separate if committing mixed work.
+Expect ~63+ tests. No system `pip`; use `uv`. Do **not** commit unless asked.
 
 ---
 
 ## Containers: filter vs OAuth proxy
 
-**Use two (or more) containers, not one shared container.**
+**Two compose stacks, one shared `spamnet`.**
 
-- A container = one primary process + its filesystem.
-- Mixing the Python filter and `email-oauth2-proxy` in one image makes
-  upgrades, logs, and restarts painful.
-- Correct pattern: **separate containers on the same Docker network**
-  (`spamnet` or `bytelord-net`).
-  - Filter accounts: `imap_host` = proxy service name (e.g.
-    `email-oauth2-proxy`), `tls_mode: none`, `password: "Dummy"`.
-  - Proxy listens only on the docker network / `127.0.0.1`, never public.
-  - Proxy holds the real OAuth client secrets (its own
-    `/opt/bytelord/secrets/...` file).
+- Filter: `imap_host: email-oauth2-proxy`, `tls_mode: none`,
+  `allow_insecure_tls: true`, `password: "Dummy"`.
+- Proxy: listen `0.0.0.0:1993` inside container; host publish
+  `127.0.0.1:1993` only. Secrets in
+  `/opt/bytelord/secrets/email-oauth2-proxy.config`.
+- Clone vs fork: keep upstream clone; ByteLord Dockerfile/compose are
+  local overlays. `git pull` does not touch `/opt/bytelord/secrets` or
+  `/opt/bytelord/compose`.
 
-Planned sibling clone: `/opt/bytelord/projects/email-oauth2-proxy`  
-(with compose under `/opt/bytelord/compose/...` when ready).
+### M365 Entra (tenant-wide app; mailbox grants one-by-one)
+
+App already registered for ByteCave small-business tenant (domains
+bytecave.net, eizenhoefer.net, rjmetalfab.com). PoC mailbox grant:
+`rich@bytecave.net` only (`IMAP.AccessAsApp` + Exchange
+`New-ServicePrincipal` + `Add-MailboxPermission`).
+
+To add another M365 mailbox later:
+
+1. `Add-MailboxPermission -Identity "user@domain" -User $sp.Identity -AccessRights FullAccess`
+2. Add `[user@domain]` CCG block to proxy secrets config (same tenant /
+   client_id / secret).
+3. Add matching `accounts.yml` entry (`mode: shadow` first).
+4. Restart proxy then spamfilter.
+
+Personal Gmail / live.com: deferred (delegated/device auth, not CCG).
 
 ---
 
-## What's next (new session work)
+## What's next
 
-1. **Commit/push** any remaining local VPS + accounts-path changes if not
-   already on `origin/main` (`git status` / `git log -5`).
-2. **OAuth project:** clone Simon Robinson `email-oauth2-proxy` as sibling;
-   ByteLord compose + secrets; bind to localhost/spamnet only.
-3. **Integration:** point `accounts.yml` at the proxy (`tls_mode: none`,
-   Dummy password); verify IDLE + token refresh over long runs.
-4. **PoC:** one mailbox in `shadow`, then promote to `flag`/`move`.
-5. **Do not** put real mailbox passwords in this repo; Dummy + proxy only.
+1. Let shadow run; watch IDLE + ~1h token refresh.
+2. Commit/push local filter changes when asked (Dockerfile 3.12 pin,
+   compose external spamnet / literal secrets path, accounts.yml.example).
+3. Add more M365 mailboxes via steps above; then Gmail / live.com.
+4. Promote PoC `shadow` → `flag` → `move` once scores look sane.
 
 Deferred (see parent plan): container lockdown, Redis LRU, GHA SHA pins,
-partial MIME of oversize messages.
+partial MIME of oversize messages; later prefer Entra certificate auth
+over client secret.
 
 ---
 
@@ -151,13 +162,13 @@ partial MIME of oversize messages.
 |---|---|
 | `design-arch/sliced_plan_code_review_fixes.md` | Overall plan + deferred |
 | `design-arch/spamfilter_discussion_and_code_review.md` | OAuth proxy architecture discussion |
-| `design-arch/slice4_connection_config.md` | `tls_mode: none` for localhost |
-| `deploy/bytelord-compose.yaml` | VPS compose source of truth |
-| `deploy/vps-bootstrap.sh` | One-shot bootstrap wrapper |
-| `unraid/bootstrap.sh` | Renders rspamd/redis; reads secrets |
-| `filter/filter.py` | Engine (`_load_rspamd_password`, `connect_imap`) |
-| `accounts.yml` | Runtime accounts (gitignored; create from example) |
-| `accounts.yml.example` | Template (tracked) |
+| `design-arch/slice4_connection_config.md` | `tls_mode: none` + `allow_insecure_tls` |
+| `deploy/bytelord-compose.yaml` | Filter VPS compose source of truth |
+| `../email-oauth2-proxy/deploy/bytelord-compose.yaml` | Proxy compose source of truth |
+| `../email-oauth2-proxy/emailproxy.config.example` | Proxy INI template (no secrets) |
+| `filter/Dockerfile` | Python 3.12 pin for plaintext IMAP |
+| `accounts.yml` | Runtime accounts (gitignored) |
+| `accounts.yml.example` | Template with proxy pattern |
 | `.cursor/rules/graphify.mdc` | Must use graphify before explore |
 
 ---

@@ -1,4 +1,8 @@
-FROM python:3.14.7-slim-bookworm
+FROM python:3.12-slim-bookworm
+
+# Pin below 3.14: imapclient 3.1.0 plaintext IMAP (tls_mode: none /
+# IMAP4WithTimeout) raises AttributeError on Python 3.14
+# ("property 'file' ... has no setter"). Needed for email-oauth2-proxy.
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
