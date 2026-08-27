@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import email
 import email.policy
+import ipaddress
 import logging
 import os
 import re
@@ -81,6 +82,7 @@ JUNK_KEYWORD = "$Junk"           # RFC 5788 - verify with your client
 NOTJUNK_KEYWORD = "$NotJunk"
 
 VALID_MODES = {"shadow", "flag", "move"}
+VALID_TLS_MODES = {"implicit", "starttls", "none"}
 
 SHUTDOWN = threading.Event()
 
@@ -97,7 +99,8 @@ class Account:
 
     imap_host: str
     imap_port: int
-    ssl: bool
+    tls_mode: str
+    allow_insecure_tls: bool
 
     inbox: str
     junk: str
@@ -161,7 +164,8 @@ def mode_allows_retention(acc: Account) -> bool:
 # default and the loader raises if missing.
 BUILTIN_DEFAULTS: dict[str, Any] = {
     "imap_port": 993,
-    "ssl": True,
+    "tls_mode": "implicit",
+    "allow_insecure_tls": False,
     "inbox": "INBOX",
     "junk": "Junk",
     "trash": "Trash",
@@ -238,12 +242,151 @@ def _clean_bayes_user(raw: Any, account_name: str) -> str | None:
     return s
 
 
+_BOOL_TRUE = {True, 1, "true", "yes", "on", "1"}
+_BOOL_FALSE = {False, 0, "false", "no", "off", "0"}
+
+
+def _parse_bool(value: Any, *, key: str, account: str) -> bool:
+    """Strict YAML/JSON-ish bool. bool("false") is True in Python — never use it."""
+    if isinstance(value, str):
+        token: Any = value.strip().lower()
+    else:
+        token = value
+    if token in _BOOL_TRUE and token not in _BOOL_FALSE:
+        return True
+    if token in _BOOL_FALSE:
+        return False
+    raise ValueError(
+        f"account {account!r}: {key} must be true/false, got {value!r}"
+    )
+
+
+def _host_is_loopback(host: str) -> bool:
+    h = host.strip().lower().rstrip(".")
+    if h.startswith("[") and h.endswith("]"):
+        h = h[1:-1]
+    if h in {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"}:
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
+
+
+def _resolve_tls_mode(
+    *,
+    entry: dict[str, Any],
+    user_defaults: dict[str, Any],
+    account_name: str,
+) -> str:
+    src: dict[str, Any] = {}
+    for k in ("tls_mode", "ssl"):
+        if k in user_defaults:
+            src[k] = user_defaults[k]
+    for k in ("tls_mode", "ssl"):
+        if k in entry:
+            src[k] = entry[k]
+    if "tls_mode" in src:
+        mode = str(src["tls_mode"]).strip().lower()
+        if mode not in VALID_TLS_MODES:
+            raise ValueError(f"invalid tls_mode {src['tls_mode']!r}")
+        if "ssl" in src:
+            logging.getLogger("main").warning(
+                "account %s: ssl: is ignored because tls_mode is set", account_name
+            )
+        return mode
+    if "ssl" in src:
+        implicit = _parse_bool(src["ssl"], key="ssl", account=account_name)
+        mode = "implicit" if implicit else "starttls"
+        extra = " (and imap_port: 143)" if mode == "starttls" else ""
+        logging.getLogger("main").warning(
+            "account %s: ssl: is deprecated; use tls_mode: %s%s",
+            account_name, mode, extra,
+        )
+        return mode
+    return "implicit"
+
+
+def connect_imap(acc: Account, timeout: int = 60) -> IMAPClient:
+    """Open IMAP and LOGIN according to acc.tls_mode."""
+    if (
+        acc.tls_mode == "none"
+        and not acc.allow_insecure_tls
+        and not _host_is_loopback(acc.imap_host)
+    ):
+        raise RuntimeError(
+            f"{acc.name}: tls_mode: none refused for non-loopback host "
+            f"{acc.imap_host!r} (set allow_insecure_tls: true to override)"
+        )
+    implicit = acc.tls_mode == "implicit"
+    need_ctx = acc.tls_mode in ("implicit", "starttls")
+    ssl_ctx = ssl.create_default_context() if need_ctx else None
+    client = IMAPClient(
+        acc.imap_host,
+        port=acc.imap_port,
+        ssl=implicit,
+        ssl_context=ssl_ctx if implicit else None,
+        timeout=timeout,
+    )
+    if acc.tls_mode == "starttls":
+        client.starttls(ssl_context=ssl_ctx)
+    client.login(acc.user, acc.password)
+    return client
+
+
+def wait_between_scans(
+    client: IMAPClient,
+    acc: Account,
+    *,
+    idle_cap: bool,
+    log: logging.Logger,
+) -> None:
+    """IDLE if the server supports it; otherwise sleep poll_interval.
+
+    Raises IMAPClientError when idle_done fails so the account loop reconnects.
+    """
+    client.select_folder(
+        acc.folder_map["inbox"],
+        readonly=inbox_select_readonly(acc),
+    )
+    idle_chunk = 30
+    if not idle_cap:
+        wait = max(1, acc.poll_interval)
+        elapsed = 0
+        while elapsed < wait and not SHUTDOWN.is_set():
+            step = min(idle_chunk, wait - elapsed)
+            time.sleep(step)
+            elapsed += step
+        return
+    wait = min(acc.idle_timeout, max(30, acc.junk_poll_interval))
+    idle_failed = False
+    try:
+        client.idle()
+        elapsed = 0
+        while elapsed < wait and not SHUTDOWN.is_set():
+            step = min(idle_chunk, wait - elapsed)
+            if client.idle_check(timeout=step):
+                break
+            elapsed += step
+    finally:
+        try:
+            client.idle_done()
+        except (IMAPClientError, OSError) as ex:
+            log.warning("idle_done failed: %s; forcing reconnect", ex)
+            idle_failed = True
+    if idle_failed:
+        raise IMAPClientError("idle_done failed")
+
+
 def load_accounts(path: Path) -> list[Account]:
     raw = yaml.safe_load(path.read_text())
     if not isinstance(raw, dict) or "accounts" not in raw:
         raise SystemExit(f"{path}: missing 'accounts' key")
     # Built-ins, then user defaults, then env overrides.
     defaults = _apply_env_overrides(_deep_merge(BUILTIN_DEFAULTS, raw.get("defaults") or {}))
+    user_defaults = raw.get("defaults") or {}
+    if not isinstance(user_defaults, dict):
+        raise SystemExit(f"{path}: 'defaults' must be a mapping")
     out: list[Account] = []
     seen: set[str] = set()
     for entry in raw["accounts"]:
@@ -257,13 +400,23 @@ def load_accounts(path: Path) -> list[Account]:
                 f"{', '.join(missing)}"
             )
         try:
+            tls_mode = _resolve_tls_mode(
+                entry=entry,
+                user_defaults=user_defaults,
+                account_name=str(merged["name"]),
+            )
             acc = Account(
                 name=merged["name"],
                 user=merged["user"],
                 password=merged["password"],
                 imap_host=merged["imap_host"],
                 imap_port=int(merged["imap_port"]),
-                ssl=bool(merged["ssl"]),
+                tls_mode=tls_mode,
+                allow_insecure_tls=_parse_bool(
+                    merged.get("allow_insecure_tls", False),
+                    key="allow_insecure_tls",
+                    account=str(merged["name"]),
+                ),
                 inbox=merged["inbox"],
                 junk=merged["junk"],
                 trash=merged["trash"],
@@ -287,12 +440,20 @@ def load_accounts(path: Path) -> list[Account]:
                 safe_mode_unseen_cap=int(merged["safe_mode_unseen_cap"]),
                 junk_retention_days=int(merged["junk_retention_days"]),
                 trained_retention_days=int(merged["trained_retention_days"]),
-                learn_from_moves=bool(merged["learn_from_moves"]),
-                auto_special_folders=bool(merged["auto_special_folders"]),
+                learn_from_moves=_parse_bool(
+                    merged["learn_from_moves"],
+                    key="learn_from_moves",
+                    account=str(merged["name"]),
+                ),
+                auto_special_folders=_parse_bool(
+                    merged["auto_special_folders"],
+                    key="auto_special_folders",
+                    account=str(merged["name"]),
+                ),
                 bayes_user=_clean_bayes_user(merged.get("bayes_user"), merged.get("name", "?")),
             )
-        except KeyError as ex:
-            raise SystemExit(f"account {entry.get('name')!r}: missing config key {ex.args[0]!r}") from ex
+        except (KeyError, ValueError, TypeError) as ex:
+            raise SystemExit(f"account {entry.get('name')!r}: {ex}") from ex
         if acc.name in seen:
             raise SystemExit(f"duplicate account name: {acc.name}")
         seen.add(acc.name)
@@ -306,6 +467,17 @@ def load_accounts(path: Path) -> list[Account]:
 def validate_account(acc: Account) -> None:
     if acc.mode not in VALID_MODES:
         raise SystemExit(f"{acc.name}: invalid mode {acc.mode!r}")
+    if acc.tls_mode not in VALID_TLS_MODES:
+        raise SystemExit(f"{acc.name}: invalid tls_mode {acc.tls_mode!r}")
+    if (
+        acc.tls_mode == "none"
+        and not acc.allow_insecure_tls
+        and not _host_is_loopback(acc.imap_host)
+    ):
+        raise SystemExit(
+            f"{acc.name}: tls_mode: none is only allowed for loopback hosts "
+            f"or with allow_insecure_tls: true (got imap_host={acc.imap_host!r})"
+        )
     # acc.user is the bayes_user fallback when no explicit bayes_user is
     # configured, and the value ends up in a Delivered-To header we
     # inject into the rspamd /learn body. Reject CR/LF here for the same
@@ -1934,15 +2106,7 @@ def _run_account(acc: Account, db: Db) -> None:
             # Pin a strict TLS context so a future imapclient version cannot
             # silently relax the default - we want hostname verification and
             # the system CA bundle, no exceptions.
-            ssl_ctx = ssl.create_default_context() if acc.ssl else None
-            client = IMAPClient(
-                acc.imap_host,
-                port=acc.imap_port,
-                ssl=acc.ssl,
-                ssl_context=ssl_ctx,
-                timeout=60,
-            )
-            client.login(acc.user, acc.password)
+            client = connect_imap(acc)
             delim = detect_delimiter(client)
             acc.delimiter = delim
             if acc.auto_special_folders:
@@ -1976,11 +2140,10 @@ def _run_account(acc: Account, db: Db) -> None:
             log.info("connected, delimiter=%r, mode=%s, IMAP IDLE=%s",
                      delim, acc.mode, "yes" if idle_cap else "no")
             if not idle_cap:
-                poll_s = min(acc.idle_timeout, max(30, acc.junk_poll_interval))
                 log.warning(
                     "server %s does not advertise IMAP IDLE; new mail is "
                     "detected by the %ds poll, not instant push",
-                    acc.imap_host, poll_s)
+                    acc.imap_host, acc.poll_interval)
             backoff = RECONNECT_MIN_BACKOFF
 
             while not SHUTDOWN.is_set():
@@ -2035,41 +2198,12 @@ def _run_account(acc: Account, db: Db) -> None:
                     db.vacuum_if_due()
                     state.last_retention = now
 
-                # IDLE on Inbox until activity, junk_poll_interval, or idle_timeout.
-                # Poll SHUTDOWN every 60s so a SIGTERM during a long IDLE wait
+                # Wait for Inbox activity (IDLE) or poll_interval (no IDLE).
+                # Poll SHUTDOWN every 30s so a SIGTERM during a long wait
                 # does not leave the account thread blocked for up to
                 # idle_timeout (~25 min). Also keeps the IDLE chunk well under
                 # any server-side IDLE cap (RFC 2177 mentions 29 min).
-                client.select_folder(
-                    acc.folder_map["inbox"],
-                    readonly=inbox_select_readonly(acc),
-                )
-                wait = min(acc.idle_timeout, max(30, acc.junk_poll_interval))
-                # 30s idle_chunk keeps us comfortably below the 60s socket
-                # timeout, so a hung peer is detected within one chunk and
-                # SHUTDOWN is observed within ~30s rather than ~120s.
-                idle_chunk = 30
-                idle_failed = False
-                try:
-                    client.idle()
-                    elapsed = 0
-                    while elapsed < wait and not SHUTDOWN.is_set():
-                        step = min(idle_chunk, wait - elapsed)
-                        if client.idle_check(timeout=step):
-                            break  # server pushed activity, exit IDLE early
-                        elapsed += step
-                finally:
-                    try:
-                        client.idle_done()
-                    except (IMAPClientError, OSError) as ex:
-                        # Server likely closed the connection silently
-                        # (idle timeout, restart, network blip). Force a
-                        # reconnect rather than continuing on a half-dead
-                        # socket; the outer except handles the error path.
-                        log.warning("idle_done failed: %s; forcing reconnect", ex)
-                        idle_failed = True
-                if idle_failed:
-                    raise IMAPClientError("idle_done failed")
+                wait_between_scans(client, acc, idle_cap=idle_cap, log=log)
         except (IMAPClientError, OSError) as ex:
             log.warning("connection error: %s (backoff %ds)", ex, backoff)
             db.log_event("conn_error", detail=str(ex)[:300])

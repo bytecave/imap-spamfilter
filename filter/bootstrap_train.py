@@ -13,18 +13,17 @@ Usage (inside the container):
 from __future__ import annotations
 
 import argparse
-import ssl
 import sys
 import time
 from pathlib import Path
 
-from imapclient import IMAPClient
 from imapclient.exceptions import IMAPClientError
 
 from filter import (
     CONFIG_PATH,
     RSPAMD_PASSWORD,
     build_folder_map,
+    connect_imap,
     detect_delimiter,
     load_accounts,
     parse_envelope,
@@ -55,17 +54,9 @@ def main() -> int:
         print(f"unknown account: {args.account}", file=sys.stderr)
         return 2
 
-    client: IMAPClient | None = None
+    client = None
     try:
-        ssl_ctx = ssl.create_default_context() if acc.ssl else None
-        client = IMAPClient(
-            acc.imap_host,
-            port=acc.imap_port,
-            ssl=acc.ssl,
-            ssl_context=ssl_ctx,
-            timeout=60,
-        )
-        client.login(acc.user, acc.password)
+        client = connect_imap(acc)
         delim = detect_delimiter(client)
         fmap = build_folder_map(acc, delim)
         src = resolve_folder(args.source, delim)

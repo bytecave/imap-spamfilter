@@ -39,7 +39,7 @@ def _mk_db(tmp_path):
 def _mk_account(**over):
     base = dict(
         name="acct", user="u@example.com", password="x",
-        imap_host="h", imap_port=993, ssl=True,
+        imap_host="h", imap_port=993, tls_mode="implicit", allow_insecure_tls=False,
         inbox="INBOX", junk="Junk", trash="Trash",
         spam_train="Junk/Train-Spam", trained_spam="Junk/Trained-Spam",
         ham_train="Junk/Train-Ham", trained_ham="Junk/Trained-Ham",

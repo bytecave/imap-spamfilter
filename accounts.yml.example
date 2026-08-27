@@ -33,6 +33,8 @@ accounts:
     imap_host: imap.your-mail-provider.example
     user: you@your-domain.example
     password: "REPLACE_ME"
+    # tls_mode: implicit   # default IMAPS :993. starttls = port 143 + STARTTLS
+    #                      # none = plaintext; only 127.0.0.1 or allow_insecure_tls
     # mode: shadow     # default; uncomment to set or change
     # move_grace_seconds: 0   # mode=move only; 0 = move spam out
     #                         # instantly (use once Bayes is trained)

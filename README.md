@@ -353,8 +353,10 @@ override `defaults:` values; both override built-in defaults from `filter.py`.
 
 | Key | Default | Notes |
 | --- | --- | --- |
-| `imap_port` | `993` | port |
-| `ssl` | `true` | `false` = use port 143 with STARTTLS instead |
+| `imap_port` | `993` | port (143 typical for `starttls`) |
+| `tls_mode` | `implicit` | `implicit` (IMAPS) \| `starttls` (plain then STARTTLS before LOGIN) \| `none` (plaintext; loopback only, or `allow_insecure_tls: true`) |
+| `allow_insecure_tls` | `false` | required with `tls_mode: none` unless `imap_host` is loopback |
+| `ssl` | — | **deprecated.** `true` → `implicit`, `false` → `starttls`. Do not use; it never meant plaintext. |
 
 ### Folder names
 
