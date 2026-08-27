@@ -36,7 +36,7 @@ Slices 1-3 are the PoC-critical path (do these before connecting real mailboxes,
 
 | Slice | Status | Spec |
 |---|---|---|
-| 1 - Hybrid shadow mode | pending | [`slice1_hybrid_shadow_mode.md`](slice1_hybrid_shadow_mode.md) |
+| 1 - Hybrid shadow mode | done | [`slice1_hybrid_shadow_mode.md`](slice1_hybrid_shadow_mode.md) |
 | 2 - IMAP fetch discipline | pending | (write before implementing) |
 | 3 - Reliable Inbox bookmark | pending | (write before implementing) |
 | 4 - TLS / YAML booleans / IDLE | pending | (write before implementing) |

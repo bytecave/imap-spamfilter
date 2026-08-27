@@ -18,9 +18,11 @@ Four containers on a shared `spamnet` Docker network:
 | spamfilter         | this repo (custom)     | Python service. One thread per account, IDLE on Inbox, polls Junk, scores, moves, learns. |
 
 Per-account operating modes (set in `accounts.yml`, promoted manually):
-- **shadow**  - scan + log only, no mailbox writes
-- **flag**    - shadow + sets `\Flagged` on suspect mail
-- **move**    - flag + after `move_grace_seconds`, MOVEs to Junk
+- **shadow**  - scan + log only. No writes to Inbox, Junk, or Trash.
+  Train-* folders may still be created and drained so Bayes can be
+  bootstrapped during evaluation.
+- **flag**    - shadow + sets `\Flagged` on suspect Inbox mail; retention on
+- **move**    - flag + after `move_grace_seconds`, MOVEs Inbox → Junk
 
 Move-based training (no special folders needed in daily use):
 - Inbox -> Junk = learn as spam (after `learn_grace_seconds`, default 300s)
@@ -256,6 +258,12 @@ After another week, promote to `move`. Promote each family member
 independently. Modify the file by hand any time - changes take effect on
 container restart.
 
+Retention (Junk → Trash, and Trained-* → Trash) starts when you leave
+`shadow`. A mailbox that has sat in shadow for weeks may have old Junk;
+the first `flag`/`move` retention pass will honour `junk_retention_days`
+(default 10). If that is too aggressive, set `junk_retention_days: 0`
+(or a larger number) **before** promoting.
+
 ---
 
 ## Alternative install: any Linux host with Docker (no Unraid)
@@ -372,7 +380,7 @@ user's mailbox.
 
 | Key | Default | Notes |
 | --- | --- | --- |
-| `mode` | `shadow` | `shadow` \| `flag` \| `move` |
+| `mode` | `shadow` | `shadow` (no Inbox/Junk/Trash writes; Train-* drain allowed) \| `flag` \| `move` |
 | `threshold` | `8.0` | rspamd score >= this counts as spam |
 | `min_threshold_allowed` | `5.0` | startup refuses to run if `threshold` is below this |
 | `reject_score_above` | `100.0` | scores outside `±this` are treated as failed scan |

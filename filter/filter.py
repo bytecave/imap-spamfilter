@@ -140,6 +140,20 @@ class Account:
     folder_map: dict[str, str] = field(default_factory=dict)
 
 
+def inbox_select_readonly(acc: Account) -> bool:
+    """EXAMINE rather than SELECT. Shadow must not be able to set flags
+    even if a future FETCH drops PEEK. Flag mode needs a writable
+    SELECT for STORE \\Flagged. Move mode's MOVEs happen in
+    execute_due_moves, which SELECTs Inbox itself."""
+    return acc.mode == "shadow"
+
+
+def mode_allows_retention(acc: Account) -> bool:
+    """Junk / Trained-* → Trash. Blocked in shadow so a 10-day default
+    cannot empty Junk during evaluation."""
+    return acc.mode in ("flag", "move")
+
+
 # Built-in defaults applied unless overridden in accounts.yml `defaults:` or in
 # a per-account block. Users can leave `defaults:` empty (or omit it entirely)
 # and only specify per-account credentials. Required-from-the-user keys (name,
@@ -879,6 +893,7 @@ def ensure_folders(client: IMAPClient, log: logging.Logger, fmap: dict[str, str]
     # user's mailbox (we hit this exact problem during initial setup).
     # We only auto-create the filter-specific training folders.
     REQUIRED = ("inbox", "junk", "trash")
+    # Shadow may CREATE these: they are filter-owned, not Inbox/Junk/Trash.
     AUTO_CREATE = ("spam_train", "trained_spam", "ham_train", "trained_ham")
 
     missing: list[str] = []
@@ -1159,7 +1174,9 @@ def scan_inbox(
     fmap: dict[str, str],
     state: "AccountState | None" = None,
 ) -> None:
-    uv = select_with_uidvalidity_check(client, db, fmap["inbox"], log)
+    uv = select_with_uidvalidity_check(
+        client, db, fmap["inbox"], log, readonly=inbox_select_readonly(acc)
+    )
     # High-water UID bookmark: the filter never scans mail that already
     # existed when it first saw this (folder, uidvalidity). The first
     # pass per uv records the current max UID and returns without
@@ -1392,7 +1409,9 @@ def execute_due_moves(client: IMAPClient, db: Db, log: logging.Logger, acc: Acco
 
 
 def poll_junk(client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fmap: dict[str, str]) -> None:
-    select_with_uidvalidity_check(client, db, fmap["junk"], log)
+    select_with_uidvalidity_check(
+        client, db, fmap["junk"], log, readonly=True
+    )
     uids = client.search(["ALL"])
     if not uids:
         # Still process any time-due pending learns from DB even with no junk content.
@@ -1472,7 +1491,7 @@ def process_pending_learns(
     for folder, rows in folder_groups.items():
         # Reconfirm folder still expected for the kind.
         try:
-            client.select_folder(folder)
+            client.select_folder(folder, readonly=True)
         except IMAPClientError as ex:
             log.warning("select %s for pending learn failed: %s", folder, ex)
             continue
@@ -1660,6 +1679,12 @@ def drain_train_ham(
 def retention_sweep(
     client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fmap: dict[str, str]
 ) -> None:
+    if not mode_allows_retention(acc):
+        log.info(
+            "retention_sweep skipped (mode=%s; Junk/Trained-* not moved to Trash)",
+            acc.mode,
+        )
+        return
     if acc.junk_retention_days > 0:
         _sweep_folder_to_trash(
             client, db, log, acc, fmap,
@@ -1896,7 +1921,10 @@ def _run_account(acc: Account, db: Db) -> None:
                 # does not leave the account thread blocked for up to
                 # idle_timeout (~25 min). Also keeps the IDLE chunk well under
                 # any server-side IDLE cap (RFC 2177 mentions 29 min).
-                client.select_folder(acc.folder_map["inbox"])
+                client.select_folder(
+                    acc.folder_map["inbox"],
+                    readonly=inbox_select_readonly(acc),
+                )
                 wait = min(acc.idle_timeout, max(30, acc.junk_poll_interval))
                 # 30s idle_chunk keeps us comfortably below the 60s socket
                 # timeout, so a hung peer is detected within one chunk and
