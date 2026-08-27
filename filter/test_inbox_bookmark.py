@@ -49,10 +49,10 @@ def test_bookmark_stops_at_rspamd_failure(tmp_path, monkeypatch):
     f.scan_inbox(client, db, LOG, acc, FMAP)
 
     assert db.get_scan_bookmark("INBOX", 1) == 1
-    assert db.get_message("mid1@example.com")["our_score"] == 1.0
-    row2 = db.get_message("mid2@example.com")
+    assert db.get_imap_message("INBOX", 1, 1)["our_score"] == 1.0
+    row2 = db.get_imap_message("INBOX", 1, 2)
     assert row2 is None or row2["our_score"] is None
-    assert db.get_message("mid3@example.com") is None
+    assert db.get_imap_message("INBOX", 1, 3) is None
     assert "scan_failed" in _events(db)
 
 
@@ -80,8 +80,8 @@ def test_bookmark_advances_after_rspamd_recovers(tmp_path, monkeypatch):
     f.scan_inbox(client, db, LOG, acc, FMAP)
 
     assert db.get_scan_bookmark("INBOX", 1) == 3
-    assert db.get_message("mid2@example.com")["our_score"] == 1.0
-    assert db.get_message("mid3@example.com")["our_score"] == 1.0
+    assert db.get_imap_message("INBOX", 1, 2)["our_score"] == 1.0
+    assert db.get_imap_message("INBOX", 1, 3)["our_score"] == 1.0
 
 
 def test_oversize_is_terminal_for_bookmark(tmp_path, monkeypatch):
@@ -119,4 +119,4 @@ def test_missing_body_does_not_advance_bookmark(tmp_path, monkeypatch):
     f.scan_inbox(client, db, LOG, acc, FMAP)
 
     assert db.get_scan_bookmark("INBOX", 1) == 1
-    assert db.get_message("mid2@example.com") is None
+    assert db.get_imap_message("INBOX", 1, 2) is None

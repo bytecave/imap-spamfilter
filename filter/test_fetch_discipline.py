@@ -143,8 +143,8 @@ def test_scan_inbox_skips_oversize_without_body_fetch(tmp_path, monkeypatch):
 
     assert _body_fetch_uids(client) == [1]
     assert "skipped_oversize" in _events(db)
-    assert db.get_message("scan1@example.com")["our_score"] == 9.0
-    assert db.get_message("scan1@example.com")["our_action"] == "shadow"
+    assert db.get_imap_message("INBOX", 1, 1)["our_score"] == 9.0
+    assert db.get_imap_message("INBOX", 1, 1)["our_action"] == "shadow"
     assert client.flags_added == []
     pending = db.conn.execute("SELECT COUNT(*) FROM pending_move").fetchone()[0]
     assert pending == 0

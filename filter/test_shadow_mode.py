@@ -60,6 +60,7 @@ def _mk_db(tmp_path):
     f.DB_PATH = db_path
     with sqlite3.connect(db_path) as conn:
         conn.executescript(f.SCHEMA)
+        f._migrate(conn)
     return f.Db("acct")
 
 
@@ -268,7 +269,7 @@ def test_scan_inbox_shadow_logs_does_not_flag_or_enqueue(tmp_path, monkeypatch):
     assert client.flags_added == []
     pending = db.conn.execute("SELECT COUNT(*) FROM pending_move").fetchone()[0]
     assert pending == 0
-    row = db.get_message("scan1@example.com")
+    row = db.get_imap_message("INBOX", 1, 1)
     assert row is not None
     assert row["our_score"] == 9.0
     assert row["our_action"] == "shadow"
@@ -310,7 +311,10 @@ def test_execute_due_moves_shadow_never_moves(tmp_path):
     db = _mk_db(tmp_path)
     acc = _mk_account(mode="shadow", move_grace_seconds=0)
     with db.tx():
-        db.upsert_message("due1@example.com", "INBOX", "s@example.com", "subj")
+        db.upsert_imap_message(
+            "INBOX", 1, 99,
+            message_id="due1@example.com", sender="s@example.com", subject="subj",
+        )
         db.add_pending_move(1, 99, "due1@example.com")
     client = RecordingIMAP(
         existing=_all_existing(),

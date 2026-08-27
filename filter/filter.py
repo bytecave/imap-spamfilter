@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import email
 import email.policy
+import hashlib
 import ipaddress
 import logging
 import os
@@ -540,7 +541,11 @@ def validate_account(acc: Account) -> None:
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
     account            TEXT NOT NULL,
-    message_id         TEXT NOT NULL,
+    folder             TEXT NOT NULL,
+    uidvalidity        INTEGER NOT NULL,
+    uid                INTEGER NOT NULL,
+    message_id         TEXT,
+    body_sha256        TEXT,
     first_seen         INTEGER NOT NULL,
     last_seen          INTEGER NOT NULL,
     current_folder     TEXT NOT NULL,
@@ -554,8 +559,10 @@ CREATE TABLE IF NOT EXISTS messages (
     sender             TEXT,
     subject            TEXT,
     received_at        INTEGER,      -- IMAP INTERNALDATE (unix); NULL if unknown
-    PRIMARY KEY (account, message_id)
+    PRIMARY KEY (account, folder, uidvalidity, uid)
 );
+CREATE INDEX IF NOT EXISTS idx_messages_msgid ON messages(account, message_id);
+CREATE INDEX IF NOT EXISTS idx_messages_sha ON messages(account, body_sha256);
 
 CREATE TABLE IF NOT EXISTS uidvalidity (
     account     TEXT NOT NULL,
@@ -623,12 +630,77 @@ def init_db() -> None:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Add columns introduced after the original schema. CREATE TABLE IF
-    NOT EXISTS never alters an existing table, so new columns need an
-    explicit ADD COLUMN on databases created before they were added."""
+    """Bring an existing messages table up to the IMAP-object PK.
+
+    CREATE TABLE IF NOT EXISTS never alters an existing table, so older
+    DBs (PK was ``(account, message_id)``) need a rebuild. Migrated rows
+    get ``uidvalidity=0`` and ``uid=old rowid`` so they cannot collide
+    with live IMAP objects; operators re-shadow after upgrade.
+    """
     cols = {r[1] for r in conn.execute("PRAGMA table_info(messages)")}
+    if not cols:
+        return
+    if "uid" not in cols:
+        received_src = "received_at" if "received_at" in cols else "NULL"
+        conn.executescript(
+            """
+            CREATE TABLE messages_imap (
+                account            TEXT NOT NULL,
+                folder             TEXT NOT NULL,
+                uidvalidity        INTEGER NOT NULL,
+                uid                INTEGER NOT NULL,
+                message_id         TEXT,
+                body_sha256        TEXT,
+                first_seen         INTEGER NOT NULL,
+                last_seen          INTEGER NOT NULL,
+                current_folder     TEXT NOT NULL,
+                moved_to_junk_at   INTEGER,
+                our_score          REAL,
+                our_action         TEXT,
+                learned_as         TEXT,
+                learned_at         INTEGER,
+                pending_learn      TEXT,
+                pending_learn_at   INTEGER,
+                sender             TEXT,
+                subject            TEXT,
+                received_at        INTEGER,
+                PRIMARY KEY (account, folder, uidvalidity, uid)
+            );
+            """
+        )
+        conn.execute(
+            f"""
+            INSERT INTO messages_imap (
+                account, folder, uidvalidity, uid, message_id, body_sha256,
+                first_seen, last_seen, current_folder, moved_to_junk_at,
+                our_score, our_action, learned_as, learned_at,
+                pending_learn, pending_learn_at, sender, subject, received_at
+            )
+            SELECT
+                account, current_folder, 0, rowid, message_id, NULL,
+                first_seen, last_seen, current_folder, moved_to_junk_at,
+                our_score, our_action, learned_as, learned_at,
+                pending_learn, pending_learn_at, sender, subject, {received_src}
+            FROM messages
+            """
+        )
+        conn.executescript(
+            """
+            DROP TABLE messages;
+            ALTER TABLE messages_imap RENAME TO messages;
+            """
+        )
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(messages)")}
     if "received_at" not in cols:
         conn.execute("ALTER TABLE messages ADD COLUMN received_at INTEGER")
+    if "body_sha256" not in cols:
+        conn.execute("ALTER TABLE messages ADD COLUMN body_sha256 TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_msgid ON messages(account, message_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_sha ON messages(account, body_sha256)"
+    )
 
 
 class Db:
@@ -665,57 +737,92 @@ class Db:
 
     # ----- messages ---------------------------------------------------------
 
-    def get_message(self, msgid: str) -> sqlite3.Row | None:
+    def get_imap_message(
+        self, folder: str, uidvalidity: int, uid: int
+    ) -> sqlite3.Row | None:
+        cur = self.conn.execute(
+            """
+            SELECT * FROM messages
+             WHERE account=? AND folder=? AND uidvalidity=? AND uid=?
+            """,
+            (self.account, folder, uidvalidity, uid),
+        )
+        return cur.fetchone()
+
+    def find_by_sha256(self, sha256: str) -> list[sqlite3.Row]:
+        if not sha256:
+            return []
+        cur = self.conn.execute(
+            "SELECT * FROM messages WHERE account=? AND body_sha256=?",
+            (self.account, sha256),
+        )
+        return list(cur.fetchall())
+
+    def find_by_message_id(self, msgid: str) -> list[sqlite3.Row]:
         cur = self.conn.execute(
             "SELECT * FROM messages WHERE account=? AND message_id=?",
             (self.account, msgid),
         )
-        return cur.fetchone()
+        return list(cur.fetchall())
 
-    def upsert_message(
+    def upsert_imap_message(
         self,
-        msgid: str,
         folder: str,
-        sender: str,
-        subject: str,
+        uidvalidity: int,
+        uid: int,
+        *,
+        message_id: str | None = None,
+        sender: str = "",
+        subject: str = "",
         received_at: int | None = None,
+        body_sha256: str | None = None,
     ) -> None:
         now = int(time.time())
         self.conn.execute(
             """
-            INSERT INTO messages(account, message_id, first_seen, last_seen,
-                                 current_folder, sender, subject, received_at)
-            VALUES(?,?,?,?,?,?,?,?)
-            ON CONFLICT(account, message_id) DO UPDATE SET
+            INSERT INTO messages(
+                account, folder, uidvalidity, uid, message_id, body_sha256,
+                first_seen, last_seen, current_folder, sender, subject, received_at
+            )
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(account, folder, uidvalidity, uid) DO UPDATE SET
                 last_seen=excluded.last_seen,
                 current_folder=excluded.current_folder,
+                message_id=COALESCE(excluded.message_id, messages.message_id),
+                body_sha256=COALESCE(excluded.body_sha256, messages.body_sha256),
                 sender=COALESCE(messages.sender, excluded.sender),
                 subject=COALESCE(messages.subject, excluded.subject),
                 received_at=COALESCE(messages.received_at, excluded.received_at)
             """,
-            (self.account, msgid, now, now, folder, sender, subject, received_at),
+            (
+                self.account, folder, uidvalidity, uid, message_id, body_sha256,
+                now, now, folder, sender, subject, received_at,
+            ),
         )
 
     # Whitelist of message-table columns the rest of the filter is
-    # allowed to update through update_message(). update_message builds
-    # its SET clause from kwarg names; without this guard a typo or a
+    # allowed to update through update_imap_message(). It builds its
+    # SET clause from kwarg names; without this guard a typo or a
     # future caller could put an arbitrary identifier into the SQL.
     _UPDATABLE_MESSAGE_COLUMNS = frozenset({
         "current_folder", "moved_to_junk_at", "our_score", "our_action",
         "learned_as", "learned_at", "pending_learn", "pending_learn_at",
-        "sender", "subject",
+        "sender", "subject", "message_id", "body_sha256",
     })
 
-    def update_message(self, msgid: str, **fields: Any) -> None:
+    def update_imap_message(
+        self, folder: str, uidvalidity: int, uid: int, **fields: Any
+    ) -> None:
         if not fields:
             return
         bad = set(fields) - self._UPDATABLE_MESSAGE_COLUMNS
         if bad:
-            raise ValueError(f"update_message: unknown column(s) {sorted(bad)}")
+            raise ValueError(f"update_imap_message: unknown column(s) {sorted(bad)}")
         cols = ", ".join(f"{k}=?" for k in fields)
-        vals = list(fields.values()) + [self.account, msgid]
+        vals = list(fields.values()) + [self.account, folder, uidvalidity, uid]
         self.conn.execute(
-            f"UPDATE messages SET {cols} WHERE account=? AND message_id=?",
+            f"UPDATE messages SET {cols} WHERE account=? AND folder=? "
+            f"AND uidvalidity=? AND uid=?",
             vals,
         )
 
@@ -1125,15 +1232,15 @@ def select_with_uidvalidity_check(
             )
             # pending_learn rows for messages that lived in this folder are
             # also unsafe: the UIDs they would have been promoted under no
-            # longer exist, and Message-ID search may resolve to a stale or
-            # missing message. Drop pending_learn so the next user move (or
+            # longer exist. Drop pending_learn so the next user move (or
             # next drain pass for spam_train) re-creates a clean row.
             cancelled = db.conn.execute(
                 """
                 UPDATE messages SET pending_learn=NULL, pending_learn_at=NULL
-                 WHERE account=? AND current_folder=? AND pending_learn IS NOT NULL
+                 WHERE account=? AND pending_learn IS NOT NULL
+                   AND (folder=? OR current_folder=?)
                 """,
-                (db.account, folder),
+                (db.account, folder, folder),
             ).rowcount
             if cancelled:
                 db.log_event(
@@ -1159,6 +1266,27 @@ def parse_envelope(raw: bytes) -> tuple[str | None, str, str]:
         return (msgid or None, subject, sender)
     except Exception:
         return (None, "", "")
+
+
+def body_sha256(raw: bytes) -> str:
+    """Hex SHA-256 of the fetched RFC822 body. Used to correlate MOVE
+    across folders; Message-ID is not identity."""
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _other_sha256_rows(
+    db: Db, sha: str | None, folder: str, uidvalidity: int, uid: int
+) -> list[sqlite3.Row]:
+    if not sha:
+        return []
+    return [
+        r for r in db.find_by_sha256(sha)
+        if not (
+            r["folder"] == folder
+            and r["uidvalidity"] == uidvalidity
+            and r["uid"] == uid
+        )
+    ]
 
 
 def _internaldate_ts(data: dict) -> int | None:
@@ -1341,14 +1469,25 @@ def check_rate(db: Db, log: logging.Logger, action: str, limit: int) -> bool:
 
 
 def try_learn(
-    db: Db, log: logging.Logger, acc: Account, raw: bytes, msgid: str, kind: str, reason: str
+    db: Db,
+    log: logging.Logger,
+    acc: Account,
+    raw: bytes,
+    msgid: str | None,
+    kind: str,
+    reason: str,
+    *,
+    folder: str,
+    uidvalidity: int,
+    uid: int,
 ) -> bool:
+    label = msgid or f"uid={uid}"
     if not acc.learn_from_moves:
         return False
     if db.in_safe_mode("learning"):
-        log.warning("skip learn (%s) for %s: in safe mode", kind, msgid)
+        log.warning("skip learn (%s) for %s: in safe mode", kind, label)
         return False
-    row = db.get_message(msgid)
+    row = db.get_imap_message(folder, uidvalidity, uid)
     if row is not None:
         learned = row["learned_as"]
         if learned == kind:
@@ -1370,14 +1509,14 @@ def try_learn(
         if learned and learned != kind:
             last = row["learned_at"] or 0
             if int(time.time()) - last < FLIP_FLOP_COOLDOWN_S:
-                log.warning("skip learn (%s) for %s: flip-flop cooldown active", kind, msgid)
+                log.warning("skip learn (%s) for %s: flip-flop cooldown active", kind, label)
                 db.log_event("learn_flipflop_block", msgid, detail=f"{learned}->{kind}")
                 return False
     if not check_rate(db, log, "learn", acc.max_learns_per_hour):
         return False
     outcome = rspamd_learn(raw, kind, user=acc.bayes_user or acc.user)
     if outcome == "error":
-        log.warning("rspamd learn(%s) failed for %s", kind, msgid)
+        log.warning("rspamd learn(%s) failed for %s", kind, label)
         db.log_event("learn_failed", msgid, detail=kind)
         return False
     if outcome == "declined":
@@ -1385,20 +1524,27 @@ def try_learn(
         # (too few tokens, or already in that class). Retrying the same
         # bytes is futile: mark it so try_learn short-circuits future
         # calls, and report success so the caller moves it out.
-        log.info("rspamd declined to learn %s as %s", msgid, kind)
+        log.info("rspamd declined to learn %s as %s", label, kind)
         with db.tx():
-            db.update_message(msgid, learned_as="unlearnable",
-                              learned_at=int(time.time()),
-                              pending_learn=None, pending_learn_at=None)
+            db.update_imap_message(
+                folder, uidvalidity, uid,
+                learned_as="unlearnable",
+                learned_at=int(time.time()),
+                pending_learn=None, pending_learn_at=None,
+            )
             db.log_event("learn_skipped", msgid, detail=kind)
         return True
     # 'learned' or 'already': the message is in the desired Bayes class.
     now = int(time.time())
     with db.tx():
-        db.update_message(msgid, learned_as=kind, learned_at=now, pending_learn=None, pending_learn_at=None)
+        db.update_imap_message(
+            folder, uidvalidity, uid,
+            learned_as=kind, learned_at=now,
+            pending_learn=None, pending_learn_at=None,
+        )
         db.record_rate("learn")
         db.log_event(f"learn_{kind}", msgid, detail=reason)
-    log.info("learned %s as %s (%s)", msgid, kind, reason)
+    log.info("learned %s as %s (%s)", label, kind, reason)
     return True
 
 
@@ -1505,28 +1651,42 @@ def scan_inbox(
                 last_terminal = uid
                 continue
 
-            prior = db.get_message(msgid)
-            prior_folder = prior["current_folder"] if prior else None
+            sha = body_sha256(raw)
+            prior = db.get_imap_message(fmap["inbox"], uv, uid)
+            siblings = _other_sha256_rows(db, sha, fmap["inbox"], uv, uid)
             with db.tx():
-                db.upsert_message(msgid, fmap["inbox"], sender, subject,
-                                  _internaldate_ts(data))
+                db.upsert_imap_message(
+                    fmap["inbox"], uv, uid,
+                    message_id=msgid, sender=sender, subject=subject,
+                    received_at=_internaldate_ts(data), body_sha256=sha,
+                )
 
-            # Detect Junk -> Inbox revert (user moved a message we
-            # previously placed in Junk, or one that lived in Junk, back
-            # to Inbox). An IMAP move preserves the \Seen flag, so a
-            # reverted message the user already read in Junk arrives
-            # *seen*; gating this on `uid in unseen` would silently drop
-            # the most common ham signal. prior_folder flips to inbox
-            # after the upsert above, so this branch fires only once.
-            reverted = prior_folder == fmap["junk"]
+            # Detect Junk -> Inbox revert via body fingerprint (IMAP MOVE
+            # assigns a new UID; Message-ID is not identity). First
+            # appearance of this Inbox UID only, so a bookmark retry
+            # does not re-enter the ham path.
+            junk_sibs = [
+                r for r in siblings
+                if r["current_folder"] == fmap["junk"]
+                or r["our_action"] == "moved_to_junk"
+            ]
+            reverted = prior is None and bool(junk_sibs)
             if reverted:
+                sib = junk_sibs[0]
                 if NOTJUNK_KEYWORD in flags:
                     # User intent confirmed by $NotJunk keyword skips grace.
-                    try_learn(db, log, acc, raw, msgid, "ham", reason="revert+notjunk_kw")
-                elif prior["learned_as"] != "ham" and prior["pending_learn"] != "ham":
-                    # Schedule ham learn after grace.
+                    try_learn(
+                        db, log, acc, raw, msgid, "ham",
+                        reason="revert+notjunk_kw",
+                        folder=fmap["inbox"], uidvalidity=uv, uid=uid,
+                    )
+                elif sib["learned_as"] != "ham" and sib["pending_learn"] != "ham":
                     with db.tx():
-                        db.update_message(msgid, pending_learn="ham", pending_learn_at=int(time.time()))
+                        db.update_imap_message(
+                            fmap["inbox"], uv, uid,
+                            pending_learn="ham",
+                            pending_learn_at=int(time.time()),
+                        )
                         db.log_event("pending_ham", msgid, detail="user revert")
                 last_terminal = uid
                 continue
@@ -1566,7 +1726,7 @@ def scan_inbox(
                 state.scan_fail_streak = 0
 
             with db.tx():
-                db.update_message(msgid, our_score=score)
+                db.update_imap_message(fmap["inbox"], uv, uid, our_score=score)
                 db.log_event("scan", msgid, detail=f"score={score:.2f} mode={acc.mode}")
             log.debug("scored %s = %.2f", msgid, score)
 
@@ -1579,12 +1739,16 @@ def scan_inbox(
                 case "shadow":
                     log.info("[shadow] would flag %s score=%.2f subj=%r", msgid, score, subject[:80])
                     with db.tx():
-                        db.update_message(msgid, our_action="shadow")
+                        db.update_imap_message(
+                            fmap["inbox"], uv, uid, our_action="shadow"
+                        )
                 case "flag":
                     client.add_flags(uid, [b"\\Flagged"])
                     log.info("[flag] flagged %s score=%.2f", msgid, score)
                     with db.tx():
-                        db.update_message(msgid, our_action="flagged")
+                        db.update_imap_message(
+                            fmap["inbox"], uv, uid, our_action="flagged"
+                        )
                         db.log_event("flagged", msgid, detail=f"score={score:.2f}")
                 case "move":
                     # Do NOT set \Flagged: that is the user's "starred"
@@ -1594,7 +1758,9 @@ def scan_inbox(
                     # move_grace_seconds whether or not the flag is set.
                     with db.tx():
                         db.add_pending_move(uv, uid, msgid)
-                        db.update_message(msgid, our_action="pending_move")
+                        db.update_imap_message(
+                            fmap["inbox"], uv, uid, our_action="pending_move"
+                        )
                         db.log_event("pending_move", msgid, detail=f"score={score:.2f}")
             last_terminal = uid
 
@@ -1651,8 +1817,8 @@ def execute_due_moves(client: IMAPClient, db: Db, log: logging.Logger, acc: Acco
             if r["uid"] not in to_move:
                 continue
             db.drop_pending_move(uv, r["uid"])
-            db.update_message(
-                r["message_id"],
+            db.update_imap_message(
+                fmap["inbox"], uv, r["uid"],
                 current_folder=fmap["junk"],
                 our_action="moved_to_junk",
                 moved_to_junk_at=now,
@@ -1707,35 +1873,55 @@ def poll_junk(client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fma
                 msgid, subject, sender = parse_envelope(raw)
                 if not msgid:
                     continue
-                prior = db.get_message(msgid)
-                prior_folder = prior["current_folder"] if prior else None
+                sha = body_sha256(raw)
+                prior = db.get_imap_message(junk, uv, uid)
+                siblings = _other_sha256_rows(db, sha, junk, uv, uid)
                 with db.tx():
-                    db.upsert_message(msgid, junk, sender, subject,
-                                      _internaldate_ts(data))
+                    db.upsert_imap_message(
+                        junk, uv, uid,
+                        message_id=msgid, sender=sender, subject=subject,
+                        received_at=_internaldate_ts(data), body_sha256=sha,
+                    )
 
-                # Filter put it here: nothing to learn. Skip.
-                if prior is not None and prior["our_action"] == "moved_to_junk":
+                # Filter put it here (Inbox row marked moved_to_junk after
+                # MOVE): nothing to learn. Skip.
+                if any(r["our_action"] == "moved_to_junk" for r in siblings):
                     continue
                 # Learn spam only from a confirmed user move Inbox -> Junk,
-                # i.e. we have a prior row showing the message was in Inbox.
-                # Mail with no prior row (delivered straight to Junk by the
+                # i.e. a sha256 sibling still recorded as living in Inbox.
+                # Mail with no sibling (delivered straight to Junk by the
                 # provider's own filter, never seen in Inbox) is NOT an
                 # explicit user move and is deliberately not learned - that
                 # would train Bayes on the provider's verdict, including its
                 # false positives.
-                if prior_folder == fmap["inbox"]:
+                inbox_sibs = [
+                    r for r in siblings
+                    if (
+                        r["folder"] == fmap["inbox"]
+                        or r["current_folder"] == fmap["inbox"]
+                    )
+                    and r["our_action"] != "moved_to_junk"
+                ]
+                if inbox_sibs:
                     if JUNK_KEYWORD in flags:
-                        try_learn(db, log, acc, raw, msgid, "spam", reason="user_move+junk_kw")
+                        try_learn(
+                            db, log, acc, raw, msgid, "spam",
+                            reason="user_move+junk_kw",
+                            folder=junk, uidvalidity=uv, uid=uid,
+                        )
                     else:
                         with db.tx():
                             if not prior or prior["pending_learn"] != "spam":
-                                db.update_message(
-                                    msgid,
+                                db.update_imap_message(
+                                    junk, uv, uid,
                                     pending_learn="spam",
                                     pending_learn_at=int(time.time()),
                                     moved_to_junk_at=int(time.time()),
                                 )
-                                db.log_event("pending_spam", msgid, detail="user move inbox->junk")
+                                db.log_event(
+                                    "pending_spam", msgid,
+                                    detail="user move inbox->junk",
+                                )
         with db.tx():
             db.set_scan_bookmark(junk, uv, max(uids))
 
@@ -1749,8 +1935,9 @@ def process_pending_learns(
     cutoff = int(time.time()) - acc.learn_grace_seconds
     cur = db.conn.execute(
         """
-        SELECT message_id, pending_learn, current_folder FROM messages
-        WHERE account=? AND pending_learn IS NOT NULL AND pending_learn_at<=?
+        SELECT folder, uidvalidity, uid, message_id, pending_learn, current_folder
+          FROM messages
+         WHERE account=? AND pending_learn IS NOT NULL AND pending_learn_at<=?
         """,
         (db.account, cutoff),
     )
@@ -1758,10 +1945,10 @@ def process_pending_learns(
     if not candidates:
         return
 
-    # Fetch raw bodies one-by-one (each may be in its current folder).
+    # Fetch raw bodies one-by-one (each may be in its IMAP folder).
     folder_groups: dict[str, list[sqlite3.Row]] = {}
     for row in candidates:
-        folder_groups.setdefault(row["current_folder"], []).append(row)
+        folder_groups.setdefault(row["folder"], []).append(row)
 
     for folder, rows in folder_groups.items():
         # Reconfirm folder still expected for the kind.
@@ -1775,40 +1962,50 @@ def process_pending_learns(
                 return
             msgid = r["message_id"]
             kind = r["pending_learn"]
+            uv = int(r["uidvalidity"])
+            uid = int(r["uid"])
             # Spam pending must still be in Junk; ham pending must still be in Inbox.
             if kind == "spam" and folder != fmap["junk"]:
                 with db.tx():
-                    db.update_message(msgid, pending_learn=None, pending_learn_at=None)
+                    db.update_imap_message(
+                        folder, uv, uid, pending_learn=None, pending_learn_at=None
+                    )
                     db.log_event("pending_canceled", msgid, detail="moved before grace")
                 continue
             if kind == "ham" and folder != fmap["inbox"]:
                 with db.tx():
-                    db.update_message(msgid, pending_learn=None, pending_learn_at=None)
+                    db.update_imap_message(
+                        folder, uv, uid, pending_learn=None, pending_learn_at=None
+                    )
                     db.log_event("pending_canceled", msgid, detail="moved before grace")
                 continue
-            # Locate UID via HEADER Message-ID search.
-            uids = client.search(["HEADER", "Message-ID", msgid])
-            if not uids:
-                with db.tx():
-                    db.update_message(msgid, pending_learn=None, pending_learn_at=None)
-                    db.log_event("pending_lost", msgid, detail=f"not found in {folder}")
-                continue
-            uid = uids[0]
             fetched = list(fetch_under_cap(client, [uid]))
             if not fetched:
                 continue
             _uid, data, oversize = fetched[0]
+            if not data:
+                with db.tx():
+                    db.update_imap_message(
+                        folder, uv, uid, pending_learn=None, pending_learn_at=None
+                    )
+                    db.log_event("pending_lost", msgid, detail=f"not found in {folder}")
+                continue
             if oversize:
                 _log_skipped_oversize(
                     db, log, uid=uid, folder=folder, size=_rfc822_size(data), msgid=msgid,
                 )
                 with db.tx():
-                    db.update_message(msgid, pending_learn=None, pending_learn_at=None)
+                    db.update_imap_message(
+                        folder, uv, uid, pending_learn=None, pending_learn_at=None
+                    )
                 continue
             raw = _body_bytes(data)
             if not raw:
                 continue
-            if try_learn(db, log, acc, raw, msgid, kind, reason="grace_elapsed"):
+            if try_learn(
+                db, log, acc, raw, msgid, kind, reason="grace_elapsed",
+                folder=folder, uidvalidity=uv, uid=uid,
+            ):
                 continue
             # try_learn returned False: a transient rspamd error left the
             # pending_learn flag set. Without a cap the same message is
@@ -1822,14 +2019,18 @@ def process_pending_learns(
             ).fetchone()[0]
             if fails >= 3:
                 with db.tx():
-                    db.update_message(
-                        msgid, learned_as="unlearnable",
+                    db.update_imap_message(
+                        folder, uv, uid,
+                        learned_as="unlearnable",
                         learned_at=int(time.time()),
-                        pending_learn=None, pending_learn_at=None)
-                    db.log_event("learn_giveup", msgid,
-                                 detail=f"{kind} after {fails} failures")
+                        pending_learn=None, pending_learn_at=None,
+                    )
+                    db.log_event(
+                        "learn_giveup", msgid,
+                        detail=f"{kind} after {fails} failures",
+                    )
                 log.warning("pending learn: giving up on %s after %d "
-                            "failures", msgid, fails)
+                            "failures", msgid or f"uid={uid}", fails)
 
 
 def _drain_train_folder(
@@ -1861,7 +2062,6 @@ def _drain_train_folder(
         return
     uids = uids[: acc.max_train_per_run]
     learned_uids: list[int] = []
-    moved_msgids: list[str] = []
     log_tag = f"drain_train_{kind}"
     reason = f"train_{kind}_folder"
     for uid, data, oversize in fetch_under_cap(client, uids):
@@ -1877,26 +2077,19 @@ def _drain_train_folder(
         if not raw:
             continue
         msgid, subject, sender = parse_envelope(raw)
-        if not msgid:
-            # No Message-ID header. Skip DB tracking entirely - we
-            # cannot safely identify the row across folder moves later
-            # (the synthetic uv+uid id is no longer addressable once
-            # the message is moved under a different uidvalidity), so
-            # storing it would just leak stale rows that retention
-            # can never update. Use a synthetic per-pass id for event
-            # logging only, and let rspamd dedup by content hash.
-            msgid = f"<no-msgid-uv-{uv}-uid-{uid}>"
-            synthetic = True
-        else:
-            synthetic = False
-            with db.tx():
-                db.upsert_message(msgid, folder, sender, subject,
-                                  _internaldate_ts(data))
-        ok = try_learn(db, log, acc, raw, msgid, kind, reason=reason)
+        sha = body_sha256(raw)
+        with db.tx():
+            db.upsert_imap_message(
+                folder, uv, uid,
+                message_id=msgid, sender=sender, subject=subject,
+                received_at=_internaldate_ts(data), body_sha256=sha,
+            )
+        ok = try_learn(
+            db, log, acc, raw, msgid, kind, reason=reason,
+            folder=folder, uidvalidity=uv, uid=uid,
+        )
         if ok:
             learned_uids.append(uid)
-            if not synthetic:
-                moved_msgids.append(msgid)
             continue
         # try_learn returned False: rspamd refused (min_tokens not met,
         # encoded body, etc.) or transient. Count prior learn_failed
@@ -1904,21 +2097,24 @@ def _drain_train_folder(
         # folder cannot loop forever on the same UID.
         fails = db.conn.execute(
             "SELECT COUNT(*) FROM events "
-            "WHERE account=? AND message_id=? AND event='learn_failed'",
+            "WHERE account=? AND message_id IS ? AND event='learn_failed'",
             (db.account, msgid),
         ).fetchone()[0]
         if fails >= 3:
             log.warning(
                 "%s: giving up on %s after %d learn failures, moving out unlearned",
-                log_tag, msgid, fails,
+                log_tag, msgid or f"uid={uid}", fails,
             )
             with db.tx():
-                if not synthetic:
-                    db.update_message(msgid, learned_as="unlearnable", learned_at=int(time.time()))
-                db.log_event("learn_giveup", msgid, detail=f"{kind} after {fails} failures")
+                db.update_imap_message(
+                    folder, uv, uid,
+                    learned_as="unlearnable", learned_at=int(time.time()),
+                )
+                db.log_event(
+                    "learn_giveup", msgid,
+                    detail=f"{kind} after {fails} failures",
+                )
             learned_uids.append(uid)
-            if not synthetic:
-                moved_msgids.append(msgid)
     if not learned_uids:
         return
     try:
@@ -1930,12 +2126,8 @@ def _drain_train_folder(
         with db.tx():
             for uid in learned_uids:
                 db.log_event("trained_moved", detail=f"uid={uid} -> {fmap[dst_key]}")
-            if moved_msgids:
-                placeholders = ",".join("?" * len(moved_msgids))
-                db.conn.execute(
-                    f"UPDATE messages SET current_folder=? WHERE account=? "
-                    f"AND message_id IN ({placeholders})",
-                    (fmap[dst_key], db.account, *moved_msgids),
+                db.update_imap_message(
+                    folder, uv, uid, current_folder=fmap[dst_key]
                 )
     except sqlite3.Error as ex:
         log.error(
@@ -1999,9 +2191,13 @@ def _sweep_folder_to_trash(
     if db.in_safe_mode("all"):
         return
     try:
-        client.select_folder(src)
+        info = client.select_folder(src)
+        uv = int(info[b"UIDVALIDITY"])
     except IMAPClientError as ex:
         log.warning("retention: select %s failed: %s", src, ex)
+        return
+    except (KeyError, TypeError, ValueError) as ex:
+        log.warning("retention: UIDVALIDITY missing for %s: %s", src, ex)
         return
     # IMAP `BEFORE <date>` is interpreted by the SERVER in its local
     # timezone (RFC 3501 4.3 - dates have no time, server compares
@@ -2023,35 +2219,12 @@ def _sweep_folder_to_trash(
         return
     uids = uids[:500]
     to_move: list[int] = []
-    moved_msgids: list[str] = []
-    # Always fetch Message-ID so we can update current_folder in the DB
-    # after the move; otherwise rows referencing src would persist
-    # forever and a future re-train would silent-skip them.
-    fetched = client.fetch(uids, [b"BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)]"])
     for uid in uids:
-        raw = (
-            fetched.get(uid, {}).get(b"BODY[HEADER.FIELDS (MESSAGE-ID)]")
-            or fetched.get(uid, {}).get(b"BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)]")
-            or b""
-        )
-        msgid, _, _ = parse_envelope(raw)
-        if exclude_learned_ham and msgid:
-            row = db.get_message(msgid)
+        if exclude_learned_ham:
+            row = db.get_imap_message(src, uv, uid)
             if row is not None and row["learned_as"] == "ham":
                 continue
         to_move.append(uid)
-        if msgid:
-            moved_msgids.append(msgid)
-        else:
-            # The DB row (if any) is keyed by Message-ID; without one we
-            # cannot address it, so the corresponding row stays stale
-            # until prune_messages eventually drops it. The IMAP move
-            # itself is still safe. Surface the rare case for visibility.
-            log.debug(
-                "retention %s: uid=%s in %s has no Message-ID; "
-                "moving without DB current_folder update",
-                tag, uid, src,
-            )
     if not to_move:
         return
     try:
@@ -2062,12 +2235,9 @@ def _sweep_folder_to_trash(
     try:
         with db.tx():
             db.log_event(tag, detail=f"moved {len(to_move)} from {src} to {fmap['trash']}")
-            if moved_msgids:
-                placeholders = ",".join("?" * len(moved_msgids))
-                db.conn.execute(
-                    f"UPDATE messages SET current_folder=? WHERE account=? "
-                    f"AND message_id IN ({placeholders})",
-                    (fmap["trash"], db.account, *moved_msgids),
+            for uid in to_move:
+                db.update_imap_message(
+                    src, uv, uid, current_folder=fmap["trash"]
                 )
     except sqlite3.Error as ex:
         log.error(

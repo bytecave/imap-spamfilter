@@ -40,7 +40,7 @@ Slices 1-3 are the PoC-critical path (do these before connecting real mailboxes,
 | 2 - IMAP fetch discipline | done | [`slice2_imap_fetch_discipline.md`](slice2_imap_fetch_discipline.md) |
 | 3 - Reliable Inbox bookmark | done | [`slice3_inbox_bookmark.md`](slice3_inbox_bookmark.md) |
 | 4 - TLS / YAML booleans / IDLE | done | [`slice4_connection_config.md`](slice4_connection_config.md) |
-| 5 - Message identity | pending | (write before implementing) |
+| 5 - Message identity | done | [`slice5_message_identity.md`](slice5_message_identity.md) |
 | 6 - Rspamd scan metadata | pending | (write before implementing) |
 | 7 - Ops / secrets / supply chain | pending | (write before implementing) |
 | 8 - Dashboard + log redaction | pending | (write before implementing) |

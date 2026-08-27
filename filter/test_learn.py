@@ -33,6 +33,7 @@ def _mk_db(tmp_path):
     f.DB_PATH = db_path  # Db.__init__ reads this module global
     with sqlite3.connect(db_path) as conn:
         conn.executescript(f.SCHEMA)
+        f._migrate(conn)
     return f.Db("acct")
 
 
@@ -57,10 +58,15 @@ def _mk_account(**over):
     return f.Account(**base)
 
 
-def _pending(db, msgid, folder, kind, at):
+def _pending(db, msgid, folder, kind, at, uid=1, uv=1):
     with db.tx():
-        db.upsert_message(msgid, folder, "s@example.com", "subj")
-        db.update_message(msgid, pending_learn=kind, pending_learn_at=at)
+        db.upsert_imap_message(
+            folder, uv, uid,
+            message_id=msgid, sender="s@example.com", subject="subj",
+        )
+        db.update_imap_message(
+            folder, uv, uid, pending_learn=kind, pending_learn_at=at
+        )
 
 
 def _events(db):
@@ -74,27 +80,35 @@ class _FakeResp:
 
 
 class _FakeIMAP:
-    """Minimal IMAPClient stand-in for process_pending_learns."""
+    """Minimal IMAPClient stand-in for process_pending_learns.
 
-    def __init__(self, raw_by_msgid):
-        self._raw = dict(raw_by_msgid)
-        self._uid = {m: i + 1 for i, m in enumerate(self._raw)}
+    Bodies are keyed by IMAP UID. search() is recorded so tests can
+    assert we no longer look up pending learns via HEADER Message-ID.
+    """
+
+    def __init__(self, raw_by_uid, header_hits=None):
+        self._raw = dict(raw_by_uid)
+        self._header_hits = header_hits
+        self.searches: list[list] = []
 
     def select_folder(self, folder, **kw):
         return {}
 
     def search(self, criteria):
+        self.searches.append(list(criteria))
         if criteria and criteria[0] == "HEADER":
-            msgid = criteria[2]
-            return [self._uid[msgid]] if msgid in self._raw else []
+            if self._header_hits is not None:
+                return list(self._header_hits)
+            return []
         return []
 
     def fetch(self, uids, parts):
         parts_b = [p if isinstance(p, bytes) else str(p).encode() for p in parts]
         out = {}
         for u in uids:
-            mid = next(m for m, uu in self._uid.items() if uu == u)
-            raw = self._raw[mid]
+            raw = self._raw.get(u)
+            if raw is None:
+                continue
             rec = {}
             for p in parts_b:
                 if p == b"RFC822.SIZE":
@@ -160,10 +174,13 @@ def test_try_learn_declined_is_terminal(tmp_path, monkeypatch):
     _pending(db, "m1", "Junk", "ham", int(time.time()))
     monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: "declined")
 
-    ok = f.try_learn(db, LOG, acc, b"raw", "m1", "ham", reason="x")
+    ok = f.try_learn(
+        db, LOG, acc, b"raw", "m1", "ham", reason="x",
+        folder="Junk", uidvalidity=1, uid=1,
+    )
 
     assert ok is True  # caller still moves the message out
-    row = db.get_message("m1")
+    row = db.get_imap_message("Junk", 1, 1)
     assert row["pending_learn"] is None  # never retried
     assert row["learned_as"] == "unlearnable"
     evs = _events(db)
@@ -177,10 +194,13 @@ def test_try_learn_error_keeps_pending_for_retry(tmp_path, monkeypatch):
     _pending(db, "m2", "Junk", "ham", int(time.time()))
     monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: "error")
 
-    ok = f.try_learn(db, LOG, acc, b"raw", "m2", "ham", reason="x")
+    ok = f.try_learn(
+        db, LOG, acc, b"raw", "m2", "ham", reason="x",
+        folder="Junk", uidvalidity=1, uid=1,
+    )
 
     assert ok is False
-    row = db.get_message("m2")
+    row = db.get_imap_message("Junk", 1, 1)
     assert row["pending_learn"] == "ham"  # still queued
     assert row["learned_as"] is None
     assert "learn_failed" in _events(db)
@@ -192,10 +212,13 @@ def test_try_learn_learned_records_success(tmp_path, monkeypatch):
     _pending(db, "m3", "Junk", "ham", int(time.time()))
     monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: "learned")
 
-    ok = f.try_learn(db, LOG, acc, b"raw", "m3", "ham", reason="x")
+    ok = f.try_learn(
+        db, LOG, acc, b"raw", "m3", "ham", reason="x",
+        folder="Junk", uidvalidity=1, uid=1,
+    )
 
     assert ok is True
-    row = db.get_message("m3")
+    row = db.get_imap_message("Junk", 1, 1)
     assert row["learned_as"] == "ham"
     assert row["pending_learn"] is None
     assert "learn_ham" in _events(db)
@@ -207,10 +230,13 @@ def test_try_learn_already_records_success(tmp_path, monkeypatch):
     _pending(db, "m4", "Junk", "ham", int(time.time()))
     monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: "already")
 
-    ok = f.try_learn(db, LOG, acc, b"raw", "m4", "ham", reason="x")
+    ok = f.try_learn(
+        db, LOG, acc, b"raw", "m4", "ham", reason="x",
+        folder="Junk", uidvalidity=1, uid=1,
+    )
 
     assert ok is True
-    row = db.get_message("m4")
+    row = db.get_imap_message("Junk", 1, 1)
     assert row["learned_as"] == "ham"
     assert row["pending_learn"] is None
 
@@ -223,7 +249,7 @@ def test_process_pending_learns_caps_repeated_errors(tmp_path, monkeypatch):
     acc = _mk_account(learn_grace_seconds=0)
     _pending(db, "loop1", "INBOX", "ham", int(time.time()) - 10)
     monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: "error")
-    client = _FakeIMAP({"loop1": b"raw-bytes"})
+    client = _FakeIMAP({1: b"raw-bytes"})
     fmap = {"junk": "Junk", "inbox": "INBOX"}
 
     for _ in range(8):  # far more polls than the cap
@@ -233,4 +259,5 @@ def test_process_pending_learns_caps_repeated_errors(tmp_path, monkeypatch):
     giveups = sum(e == "learn_giveup" for e in _events(db))
     assert fails <= 3, f"retry cap breached: {fails} learn_failed events"
     assert giveups == 1
-    assert db.get_message("loop1")["pending_learn"] is None
+    assert db.get_imap_message("INBOX", 1, 1)["pending_learn"] is None
+    assert not any(s and s[0] == "HEADER" for s in client.searches)

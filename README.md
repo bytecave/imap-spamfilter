@@ -567,6 +567,10 @@ Pages:
 
 The SQLite DB is WAL mode; safe to query while the filter is running.
 
+Messages are identified by IMAP `(account, folder, uidvalidity, uid)`,
+not by `Message-ID`. Duplicate Message-IDs are independent objects;
+`Message-ID` is searchable metadata only.
+
 ```bash
 sqlite3 /mnt/user/appdata/spamfilter/state/spamfilter.db
 ```
