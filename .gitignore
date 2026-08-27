@@ -26,3 +26,11 @@ __pycache__/
 .idea/
 .vscode/
 .DS_Store
+
+# Graphify knowledge-graph output / caches (never commit).
+# Ignore any path whose name starts with or contains "graphify", but keep
+# Cursor project rules under .cursor/ (including rules/graphify.mdc).
+*graphify*
+.*graphify*
+!.cursor/
+!.cursor/**
