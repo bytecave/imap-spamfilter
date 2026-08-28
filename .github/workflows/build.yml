@@ -9,11 +9,27 @@ on:
     paths:
       - 'filter/**'
       - '.github/workflows/build.yml'
+      - 'accounts.yml.example'
+      - '.env.example'
+      - 'docker-compose.yml'
+      - 'deploy/**'
+      - 'unraid/**'
+      - 'rspamd/**'
+      - 'redis/**'
+      - 'ca_profile.xml'
   pull_request:
     branches: [main]
     paths:
       - 'filter/**'
       - '.github/workflows/build.yml'
+      - 'accounts.yml.example'
+      - '.env.example'
+      - 'docker-compose.yml'
+      - 'deploy/**'
+      - 'unraid/**'
+      - 'rspamd/**'
+      - 'redis/**'
+      - 'ca_profile.xml'
   workflow_dispatch:
 
 permissions:
@@ -26,6 +42,7 @@ env:
 
 jobs:
   filter:
+    needs: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -74,12 +91,13 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
         with:
-          python-version: '3.14'
+          python-version: '3.12'
           cache: 'pip'
           cache-dependency-path: filter/requirements.txt
       - name: Install dependencies
         run: |
-          pip install -r filter/requirements.txt pytest
+          python -m pip install -r filter/requirements.txt pytest==8.4.2
+          python -m pip check
       - name: Syntax check
         run: |
           python -m compileall -q filter
@@ -88,14 +106,54 @@ jobs:
           cd filter && python -m pytest -q
       - name: YAML check
         run: |
-          python -c "import yaml, pathlib; yaml.safe_load(pathlib.Path('accounts.yml.example').read_text()); print('accounts.yml.example OK')"
+          python - <<'PY'
+          from pathlib import Path
+          import yaml
+
+          files = [
+              Path("accounts.yml.example"),
+              Path("docker-compose.yml"),
+              *sorted(Path(".github/workflows").glob("*.yml")),
+              *sorted(Path("deploy").glob("*.yaml")),
+          ]
+          for path in files:
+              yaml.safe_load(path.read_text())
+              print(path, "OK")
+          PY
+      - name: Compose check
+        run: |
+          docker compose -f docker-compose.yml config --quiet
+          docker compose -f deploy/bytelord-compose.yaml config --quiet --no-env-resolution
+      - name: Shell syntax check
+        run: bash -n deploy/*.sh unraid/*.sh
       - name: XML check
         run: |
           python - <<'PY'
-          import glob, xml.etree.ElementTree as ET
-          for f in sorted(glob.glob('unraid/*.xml')):
-              ET.parse(f); print(f, 'OK')
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          files = [*sorted(Path(".").glob("*.xml")), *sorted(Path("unraid").glob("*.xml"))]
+          for path in files:
+              ET.parse(path)
+              print(path, "OK")
           PY
+
+  # Exercise the newest interpreter without allowing a forward-compatibility
+  # regression to publish an image or block the production Python 3.12 gate.
+  forward-compatibility:
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+          cache: 'pip'
+          cache-dependency-path: filter/requirements.txt
+      - name: Install dependencies
+        run: python -m pip install -r filter/requirements.txt pytest==8.4.2
+      - name: Tests
+        run: cd filter && python -m pytest -q
 
   # Keep the Actions history small: after a build, prune completed
   # runs down to the 4 most recent. The run doing the pruning is still
