@@ -89,13 +89,21 @@ render_subst() {
   local template="$1" dest="$2" placeholder="$3" pwfile="$4"
   local tmp="${dest}.tmp"
   awk -v pfile="$pwfile" -v ph="$placeholder" '
+    function literal_gsub(str, find, repl, pos, pre, post) {
+      while ((pos = index(str, find)) > 0) {
+        pre = substr(str, 1, pos - 1)
+        post = substr(str, pos + length(find))
+        str = pre repl post
+      }
+      return str
+    }
     BEGIN {
       if ((getline pw < pfile) < 0) exit 1
       close(pfile)
       gsub(/\r/, "", pw)
       sub(/\n$/, "", pw)
     }
-    { gsub(ph, pw); print }
+    { print literal_gsub($0, ph, pw) }
   ' "$template" > "$tmp"
   mv "$tmp" "$dest"
 }
