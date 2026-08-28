@@ -88,3 +88,4 @@ accounts:
 # defaults:
 #   threshold: 9.0
 #   junk_retention_days: 30
+#   flip_flop_cooldown_seconds: 1   # 0 disables; default 600

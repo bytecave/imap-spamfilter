@@ -177,6 +177,7 @@ class Account:
     max_moves_per_hour: int
     max_learns_per_hour: int
     max_train_per_run: int
+    flip_flop_cooldown_seconds: int
     safe_mode_unseen_cap: int
 
     junk_retention_days: int
@@ -241,6 +242,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "max_moves_per_hour": 30,
     "max_learns_per_hour": 50,
     "max_train_per_run": 100,
+    "flip_flop_cooldown_seconds": FLIP_FLOP_COOLDOWN_S,
     "safe_mode_unseen_cap": SAFE_MODE_UNSEEN_CAP,
     "junk_retention_days": 10,
     "trained_retention_days": 7,
@@ -504,6 +506,7 @@ def load_accounts(path: Path) -> list[Account]:
                 max_moves_per_hour=int(merged["max_moves_per_hour"]),
                 max_learns_per_hour=int(merged["max_learns_per_hour"]),
                 max_train_per_run=int(merged["max_train_per_run"]),
+                flip_flop_cooldown_seconds=int(merged["flip_flop_cooldown_seconds"]),
                 safe_mode_unseen_cap=int(merged["safe_mode_unseen_cap"]),
                 junk_retention_days=int(merged["junk_retention_days"]),
                 trained_retention_days=int(merged["trained_retention_days"]),
@@ -590,6 +593,11 @@ def validate_account(acc: Account) -> None:
         raise SystemExit(f"{acc.name}: max_learns_per_hour out of range")
     if not 1 <= acc.max_train_per_run <= 5000:
         raise SystemExit(f"{acc.name}: max_train_per_run out of range")
+    if not 0 <= acc.flip_flop_cooldown_seconds <= 86400:
+        raise SystemExit(
+            f"{acc.name}: flip_flop_cooldown_seconds out of range "
+            f"(0 disables, max 86400)"
+        )
     if acc.safe_mode_unseen_cap < 1:
         raise SystemExit(
             f"{acc.name}: safe_mode_unseen_cap must be >= 1 ({acc.safe_mode_unseen_cap})"
@@ -1160,10 +1168,18 @@ def rspamd_learn(raw: bytes, kind: str, user: str) -> str:
     rspamd's controller for classifier identity, so message-header
     injection is the only working path. Must match the recipient used at
     scan time for the data to apply on future deliveries.
+
+    Always sends `Learn-Type: bulk` so an opposite-class relearn
+    unlearns the previous Bayes class (rspamd otherwise may refuse
+    with "already in class").
     """
     assert kind in {"spam", "ham"}
     url = f"{RSPAMD_LEARN_URL}/learn{kind}"
-    headers = {"Password": RSPAMD_PASSWORD}
+    # Learn-Type: bulk lets rspamd reclassify (unlearn the previous class
+    # and learn the new one). Inbox↔Junk MOVE assigns a new UID, so this
+    # filter cannot always detect a class flip from its own DB row.
+    # Harmless on a first learn.
+    headers = {"Password": RSPAMD_PASSWORD, "Learn-Type": "bulk"}
     body = f"Delivered-To: {user}\r\n".encode() + raw
     try:
         resp = requests.post(url, data=body, headers=headers, timeout=HTTP_TIMEOUT)
@@ -1580,8 +1596,9 @@ def try_learn(
                 return True
             # Old enough to retry: fall through to the rspamd_learn call.
         if learned and learned != kind:
+            cooldown = acc.flip_flop_cooldown_seconds
             last = row["learned_at"] or 0
-            if int(time.time()) - last < FLIP_FLOP_COOLDOWN_S:
+            if cooldown > 0 and int(time.time()) - last < cooldown:
                 log.warning("skip learn (%s) for %s: flip-flop cooldown active", kind, label)
                 db.log_event("learn_flipflop_block", msgid, detail=f"{learned}->{kind}")
                 return False

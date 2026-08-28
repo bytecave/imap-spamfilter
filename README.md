@@ -445,6 +445,7 @@ user's mailbox.
 | `max_moves_per_hour` | `30` | breach triggers safe-mode for the account |
 | `max_learns_per_hour` | `50` | breach triggers learning-only safe-mode |
 | `max_train_per_run` | `100` | cap per `drain_train_spam` batch |
+| `flip_flop_cooldown_seconds` | `600` | block opposite-class relearn on the same IMAP UID; `0` disables |
 | `safe_mode_unseen_cap` | `500` | sticky safe-mode if Inbox UNSEEN exceeds this; raise for accounts that normally keep many unread |
 
 ### Retention

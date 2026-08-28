@@ -77,6 +77,7 @@ def _mk_account(**over):
         poll_interval=600, junk_poll_interval=120,
         retention_check_interval=3600,
         max_moves_per_hour=30, max_learns_per_hour=50, max_train_per_run=100,
+        flip_flop_cooldown_seconds=600,
         safe_mode_unseen_cap=500,
         junk_retention_days=10, trained_retention_days=7,
         learn_from_moves=True, auto_special_folders=True,

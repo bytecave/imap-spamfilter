@@ -83,6 +83,22 @@ def test_invalid_bool_exits(tmp_path):
         f.load_accounts(path)
 
 
+def test_flip_flop_cooldown_yaml_and_builtin(tmp_path):
+    path = _write_accounts(tmp_path, "")
+    accs = f.load_accounts(path)
+    assert accs[0].flip_flop_cooldown_seconds == 600
+
+    path = _write_accounts(tmp_path, "", defaults="  flip_flop_cooldown_seconds: 1\n")
+    accs = f.load_accounts(path)
+    assert accs[0].flip_flop_cooldown_seconds == 1
+
+
+def test_flip_flop_cooldown_out_of_range(tmp_path):
+    path = _write_accounts(tmp_path, "    flip_flop_cooldown_seconds: -1\n")
+    with pytest.raises(SystemExit, match="flip_flop_cooldown_seconds"):
+        f.load_accounts(path)
+
+
 class _IdleProbe:
     def __init__(self):
         self.idle_calls = 0

@@ -50,6 +50,7 @@ def _mk_account(**over):
         poll_interval=600, junk_poll_interval=120,
         retention_check_interval=3600,
         max_moves_per_hour=30, max_learns_per_hour=50, max_train_per_run=100,
+        flip_flop_cooldown_seconds=600,
         safe_mode_unseen_cap=500,
         junk_retention_days=10, trained_retention_days=7,
         learn_from_moves=True, auto_special_folders=True,
@@ -165,6 +166,21 @@ def test_rspamd_learn_network_exception_is_error(monkeypatch):
     assert f.rspamd_learn(b"raw", "ham", user="u") == "error"
 
 
+def test_rspamd_learn_sends_bulk_header(monkeypatch):
+    captured = {}
+
+    def capture(url, data=None, headers=None, timeout=None):
+        captured["url"] = url
+        captured["headers"] = headers
+        return _FakeResp(200, '{"success":true}')
+
+    monkeypatch.setattr(f.requests, "post", capture)
+    assert f.rspamd_learn(b"raw", "spam", user="u") == "learned"
+    assert captured["headers"]["Learn-Type"] == "bulk"
+    assert captured["headers"]["Password"] == f.RSPAMD_PASSWORD
+    assert captured["url"].endswith("/learnspam")
+
+
 # ----- try_learn: act on the classified outcome -----------------------------
 
 
@@ -261,3 +277,54 @@ def test_process_pending_learns_caps_repeated_errors(tmp_path, monkeypatch):
     assert giveups == 1
     assert db.get_imap_message("INBOX", 1, 1)["pending_learn"] is None
     assert not any(s and s[0] == "HEADER" for s in client.searches)
+
+
+def test_try_learn_flipflop_blocks_within_cooldown(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(flip_flop_cooldown_seconds=600)
+    now = int(time.time())
+    with db.tx():
+        db.upsert_imap_message(
+            "Junk", 1, 1,
+            message_id="m-flip", sender="s@example.com", subject="subj",
+        )
+        db.update_imap_message(
+            "Junk", 1, 1, learned_as="spam", learned_at=now,
+        )
+    called = {"n": 0}
+
+    def boom(*a, **k):
+        called["n"] += 1
+        return "learned"
+
+    monkeypatch.setattr(f, "rspamd_learn", boom)
+    ok = f.try_learn(
+        db, LOG, acc, b"raw", "m-flip", "ham", reason="x",
+        folder="Junk", uidvalidity=1, uid=1,
+    )
+    assert ok is False
+    assert called["n"] == 0
+    assert "learn_flipflop_block" in _events(db)
+    assert db.get_imap_message("Junk", 1, 1)["learned_as"] == "spam"
+
+
+def test_try_learn_flipflop_zero_cooldown_allows_relearn(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(flip_flop_cooldown_seconds=0)
+    now = int(time.time())
+    with db.tx():
+        db.upsert_imap_message(
+            "Junk", 1, 1,
+            message_id="m-flip0", sender="s@example.com", subject="subj",
+        )
+        db.update_imap_message(
+            "Junk", 1, 1, learned_as="spam", learned_at=now,
+        )
+    monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: "learned")
+    ok = f.try_learn(
+        db, LOG, acc, b"raw", "m-flip0", "ham", reason="x",
+        folder="Junk", uidvalidity=1, uid=1,
+    )
+    assert ok is True
+    assert db.get_imap_message("Junk", 1, 1)["learned_as"] == "ham"
+    assert "learn_ham" in _events(db)
