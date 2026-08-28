@@ -92,10 +92,21 @@ docker compose -f /opt/bytelord/compose/email-oauth2-proxy/compose.yaml logs -f
 If you change `RSPAMD_PASSWORD` or `REDIS_PASSWORD`, re-run
 `vps-bootstrap.sh` then restart. Bootstrap renders redis/rspamd configs
 from the secrets file only; it does **not** write
-`data/imap-spamfilter/state/{controller,redis}.password`.
+`data/imap-spamfilter/state/{controller,redis}.password`. Rendered
+secret-bearing configs are mode `640`; ByteLord Compose maps the deploy group
+into the official Redis/rspamd containers. The external `/opt/bytelord`
+secrets path and loopback-only dashboard binding are unchanged.
 
 Dashboard (optional): `127.0.0.1:8080`  
-`docker exec -it spamfilter python dashboard.py` to add a user.
+`docker exec -it spamfilter python dashboard.py` to add a user. Restart
+`spamfilter` after creating the first user so the listener starts; later
+user-file updates are read on login.
+
+Readiness remains operationally deferred: Compose `depends_on` is start order,
+not readiness, and the image heartbeat does not prove per-account progress.
+Do not add `service_healthy` gates that couple the separate external-network
+Compose projects without tested probes; verify each account's connected log
+after a restart.
 
 ---
 

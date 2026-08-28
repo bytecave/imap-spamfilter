@@ -133,26 +133,40 @@ called `spamnet` so they can resolve each other by name.
 
 ### 0. Bootstrap (one shot)
 
-Install **User Scripts** from Community Apps if you don't already have it.
-Settings -> User Scripts -> Add New Script, name it `spamfilter-bootstrap`,
-paste in the contents of
-[`unraid/bootstrap.sh`](unraid/bootstrap.sh):
+Clone the repository onto persistent storage, then install **User Scripts**
+from Community Apps. Add `spamfilter-bootstrap` with this command and schedule
+it for **At First Array Start Only**:
+
+```bash
+bash /mnt/user/appdata/imap-spamfilter-src/unraid/bootstrap.sh
+```
+
+Keeping the script beside its checkout ensures every refresh uses one coherent
+configuration bundle:
+
+```bash
+git clone https://github.com/marcelverdult/imap-spamfilter \
+  /mnt/user/appdata/imap-spamfilter-src
+```
 
 The script is idempotent and does all of the following:
 
 - Creates the user-defined `spamnet` Docker network
-- Creates the `/mnt/user/appdata/spamfilter/{redis,redis-config,state,rspamd/data,rspamd/local.d}` layout
-  (the `redis/` and `rspamd/data/` dirs are owned by the images' internal uids, mode 750)
-- Copies rspamd `local.d/*` from the git checkout when present; otherwise fetches a
-  **pinned commit** (`SPAMFILTER_REF`, never floating `/main`)
+- Creates the `/mnt/user/appdata/spamfilter/{redis,redis-config,secrets,state,rspamd/data,rspamd/local.d}` layout
+  (`redis/` and `rspamd/data/` use image ownership/mode 750 when privileged,
+  or the explicitly mapped appdata group/mode 770 on an unprivileged host)
+- Stages all tracked configs from the checkout, validates required templates,
+  then activates each file atomically
 - Seeds `accounts.yml` from `accounts.yml.example` (only if missing)
-- Reads `RSPAMD_PASSWORD` and `REDIS_PASSWORD` from `SPAMFILTER_SECRETS`
-  (`/opt/bytelord/secrets/imap-spamfilter.env` on ByteLord). Both keys are
-  required. It does **not** write `state/controller.password` or
-  `state/redis.password`.
+- Creates `/mnt/user/appdata/spamfilter/secrets/imap-spamfilter.env` on first
+  Unraid run with two random 64-character hex passwords, owner `99:100`, mode
+  `600`. `SPAMFILTER_SECRETS` can override this path; the ByteLord wrapper keeps
+  `/opt/bytelord/secrets/imap-spamfilter.env`.
 - Renders `worker-controller.inc`, the rspamd `redis.conf` client config, and the
   Redis server config into `redis-config/redis.conf` with those passwords substituted
-  in (awk reads a temp password file; secrets never appear on `ps`)
+  in (awk reads a temp password file; secrets never appear on `ps`). Rendered
+  secret-bearing configs are appdata-owned mode `640`; the templates map
+  appdata group `100` into the official containers.
 - Writes `$APP/.bootstrap.version` from `unraid/bootstrap.version`. A missing or
   different stamp refreshes static `local.d` files and templates, then re-renders
   secret files. It never overwrites `accounts.yml`.
@@ -161,19 +175,28 @@ Set the schedule to **"At First Array Start Only"** and click **Run Script**
 once to bootstrap immediately. It'll re-run on every array start, so the
 network/layout are recreated automatically after a USB reformat or migration.
 After pulling template/config fixes, re-run the script so the version stamp
-can refresh `local.d` (your accounts and generated passwords stay put).
+can refresh `local.d` (your accounts and secrets file stay put).
 
-If you'd rather not use User Scripts, clone the repo and run the script over SSH
-(preferred: copies configs from disk). Do not pipe bootstrap.sh from
-`.../main` — that ref floats. Without a clone, curl a **commit SHA**:
+You can also run the checkout script directly over SSH. Do not pipe
+`bootstrap.sh` from `.../main` — that ref floats. A no-checkout copy is
+supported only when `SPAMFILTER_REF` is explicitly the same full commit SHA
+used to obtain the script; there is deliberately no stale embedded fallback:
 
 ```bash
 # From a checkout:
 bash unraid/bootstrap.sh
 
-# No checkout: pin the script URL to a commit (same idea as SPAMFILTER_REF).
-# curl -fsSL https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/<commit>/unraid/bootstrap.sh | bash
+# No checkout: replace <40-char-commit> in both places.
+curl --fail --location --connect-timeout 10 --max-time 90 \
+  https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/<40-char-commit>/unraid/bootstrap.sh \
+  -o /tmp/spamfilter-bootstrap.sh
+SPAMFILTER_REF=<40-char-commit> bash /tmp/spamfilter-bootstrap.sh
 ```
+
+Docker `userns-remap` and rootless Docker are not supported by this generic
+ownership contract. Bootstrap detects either mode and stops before rendering
+rather than guessing shifted host IDs. Standard Unraid Docker does not enable
+these options.
 
 ### 1. Edit `accounts.yml`
 
@@ -192,15 +215,17 @@ local template), import each XML from this repo's `unraid/` directory:
 
 1. `unraid/spamfilter-redis.xml`   -> install (no prompts beyond the data path)
 2. `unraid/spamfilter-unbound.xml` -> install
-3. `unraid/spamfilter-rspamd.xml`  -> install (controller password is read from
-   the bootstrap-generated `state/controller.password` file)
+3. `unraid/spamfilter-rspamd.xml`  -> install (the protected controller and
+   Redis credentials are already rendered into its mode-640 configs)
 4. `unraid/spamfilter.xml`         -> set `DEFAULT_JUNK_RETENTION_DAYS` and
    `DEFAULT_TRAINED_RETENTION_DAYS` if you want non-defaults (defaults
    10 / 7) **and** `accounts.yml` `defaults:` omits those keys. Explicit YAML
    wins. Then install.
 
 Each template defaults its paths under `/mnt/user/appdata/spamfilter/<service>`,
-matches typical Unraid conventions, and references `Network=spamnet`.
+matches typical Unraid conventions, and references `Network=spamnet`. The
+filter template mounts the protected secrets file read-only and sets
+`SECRETS_FILE=/run/secrets/imap-spamfilter.env`.
 
 > **Tip.** If you'd rather get the templates without cloning the repo,
 > point Unraid's "Template repositories" setting (Docker tab -> Advanced
@@ -227,10 +252,12 @@ The rspamd controller (port 11334) is **not** published to the host — the
 stack deliberately keeps it on the internal `spamnet` network only. To
 reach rspamd's own web UI, either add an `11334:11334` port mapping to the
 rspamd container yourself, or use the read-only dashboard (see below). The
-controller password, if you need it, is the auto-generated value:
+controller password, if you need it for a private troubleshooting session, is
+the `RSPAMD_PASSWORD` value in the protected file:
 
 ```bash
-cat /mnt/user/appdata/spamfilter/state/controller.password
+grep '^RSPAMD_PASSWORD=' \
+  /mnt/user/appdata/spamfilter/secrets/imap-spamfilter.env
 ```
 
 ### 4. Bootstrap training (optional but recommended)
@@ -296,7 +323,9 @@ Follows the same layout as gitea, pgadmin, and aidm on this host:
 
 Put `RSPAMD_PASSWORD` and `REDIS_PASSWORD` in the secrets file. Bootstrap
 renders rspamd/redis configs from that file only — no copies under
-`data/.../state/`.
+`data/.../state/`. Keep the file mode `600`; rendered configs are mode `640`
+and Compose grants the official Redis/rspamd processes the deploy group needed
+to read them.
 
 ```bash
 # One-time layout + render configs from /opt/bytelord/secrets/imap-spamfilter.env
@@ -316,10 +345,12 @@ re-run `deploy/vps-bootstrap.sh` and restart the stack so rendered configs
 pick up the new values.
 
 The filter reads secrets in this order: `RSPAMD_PASSWORD` env var (from
-compose `env_file`), then the mounted secrets file (`SECRETS_FILE`).
+Compose `env_file`), then the mounted secrets file (`SECRETS_FILE`). The
+ByteLord paths and loopback-only dashboard publication remain unchanged.
 
 Dashboard is on `127.0.0.1:8080` only. Add users with
-`docker exec -it spamfilter python dashboard.py`.
+`docker exec -it spamfilter python dashboard.py`; restart `spamfilter` after
+creating the first user so the listener starts.
 
 ---
 
@@ -329,19 +360,31 @@ The published `ghcr.io/marcelverdult/imap-spamfilter` image is multi-arch
 (`linux/amd64` and `linux/arm64`), so the same stack runs on Synology,
 generic Linux servers, Raspberry Pi 4/5, ARM mini-PCs, etc.
 
-For a generic host, use the repo-root `docker-compose.yml` (Unraid paths)
-or copy `deploy/bytelord-compose.yaml` and adjust paths.
+For a generic host, use the parameterized repo-root `docker-compose.yml`.
+Set all host paths and ownership IDs together; do not use the ByteLord wrapper
+or its `/opt/bytelord` defaults.
 
 ```bash
 git clone https://github.com/marcelverdult/imap-spamfilter
 cd imap-spamfilter
 
+sudo install -d -o "$(id -u)" -g "$(id -g)" /srv/spamfilter
 export SPAMFILTER_APP=/srv/spamfilter
-bash deploy/vps-bootstrap.sh   # or unraid/bootstrap.sh with SPAMFILTER_APP set
+export SPAMFILTER_ACCOUNTS="$SPAMFILTER_APP/accounts.yml"
+export SPAMFILTER_SECRETS="$SPAMFILTER_APP/secrets/imap-spamfilter.env"
+export SPAMFILTER_UID="$(id -u)"
+export SPAMFILTER_GID="$(id -g)"
 
-nano $SPAMFILTER_APP/accounts.yml
+bash unraid/bootstrap.sh
+nano "$SPAMFILTER_ACCOUNTS"
+docker compose config
 docker compose up -d --build
 ```
+
+Those same exported variables parameterize bootstrap and every root-Compose
+bind mount. Bootstrap creates the appdata-local secrets file on first run; to
+supply an existing file instead, create it at `$SPAMFILTER_SECRETS` with mode
+`600` before running bootstrap.
 
 On Unraid, use the templates under `unraid/` instead.
 
@@ -350,6 +393,20 @@ On Unraid, use the templates under `unraid/` instead.
 ## Verify before deploying
 
 Items the spec did not pin. Confirm before trusting the filter in `move` mode.
+
+### Startup/readiness limitation
+
+`depends_on` currently provides start ordering only. It intentionally is not
+changed to `service_healthy`: the ByteLord topology shares an external
+`spamnet` with a separately managed OAuth-proxy Compose project, and neither
+the official rspamd nor Unbound image has a stable, credential-safe readiness
+probe in this deployment. The filter retains reconnect/backoff behavior.
+
+The image healthcheck proves the main process heartbeat, not that every
+account worker is making progress. After a restart, verify each configured
+account logs a successful connection before treating the service as ready.
+Per-account readiness requires an application change and is deferred rather
+than represented by a misleading Compose healthcheck.
 
 1. **IMAP hostname** - get from your mail provider's account/admin panel.
    Set as `imap_host:` in `accounts.yml`. Verify by opening port 993 with
@@ -511,11 +568,11 @@ Everything stateful lives under `/mnt/user/appdata/spamfilter/`:
 ├── accounts.yml                # account list and per-account overrides (SECRETS)
 ├── redis/                      # Bayes corpus, fuzzy hashes, neural weights
 ├── redis-config/redis.conf     # rendered Redis server config (bootstrap.sh)
+├── secrets/
+│   └── imap-spamfilter.env     # password source of truth (mode 600)
 ├── state/
 │   ├── spamfilter.db           # SQLite audit log + state
 │   ├── heartbeat               # epoch updated each loop (healthcheck source)
-│   ├── controller.password     # generated rspamd controller password
-│   ├── redis.password          # generated Redis password
 │   ├── dashboard_secret        # generated dashboard session secret
 │   └── dashboard_users         # dashboard logins (present once the dashboard is used)
 └── rspamd/
@@ -523,10 +580,10 @@ Everything stateful lives under `/mnt/user/appdata/spamfilter/`:
     └── data/                   # rspamd-managed caches
 ```
 
-Back up `redis/`, `state/`, and `accounts.yml`. Skip `rspamd/data/` and
-`redis-config/` (both regenerate — the latter is re-rendered by
-`bootstrap.sh` from `state/redis.password`). Unraid's built-in **CA
-Backup** plugin pointed at the appdata path is sufficient.
+Back up `redis/`, `state/`, `secrets/imap-spamfilter.env`, and `accounts.yml`.
+Skip `rspamd/data/` and `redis-config/` (both regenerate — the latter is
+re-rendered by `bootstrap.sh` from the protected secrets file). Unraid's
+built-in **CA Backup** plugin pointed at the appdata path is sufficient.
 
 Redis is capped at 1 GB with `maxmemory-policy noeviction` and Bayes
 `expire = 0`. That is intentional: LRU would silently drop tokens and
@@ -544,8 +601,8 @@ progress, recent scans/learns, and per-account activity. Responsive,
 dark-mode aware. **Off by default.** No actions, no buttons —
 read-only.
 
-The container always listens internally on **port 8080**; pick any
-free host port in your orchestrator's port mapping.
+When enabled at process startup, the dashboard listens internally on **port
+8080**; pick any free host port in your orchestrator's port mapping.
 
 ### Login
 
@@ -560,9 +617,15 @@ docker exec -it spamfilter python dashboard.py
 
 It adds (or updates) the user in `state/dashboard_users` — one
 `username:hash:scope` line per user, passwords pbkdf2-hashed, `#`
-comments allowed. The dashboard re-reads that file on every login, so
-adding or changing a user takes effect **without a restart**. You can
-edit the file by hand too.
+comments allowed. If this is the first configured user, restart the container
+once so the dashboard listener starts. After that, adding or changing users
+takes effect **without a restart** because the file is re-read on every login.
+You can edit the file by hand too.
+
+Dashboard usernames are limited to 128 characters and passwords to 1024
+characters. The helper enforces the same limits as the login form. If an older
+helper created a longer credential, replace it with a credential within these
+limits before relying on dashboard access after upgrading.
 
 **Access levels.** The helper also asks for a scope:
 
@@ -591,9 +654,10 @@ The session signing secret is generated once into
 Sessions expire after 8 hours idle or 24 hours absolute. Logout is a
 POST (the nav button). GET `/logout` does not end the session.
 
-The dashboard starts once at least one user exists (file or env). On
-Unraid set the host port in the "Dashboard port" mapping and Apply
-(LAN access). On a VPS publish loopback only, for example
+The dashboard starts only when at least one user exists at process startup.
+After creating the first file user, run `docker restart spamfilter`. On Unraid
+set the host port in the "Dashboard port" mapping and Apply (LAN access). On a
+VPS publish loopback only, for example
 `127.0.0.1:8080:8080` in Compose, and put a reverse proxy in front if
 you need remote access. Do not publish `8080:8080` on a public
 interface.
@@ -697,8 +761,8 @@ backups of that whole tree preserve:
 - Redis AOF + RDB (Bayes tokens — the actual training)
 - rspamd `/var/lib/rspamd` cache (incl. neural-meta weights, which take
   days of confident decisions to rebuild from scratch)
-- accounts.yml, the rspamd controller password, and the Redis password
-  (`state/controller.password`, `state/redis.password`)
+- `accounts.yml` and `secrets/imap-spamfilter.env` (the source of truth for
+  rspamd controller and Redis passwords)
 
 On Unraid, install the **Appdata Backup** Community App (by `KluthR`)
 and schedule it nightly. Set "Stop container before backup" for all

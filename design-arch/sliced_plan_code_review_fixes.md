@@ -8,7 +8,7 @@ accounts to flag/move.
 
 Confirmed against current [`filter/filter.py`](../filter/filter.py). Scope is the review findings in [`design-arch/spamfilter_discussion_and_code_review.md`](spamfilter_discussion_and_code_review.md). **OAuth / `email-oauth2-proxy` is a follow-on track** after Slice 4 (it needs an explicit `tls_mode: none` for localhost LOGIN).
 
-**Where this will run.** Coding starts on the local desktop; implementation against the live stack happens over SSH on the Linux VPS. Secrets live **outside the git tree** at `/opt/bytelord/secrets/imap-spamfilter.env` (not `imap-spamfilter/.env`). Slice 7 should teach Compose/docs to use `docker compose --env-file /opt/bytelord/secrets/imap-spamfilter.env` (or an equivalent `env_file:` that points at that path). Never copy that file into the repo. `accounts.yml` and bootstrap-generated passwords (`state/controller.password`, `state/redis.password`) stay under the VPS appdata path, not in git.
+**Where this will run.** Coding starts on the local desktop; implementation against the live stack happens over SSH on the Linux VPS. Secrets live **outside the git tree** at `/opt/bytelord/secrets/imap-spamfilter.env` (not `imap-spamfilter/.env`). Slice 7 should teach Compose/docs to use `docker compose --env-file /opt/bytelord/secrets/imap-spamfilter.env` (or an equivalent `env_file:` that points at that path). Never copy that file into the repo. `accounts.yml` remains gitignored; the external secrets file is the controller/Redis password source of truth, with no state-directory password copies.
 
 Shadow-mode policy (your choice): **hybrid**. Inbox / Junk / Trash are never mutated in `shadow`. Creating `Train-*` folders and draining them (learn + MOVE to `Trained-*`) remains allowed so Bayes can be bootstrapped while scores are evaluated.
 
@@ -211,7 +211,7 @@ Only matters if the dashboard is used. Several of these are bugs on the default 
 
 **Must-fix (broken or fail-open today)**
 
-- [`_rspamd_stats()`](../filter/dashboard.py) reads only `RSPAMD_PASSWORD` from the environment. The filter falls back to `state/controller.password`; the dashboard does not, so the Bayes/stats panel is permanently "controller unreachable" on the default Unraid install. Reuse `_load_rspamd_password()`.
+- [`_rspamd_stats()`](../filter/dashboard.py) must reuse `_load_rspamd_password()` so the dashboard and filter share the same environment-then-`SECRETS_FILE` contract.
 - A `dashboard_users` line with no scope field defaults to **admin**. Fail closed (reject the line) or require an explicit `admin` token.
 - `DASHBOARD_USER` in [`unraid/spamfilter.xml`](../unraid/spamfilter.xml) has `Mask="false"` (plaintext password visible in the Unraid UI). Mask it. Prefer the hashed-users file over the legacy plaintext env pair.
 

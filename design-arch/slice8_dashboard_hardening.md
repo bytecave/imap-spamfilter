@@ -17,8 +17,8 @@ sites), [`unraid/spamfilter.xml`](../unraid/spamfilter.xml),
 
 ## 1. Goal
 
-1. The dashboard works on the default Unraid path (controller password
-   from `state/controller.password`, not only `RSPAMD_PASSWORD`).
+1. The dashboard uses the shared secret loader (`RSPAMD_PASSWORD`, then
+   the protected `SECRETS_FILE`) instead of an independent source.
 2. Missing scope is fail-closed. Legacy `DASHBOARD_USER` is masked.
 3. Login, session, headers, and secret-file writes are hardened.
 4. IMAP/exception log lines cannot echo LOGIN passwords.
@@ -36,7 +36,7 @@ Changing Unraid's host port mapping. JS in the dashboard.
 
 **Controller password.** `_rspamd_stats()` uses
 `filter._load_rspamd_password()` (lazy import to avoid a cycle). Env
-`RSPAMD_PASSWORD` still wins; else `state/controller.password`.
+`RSPAMD_PASSWORD` still wins; otherwise the protected `SECRETS_FILE` is used.
 
 **Scope.** `_parse_user_line`: `username:verifier` with no third field
 is **skipped** (log a warning). Explicit `:admin` required. The

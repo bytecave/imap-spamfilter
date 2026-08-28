@@ -43,9 +43,10 @@ filter image away from `:latest`. Redis LRU.
 `rspamd/local.d/<file>` (etc.) exists there, `cp` it. Curl GitHub only
 when the file is absent from the checkout.
 
-**Curl pin.** Never `.../main`. `SPAMFILTER_REF` (default: commit SHA
-embedded in this script, overridable) and
-`SPAMFILTER_REPO` (default `marcelverdult/imap-spamfilter`).
+**Curl pin.** Never `.../main`. Checkout-backed installs are preferred.
+A no-checkout install must explicitly set `SPAMFILTER_REF` to the same
+40-character commit used to obtain the script; there is no embedded stale
+fallback. `SPAMFILTER_REPO` defaults to `marcelverdult/imap-spamfilter`.
 
 **Atomic fetch.** `curl -o dest.tmp` then `mv`. A failed/interrupted
 curl must not leave a dest that later runs treat as present.
@@ -53,15 +54,19 @@ curl must not leave a dest that later runs treat as present.
 **Version stamp.** `unraid/bootstrap.version` in the repo;
 `$APP/.bootstrap.version` on disk. If missing or different, refresh
 static `local.d` files and `*.template`s, then re-render secret files.
-Never overwrite `accounts.yml` or `state/*.password`.
+Never overwrite `accounts.yml` or the protected secrets file. Stage and
+validate every tracked source before activating a refresh.
 
 **Secret substitution.** Do not expand passwords on `sed` argv. `awk`
 reads the password file (`-v pfile=`) and substitutes
 `${RSPAMD_PASSWORD}` / `${REDIS_PASSWORD}`.
 
-**Permissions.** Rendered `worker-controller.inc` and
-`rspamd/local.d/redis.conf`: `chown 11333:11333` + `chmod 640`. Redis
-server config stays 999/640 as today.
+**Permissions.** Rendered `worker-controller.inc`,
+`rspamd/local.d/redis.conf`, and the Redis server config are appdata
+owner/group mode `0640`. Compose/Unraid maps that appdata group into rspamd
+and runs Redis as uid 999 with the appdata primary group. Docker
+`userns-remap` and rootless mode are rejected until a deployment-specific
+shifted-ID contract is available; do not fall back to world-readable files.
 
 ---
 
@@ -83,9 +88,10 @@ gap when YAML omits the key. Per-account keys already win via merge.
 | `python` (Dockerfile) | `3.14.7-slim-bookworm` |
 | filter / redis | unchanged (`:latest` / `8-alpine`) |
 
-Compose: document `docker compose --env-file /opt/bytelord/secrets/imap-spamfilter.env`.
-Do not add a hard-coded `env_file:` (Unraid vs VPS paths differ). File
-mode `600`. `.env` next to compose remains optional/dev-only.
+The ByteLord Compose file keeps
+`/opt/bytelord/secrets/imap-spamfilter.env`; the generic root Compose file
+uses `SPAMFILTER_SECRETS` and defaults to the protected Unraid appdata path.
+File mode is `600`. `.env` next to Compose remains optional/dev-only.
 
 ---
 
