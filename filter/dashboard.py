@@ -6,11 +6,14 @@ user (see below); the daemon then serves it on a fixed internal port
 read-only and queries rspamd /stat. Intended for LAN access behind a
 reverse proxy that terminates TLS.
 
-Authentication is a server-side session with a real login form.
+Authentication uses a signed client-side session with a real login form.
+Each session is bound to the active credential verifier, so password
+changes revoke existing sessions while account-scope edits apply live.
 Configure users one of two ways:
 
-  * DASHBOARD_USERS - comma-separated `name:hash` pairs, where hash is
-    produced by `python dashboard.py` (an interactive hashing helper).
+  * DASHBOARD_USERS - comma-separated `name:hash:scope` records, where hash is
+    produced by `python dashboard.py` (an interactive hashing helper) and
+    scope is `admin` or a pipe-separated account list.
     Preferred: supports multiple named accounts with per-user passwords.
   * DASHBOARD_USER + DASHBOARD_PASSWORD - a single legacy plaintext
     account. Still accepted so existing deployments keep working.
@@ -23,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import logging
 import os
 import re
@@ -70,12 +74,44 @@ SESSION_IDLE_S = 8 * 3600
 SESSION_ABS_S = 24 * 3600
 LOGIN_FAIL_LIMIT = 5
 LOGIN_LOCKOUT_S = 60.0
+LOGIN_IP_FAIL_LIMIT = 25
+LOGIN_USER_FAIL_LIMIT = 10
+LOGIN_GLOBAL_FAIL_LIMIT = 200
+LOGIN_FAIL_STATE_MAX = 2048
+LOGIN_USERNAME_MAX = 128
+LOGIN_PASSWORD_MAX = 1024
+LOGIN_REQUEST_MAX = 16 * 1024
 _NEXT_OK = re.compile(r"^/(?:[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*)?$")
+_DUMMY_VERIFIER = (
+    f"pbkdf2${PBKDF2_ITERATIONS}${'00' * 16}${'00' * 32}"
+)
 
 log = logging.getLogger("dashboard")
 app = Flask(__name__)
 _login_lock = threading.Lock()
 _login_fails: dict[tuple[str, str], list[float]] = {}
+
+
+def _parse_proxy_networks(raw: str) -> tuple[
+        ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    networks = []
+    for value in raw.split(","):
+        value = value.strip()
+        if not value:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(value, strict=False))
+        except ValueError:
+            log.warning("invalid DASHBOARD_TRUSTED_PROXIES entry ignored: %s", value)
+    return tuple(networks)
+
+
+# Forwarding headers are ignored unless the direct peer is loopback or is
+# explicitly configured. This keeps direct Netbird/WireGuard clients from
+# spoofing throttle identities while supporting a local reverse proxy.
+_TRUSTED_PROXY_NETWORKS = _parse_proxy_networks(
+    os.environ.get("DASHBOARD_TRUSTED_PROXIES", "127.0.0.1/32,::1/128")
+)
 
 
 # ----- auth -----------------------------------------------------------------
@@ -149,6 +185,12 @@ def _parse_user_line(raw: str, users: dict[str, "_User"]) -> None:
     if not name or not verifier or not scope:
         log.warning("dashboard user line ignored (empty field): %s", name or "?")
         return
+    if len(name) > LOGIN_USERNAME_MAX:
+        log.warning(
+            "dashboard user line ignored (username exceeds %d characters)",
+            LOGIN_USERNAME_MAX,
+        )
+        return
     admin = scope.lower() == "admin"
     accounts = frozenset() if admin else frozenset(
         a.strip() for a in re.split(r"[|,]", scope) if a.strip())
@@ -183,21 +225,51 @@ def _load_users() -> dict[str, "_User"]:
     legacy_user = os.environ.get("DASHBOARD_USER", "").strip()
     legacy_pass = os.environ.get("DASHBOARD_PASSWORD", "")
     if legacy_user and legacy_pass and legacy_user not in users:
-        users[legacy_user] = _User(
-            legacy_user, "plain:" + legacy_pass, True, frozenset())
+        if (
+            len(legacy_user) > LOGIN_USERNAME_MAX
+            or len(legacy_pass) > LOGIN_PASSWORD_MAX
+        ):
+            log.warning(
+                "legacy dashboard user ignored (credential exceeds login limits)"
+            )
+        else:
+            users[legacy_user] = _User(
+                legacy_user, "plain:" + legacy_pass, True, frozenset())
     return users
 
 
-def _check_login(username: str, password: str) -> bool:
+def _spend_auth_cost(password: str) -> None:
+    """Perform the normal KDF work without accepting a credential."""
+    candidate = password if len(password) <= LOGIN_PASSWORD_MAX else ""
+    _verify_pbkdf2(_DUMMY_VERIFIER, candidate)
+
+
+def _check_login(username: str, password: str) -> _User | None:
     u = _load_users().get(username)
     if u is None:
         # Spend comparable effort on an unknown user so response timing
         # does not reveal which usernames exist.
-        _verify_pbkdf2(f"pbkdf2${PBKDF2_ITERATIONS}$00$00", password)
-        return False
+        _spend_auth_cost(password)
+        return None
     if u.verifier.startswith("plain:"):
-        return hmac.compare_digest(u.verifier[len("plain:"):], password)
-    return _verify_pbkdf2(u.verifier, password)
+        # Preserve the legacy environment-variable account, but make it pay
+        # the same PBKDF2 cost as hashed and unknown users.
+        _spend_auth_cost(password)
+        valid = hmac.compare_digest(
+            u.verifier[len("plain:"):].encode(), password.encode())
+    else:
+        valid = _verify_pbkdf2(u.verifier, password)
+    return u if valid else None
+
+
+def _credential_version(user: _User) -> str:
+    """Keyed verifier fingerprint stored in the signed session cookie.
+
+    Keying is important for legacy plaintext verifiers: an unkeyed digest in
+    a client-readable cookie would itself become an offline password oracle.
+    """
+    key = str(app.secret_key).encode()
+    return hmac.new(key, user.verifier.encode(), hashlib.sha256).hexdigest()
 
 
 def _current_scope() -> tuple[bool, frozenset[str]]:
@@ -248,6 +320,7 @@ def _load_secret() -> str:
 
 app.secret_key = _load_secret()
 app.config.update(
+    MAX_CONTENT_LENGTH=LOGIN_REQUEST_MAX,
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
     PERMANENT_SESSION_LIFETIME=timedelta(seconds=SESSION_IDLE_S),
@@ -273,38 +346,117 @@ def _security_headers(resp: Response) -> Response:
 
 
 def _client_ip() -> str:
-    forwarded = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
-    return forwarded or (request.remote_addr or "unknown")
+    remote = request.remote_addr or "unknown"
+    try:
+        remote_ip = ipaddress.ip_address(remote)
+    except ValueError:
+        return remote
+    if not any(remote_ip in network for network in _TRUSTED_PROXY_NETWORKS):
+        return str(remote_ip)
+
+    forwarded = request.headers.get("X-Forwarded-For") or ""
+    if not forwarded:
+        return str(remote_ip)
+    try:
+        chain = [
+            ipaddress.ip_address(value.strip())
+            for value in forwarded.split(",")
+            if value.strip()
+        ]
+    except ValueError:
+        return str(remote_ip)
+    # Walk from the trusted direct peer towards the client. This prevents a
+    # client-supplied leftmost value from winning when a proxy appends XFF.
+    for address in reversed(chain):
+        if not any(address in network for network in _TRUSTED_PROXY_NETWORKS):
+            return str(address)
+    return str(chain[0]) if chain else str(remote_ip)
+
+
+def _login_key(ip: str, username: str) -> tuple[str, str]:
+    return (ip[:64], username.casefold()[:LOGIN_USERNAME_MAX])
+
+
+def _prune_login_failures(now: float) -> None:
+    """Globally expire old failures and enforce a hard bucket bound.
+
+    Caller must hold _login_lock.
+    """
+    for key, recorded in list(_login_fails.items()):
+        recent = [t for t in recorded if now - t < LOGIN_LOCKOUT_S]
+        if recent:
+            _login_fails[key] = recent[-LOGIN_FAIL_LIMIT:]
+        else:
+            _login_fails.pop(key, None)
+    overflow = len(_login_fails) - LOGIN_FAIL_STATE_MAX
+    if overflow > 0:
+        oldest = sorted(_login_fails, key=lambda key: _login_fails[key][-1])
+        for key in oldest[:overflow]:
+            _login_fails.pop(key, None)
 
 
 def _login_blocked(ip: str, username: str) -> bool:
-    key = (ip, username.lower())
+    key = _login_key(ip, username)
     now = time.monotonic()
     with _login_lock:
-        times = [t for t in _login_fails.get(key, []) if now - t < LOGIN_LOCKOUT_S]
-        _login_fails[key] = times
-        return len(times) >= LOGIN_FAIL_LIMIT
+        _prune_login_failures(now)
+        pair_count = len(_login_fails.get(key, ()))
+        ip_count = sum(
+            len(times) for (seen_ip, _), times in _login_fails.items()
+            if seen_ip == key[0]
+        )
+        user_count = sum(
+            len(times) for (_, seen_user), times in _login_fails.items()
+            if seen_user == key[1]
+        )
+        global_count = sum(len(times) for times in _login_fails.values())
+        return (
+            pair_count >= LOGIN_FAIL_LIMIT
+            or ip_count >= LOGIN_IP_FAIL_LIMIT
+            or user_count >= LOGIN_USER_FAIL_LIMIT
+            or global_count >= LOGIN_GLOBAL_FAIL_LIMIT
+        )
 
 
 def _record_login_failure(ip: str, username: str) -> None:
-    key = (ip, username.lower())
+    key = _login_key(ip, username)
     now = time.monotonic()
     with _login_lock:
-        times = [t for t in _login_fails.get(key, []) if now - t < LOGIN_LOCKOUT_S]
-        times.append(now)
-        _login_fails[key] = times
+        _prune_login_failures(now)
+        if key not in _login_fails and len(_login_fails) >= LOGIN_FAIL_STATE_MAX:
+            oldest = min(_login_fails, key=lambda item: _login_fails[item][-1])
+            _login_fails.pop(oldest, None)
+        times = _login_fails.get(key, [])
+        _login_fails[key] = (times + [now])[-LOGIN_FAIL_LIMIT:]
 
 
 def _clear_login_failures(ip: str, username: str) -> None:
-    key = (ip, username.lower())
+    key = _login_key(ip, username)
     with _login_lock:
-        _login_fails.pop(key, None)
+        # A successful proof of the credential clears the account-wide
+        # failures too, including attempts made from other addresses. Keep
+        # unrelated failures from this IP so one valid login cannot erase an
+        # address-wide brute-force history.
+        for recorded_key in list(_login_fails):
+            if recorded_key[1] == key[1]:
+                _login_fails.pop(recorded_key, None)
 
 
 def _requires_auth(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
-        if not session.get("user"):
+        username = session.get("user", "")
+        if not username:
+            return redirect(url_for("login", next=request.path))
+        user = _load_users().get(username)
+        actual_version = str(session.get("credential_version") or "")
+        if (
+            user is None
+            or not actual_version
+            or not hmac.compare_digest(
+                actual_version, _credential_version(user))
+        ):
+            session.clear()
             return redirect(url_for("login", next=request.path))
         now = int(time.time())
         issued = int(session.get("issued") or 0)
@@ -665,10 +817,12 @@ LOGIN = """<!doctype html>
 <div class="card">
 <form method="post">
 <label for="u">Username</label>
-<input id="u" name="username" autocomplete="username" autofocus required>
+<input id="u" name="username" autocomplete="username" autofocus required
+ maxlength=""" + str(LOGIN_USERNAME_MAX) + """>
 <label for="p">Password</label>
 <input id="p" name="password" type="password"
- autocomplete="current-password" required>
+ autocomplete="current-password" required
+ maxlength=""" + str(LOGIN_PASSWORD_MAX) + """>
 <button type="submit">Sign in</button>
 {% if error %}<div class="login-err">{{ error }}</div>{% endif %}
 </form>
@@ -704,21 +858,36 @@ def login():
         password = request.form.get("password") or ""
         ip = _client_ip()
         locked = _login_blocked(ip, username)
+        invalid_size = (
+            not username
+            or len(username) > LOGIN_USERNAME_MAX
+            or not password
+            or len(password) > LOGIN_PASSWORD_MAX
+        )
+        user = None
         if locked:
-            _verify_pbkdf2(f"pbkdf2${PBKDF2_ITERATIONS}$00$00", password)
+            # The pre-KDF gate must be cheap. Performing the dummy PBKDF2 here
+            # would let locked requests occupy every Waitress worker.
             error = "Invalid username or password."
-        elif _check_login(username, password):
+        elif invalid_size:
+            _spend_auth_cost(password)
+            error = "Invalid username or password."
+        else:
+            user = _check_login(username, password)
+        if user is not None:
             _clear_login_failures(ip, username)
             session.clear()
             now = int(time.time())
             session["user"] = username
+            session["credential_version"] = _credential_version(user)
             session["issued"] = now
             session["last"] = now
             session.permanent = True
             dest = _safe_next(request.args.get("next"))
             return redirect(dest)
-        else:
+        if not locked:
             _record_login_failure(ip, username)
+        if not error:
             error = "Invalid username or password."
     if session.get("user"):
         return redirect("/")
@@ -1140,7 +1309,13 @@ def start() -> None:
 
     def _serve():
         try:
-            serve(app, host="0.0.0.0", port=DASHBOARD_PORT, threads=4)
+            serve(
+                app,
+                host="0.0.0.0",
+                port=DASHBOARD_PORT,
+                threads=4,
+                max_request_body_size=LOGIN_REQUEST_MAX,
+            )
         except Exception as ex:  # noqa: BLE001
             logging.getLogger("dashboard").error("crashed: %s", ex)
 
@@ -1175,12 +1350,18 @@ if __name__ == "__main__":
     if not name or ":" in name or "," in name or name.startswith("#"):
         raise SystemExit(
             "username must be non-empty with no ':' ',' or leading '#'")
+    if len(name) > LOGIN_USERNAME_MAX:
+        raise SystemExit(
+            f"username must be at most {LOGIN_USERNAME_MAX} characters")
     pw1 = getpass.getpass("password: ")
     pw2 = getpass.getpass("repeat:   ")
     if pw1 != pw2:
         raise SystemExit("passwords do not match")
     if not pw1:
         raise SystemExit("password must not be empty")
+    if len(pw1) > LOGIN_PASSWORD_MAX:
+        raise SystemExit(
+            f"password must be at most {LOGIN_PASSWORD_MAX} characters")
     known = _known_accounts()
     if known:
         print("known accounts:", ", ".join(sorted(known)))

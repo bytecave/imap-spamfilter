@@ -4,12 +4,104 @@ Run: STATE_DIR=/tmp/x python -m pytest test_dashboard.py
 """
 
 import os
+import sqlite3
 import tempfile
+import time
 from urllib.parse import urlparse
+
+import pytest
 
 os.environ.setdefault("STATE_DIR", tempfile.mkdtemp(prefix="sf_dash_"))
 
 import dashboard as d  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _clear_login_state():
+    d._login_fails.clear()
+    yield
+    d._login_fails.clear()
+
+
+@pytest.fixture
+def dashboard_db(tmp_path, monkeypatch):
+    import filter as f
+
+    db_path = tmp_path / "spamfilter.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(f.SCHEMA)
+    now = int(time.time())
+    sha = "shared-alpha-body"
+    conn.executemany(
+        """
+        INSERT INTO messages(
+            account, folder, uidvalidity, uid, message_id, body_sha256,
+            first_seen, last_seen, current_folder, our_score, our_action,
+            learned_as, learned_at, sender, subject, received_at
+        ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                "acct-alpha", "INBOX", 10, "alpha@id", sha, now, now,
+                "INBOX", 9.0, "move", None, None, "alpha@sender",
+                "ALPHA SUBJECT", now,
+            ),
+            (
+                "acct-alpha", "Train-Ham", 11, "alpha-copy@id", sha,
+                now, now, "Train-Ham", None, None, "ham", now,
+                "alpha@sender", "ALPHA TRAIN COPY", now,
+            ),
+            (
+                "acct-beta", "INBOX", 20, "beta@id", "beta-body",
+                now, now, "INBOX", 5.0, "tag", "spam", now,
+                "beta@sender", "BETA SUBJECT", now,
+            ),
+        ],
+    )
+    conn.executemany(
+        """
+        INSERT INTO events(account, ts, message_id, event, detail)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        [
+            ("acct-alpha", now, "alpha@id", "scan", "ALPHA SCAN DETAIL"),
+            ("acct-alpha", now, "alpha@id", "learn_ham", "ALPHA LEARN DETAIL"),
+            ("acct-beta", now, "beta@id", "scan", "BETA SCAN DETAIL"),
+            ("acct-beta", now, "beta@id", "learn_spam", "BETA LEARN DETAIL"),
+        ],
+    )
+    conn.executemany(
+        """
+        INSERT INTO safe_mode(account, scope, entered_at, reason)
+        VALUES (?, 'scan', ?, ?)
+        """,
+        [
+            ("acct-alpha", now, "ALPHA SAFE REASON"),
+            ("acct-beta", now, "BETA SAFE REASON"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(d, "DB_PATH", db_path)
+    return db_path
+
+
+def _install_user(monkeypatch, user):
+    users = {user.name: user}
+    monkeypatch.setattr(d, "_load_users", lambda: users)
+    return users
+
+
+def _authenticated_client(monkeypatch, user):
+    _install_user(monkeypatch, user)
+    client = d.app.test_client()
+    now = int(time.time())
+    with client.session_transaction() as sess:
+        sess["user"] = user.name
+        sess["credential_version"] = d._credential_version(user)
+        sess["issued"] = now
+        sess["last"] = now
+    return client
 
 
 def test_parse_user_line_missing_scope_is_ignored():
@@ -26,6 +118,15 @@ def test_parse_user_line_admin_and_scoped():
     assert users["alice"].accounts == frozenset()
     assert users["bob"].admin is False
     assert users["bob"].accounts == frozenset({"acct1", "acct2"})
+
+
+def test_parse_user_line_rejects_username_login_cannot_accept():
+    users: dict = {}
+    d._parse_user_line(
+        f"{'u' * (d.LOGIN_USERNAME_MAX + 1)}:h:admin",
+        users,
+    )
+    assert users == {}
 
 
 def test_kpi_escapes_html():
@@ -46,7 +147,7 @@ def test_safe_next_rejects_open_redirect():
 def _login_client(monkeypatch, next_url: str):
     monkeypatch.setenv("DASHBOARD_USER", "admin")
     monkeypatch.setenv("DASHBOARD_PASSWORD", "pw")
-    d._login_fails.clear()
+    monkeypatch.setattr(d, "_spend_auth_cost", lambda _password: None)
     client = d.app.test_client()
     return client.post(
         "/login",
@@ -77,7 +178,7 @@ def test_login_next_messages_allowed(monkeypatch):
 def test_get_logout_does_not_clear_session(monkeypatch):
     monkeypatch.setenv("DASHBOARD_USER", "admin")
     monkeypatch.setenv("DASHBOARD_PASSWORD", "pw")
-    d._login_fails.clear()
+    monkeypatch.setattr(d, "_spend_auth_cost", lambda _password: None)
     client = d.app.test_client()
     login = client.post(
         "/login",
@@ -150,46 +251,303 @@ def test_event_table_decodes_encoded_subject():
     assert "=?utf-8" not in html
 
 
-def test_messages_learn_fills_from_sha256_sibling(tmp_path):
-    """Inbox scored row with empty learned_as picks up a Train-* sibling."""
-    import sqlite3
-
-    import filter as f
-
-    db_path = tmp_path / "spamfilter.db"
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    conn.executescript(f.SCHEMA)
-    f._migrate(conn)
-    sha = "abc" * 21 + "ab"  # 64 hex-like chars not required; any shared string
-    conn.execute(
-        """
-        INSERT INTO messages(
-            account, folder, uidvalidity, uid, message_id, body_sha256,
-            first_seen, last_seen, current_folder, our_score, learned_as, learned_at
-        ) VALUES
-        ('a','INBOX',1,10,'mid@x',?,1,2,'INBOX',9.0,NULL,NULL),
-        ('a','Junk/Train-Ham',1,3,'mid@x',?,1,3,'Junk/Train-Ham',NULL,'ham',3)
-        """,
-        (sha, sha),
+def test_client_ip_ignores_xff_from_untrusted_peer(monkeypatch):
+    monkeypatch.setattr(
+        d, "_TRUSTED_PROXY_NETWORKS",
+        d._parse_proxy_networks("127.0.0.1/32,::1/128"),
     )
-    conn.commit()
-    row = conn.execute(
-        """
-        SELECT COALESCE(
-                 NULLIF(m.learned_as, ''),
-                 (SELECT s.learned_as FROM messages s
-                   WHERE s.account = m.account
-                     AND m.body_sha256 IS NOT NULL AND m.body_sha256 != ''
-                     AND s.body_sha256 = m.body_sha256
-                     AND s.learned_as IS NOT NULL AND s.learned_as != ''
-                   ORDER BY CASE WHEN s.learned_as IN ('ham','spam') THEN 0 ELSE 1 END,
-                            IFNULL(s.learned_at, 0) DESC
-                   LIMIT 1)
-               ) AS learned_as
-          FROM messages m
-         WHERE m.folder='INBOX'
-        """
-    ).fetchone()
-    conn.close()
-    assert row["learned_as"] == "ham"
+    with d.app.test_request_context(
+        "/", headers={"X-Forwarded-For": "203.0.113.9"},
+        environ_base={"REMOTE_ADDR": "100.64.0.8"},
+    ):
+        assert d._client_ip() == "100.64.0.8"
+
+
+def test_client_ip_uses_rightmost_untrusted_hop_from_trusted_proxy(monkeypatch):
+    monkeypatch.setattr(
+        d, "_TRUSTED_PROXY_NETWORKS",
+        d._parse_proxy_networks("127.0.0.1/32,10.0.0.0/8"),
+    )
+    with d.app.test_request_context(
+        "/", headers={"X-Forwarded-For": "198.51.100.4, 100.64.0.9, 10.1.2.3"},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    ):
+        assert d._client_ip() == "100.64.0.9"
+
+
+def test_login_failure_state_is_globally_pruned_and_bounded(monkeypatch):
+    monkeypatch.setattr(d, "LOGIN_FAIL_STATE_MAX", 3)
+    monkeypatch.setattr(d.time, "monotonic", lambda: 1000.0)
+    d._login_fails[("stale-ip", "stale-user")] = [1.0]
+    d._login_fails[("recent-ip", "recent-user")] = [999.0]
+
+    for i in range(10):
+        d._record_login_failure(f"100.64.0.{i}", f"user-{i}")
+
+    assert ("stale-ip", "stale-user") not in d._login_fails
+    assert len(d._login_fails) <= 3
+    assert all(
+        len(times) <= d.LOGIN_FAIL_LIMIT for times in d._login_fails.values())
+
+
+def test_successful_login_clears_user_failures_from_all_ips():
+    d._login_fails[("100.64.0.1", "alice")] = [1.0]
+    d._login_fails[("100.64.0.2", "alice")] = [2.0]
+    d._login_fails[("100.64.0.1", "bob")] = [3.0]
+
+    d._clear_login_failures("100.64.0.1", "Alice")
+
+    assert d._login_fails == {("100.64.0.1", "bob"): [3.0]}
+
+
+def test_login_lockout_avoids_credential_check(monkeypatch):
+    for _ in range(d.LOGIN_FAIL_LIMIT):
+        d._record_login_failure("127.0.0.1", "alice")
+    spent = []
+    monkeypatch.setattr(d, "_spend_auth_cost", spent.append)
+    monkeypatch.setattr(
+        d, "_check_login",
+        lambda *_args: pytest.fail("locked login reached credential check"),
+    )
+
+    resp = d.app.test_client().post(
+        "/login", data={"username": "alice", "password": "guess"})
+
+    assert resp.status_code == 200
+    assert b"Invalid username or password" in resp.data
+    assert spent == []
+
+
+def test_login_rejects_oversized_fields_before_lookup(monkeypatch):
+    spent = []
+    monkeypatch.setattr(d, "_spend_auth_cost", spent.append)
+    monkeypatch.setattr(
+        d, "_check_login",
+        lambda *_args: pytest.fail("oversized login reached credential check"),
+    )
+
+    resp = d.app.test_client().post(
+        "/login",
+        data={
+            "username": "u" * (d.LOGIN_USERNAME_MAX + 1),
+            "password": "p" * (d.LOGIN_PASSWORD_MAX + 1),
+        },
+    )
+
+    assert resp.status_code == 200
+    assert b"Invalid username or password" in resp.data
+    assert len(spent) == 1
+    assert all(len(user) <= d.LOGIN_USERNAME_MAX for _, user in d._login_fails)
+
+
+def test_dummy_kdf_does_not_hash_an_oversized_password(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        d, "_verify_pbkdf2",
+        lambda verifier, password: calls.append((verifier, password)) or False,
+    )
+
+    d._spend_auth_cost("p" * (d.LOGIN_PASSWORD_MAX + 1))
+
+    assert calls == [(d._DUMMY_VERIFIER, "")]
+
+
+def test_login_request_body_is_limited():
+    resp = d.app.test_client().post(
+        "/login",
+        data={"username": "alice", "password": "x" * d.LOGIN_REQUEST_MAX},
+    )
+    assert resp.status_code == 413
+
+
+def test_waitress_rejects_large_body_before_wsgi(monkeypatch):
+    user = d._User("admin", "plain:pw", True, frozenset())
+    served = {}
+
+    class ImmediateThread:
+        def __init__(self, *, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(d, "_load_users", lambda: {"admin": user})
+    monkeypatch.setattr(d.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(
+        d,
+        "serve",
+        lambda _app, **kwargs: served.update(kwargs),
+    )
+
+    d.start()
+
+    assert served["max_request_body_size"] == d.LOGIN_REQUEST_MAX
+
+
+def test_legacy_login_performs_dummy_kdf(monkeypatch):
+    legacy = d._User("legacy", "plain:pw", True, frozenset())
+    monkeypatch.setattr(d, "_load_users", lambda: {"legacy": legacy})
+    spent = []
+    monkeypatch.setattr(d, "_spend_auth_cost", spent.append)
+
+    assert d._check_login("legacy", "pw") == legacy
+    assert d._check_login("legacy", "wrong") is None
+    assert d._check_login("missing", "guess") is None
+    assert spent == ["pw", "wrong", "guess"]
+
+
+@pytest.mark.parametrize("route", ["/", "/messages", "/learned", "/events", "/accounts"])
+def test_scoped_user_cannot_see_other_account_on_any_page(
+        route, dashboard_db, monkeypatch):
+    user = d._User("viewer", "plain:stable", False, frozenset({"acct-alpha"}))
+    client = _authenticated_client(monkeypatch, user)
+    monkeypatch.setattr(
+        d, "_rspamd_stats",
+        lambda: pytest.fail("scoped user queried system-wide Rspamd stats"),
+    )
+
+    resp = client.get(route)
+
+    assert resp.status_code == 200
+    assert b"acct-alpha" in resp.data
+    assert b"acct-beta" not in resp.data
+    assert b"BETA SUBJECT" not in resp.data
+    assert b"BETA LEARN DETAIL" not in resp.data
+    assert b"BETA SAFE REASON" not in resp.data
+
+
+def test_messages_route_uses_sibling_learning_query(dashboard_db, monkeypatch):
+    user = d._User("viewer", "plain:stable", False, frozenset({"acct-alpha"}))
+    client = _authenticated_client(monkeypatch, user)
+
+    resp = client.get("/messages")
+
+    assert resp.status_code == 200
+    assert b"ALPHA SUBJECT" in resp.data
+    assert b">ham<" in resp.data
+
+
+def test_rspamd_stats_are_admin_only(dashboard_db, monkeypatch):
+    calls = []
+
+    def stats():
+        calls.append(True)
+        return {
+            "scanned": 424242,
+            "uptime": 3600,
+            "actions": {},
+            "statfiles": [],
+        }
+
+    monkeypatch.setattr(d, "_rspamd_stats", stats)
+    admin = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, admin)
+
+    resp = client.get("/")
+
+    assert resp.status_code == 200
+    assert b"424242" in resp.data
+    assert b"rspamd lifetime totals" in resp.data
+    assert calls == [True]
+
+
+def test_security_headers_and_secure_cookie(monkeypatch):
+    user = d._User("admin", "plain:stable", True, frozenset())
+    monkeypatch.setattr(d, "_check_login", lambda *_args: user)
+    monkeypatch.setattr(d, "_login_blocked", lambda *_args: False)
+    monkeypatch.setitem(d.app.config, "SESSION_COOKIE_SECURE", True)
+
+    resp = d.app.test_client().post(
+        "/login", data={"username": "admin", "password": "pw"})
+
+    assert resp.status_code == 302
+    assert resp.headers["Content-Security-Policy"].startswith("default-src 'none'")
+    assert resp.headers["X-Content-Type-Options"] == "nosniff"
+    assert resp.headers["X-Frame-Options"] == "DENY"
+    assert resp.headers["Referrer-Policy"] == "no-referrer"
+    assert resp.headers["Cache-Control"] == "no-store"
+    cookie = resp.headers["Set-Cookie"]
+    assert "HttpOnly" in cookie
+    assert "SameSite=Lax" in cookie
+    assert "Secure" in cookie
+
+
+def test_password_change_revokes_existing_session(dashboard_db, monkeypatch):
+    original = d._User("viewer", "plain:old", False, frozenset({"acct-alpha"}))
+    users = _install_user(monkeypatch, original)
+    client = d.app.test_client()
+    now = int(time.time())
+    with client.session_transaction() as sess:
+        sess["user"] = original.name
+        sess["credential_version"] = d._credential_version(original)
+        sess["issued"] = now
+        sess["last"] = now
+    users["viewer"] = d._User(
+        "viewer", "plain:new", False, frozenset({"acct-alpha"}))
+
+    resp = client.get("/messages", follow_redirects=False)
+
+    assert resp.status_code == 302
+    assert urlparse(resp.headers["Location"]).path == "/login"
+    with client.session_transaction() as sess:
+        assert "user" not in sess
+
+
+def test_scope_change_applies_without_revoking_session(dashboard_db, monkeypatch):
+    original = d._User("viewer", "plain:stable", False, frozenset({"acct-alpha"}))
+    users = _install_user(monkeypatch, original)
+    client = d.app.test_client()
+    now = int(time.time())
+    with client.session_transaction() as sess:
+        sess["user"] = original.name
+        sess["credential_version"] = d._credential_version(original)
+        sess["issued"] = now
+        sess["last"] = now
+    users["viewer"] = d._User(
+        "viewer", "plain:stable", False, frozenset({"acct-beta"}))
+
+    resp = client.get("/messages")
+
+    assert resp.status_code == 200
+    assert b"acct-beta" in resp.data
+    assert b"acct-alpha" not in resp.data
+
+
+@pytest.mark.parametrize(
+    ("issued_delta", "last_delta"),
+    [
+        (d.SESSION_ABS_S + 1, 0),
+        (0, d.SESSION_IDLE_S + 1),
+    ],
+)
+def test_expired_session_is_cleared(
+        issued_delta, last_delta, dashboard_db, monkeypatch):
+    user = d._User("viewer", "plain:stable", False, frozenset({"acct-alpha"}))
+    _install_user(monkeypatch, user)
+    client = d.app.test_client()
+    now = int(time.time())
+    with client.session_transaction() as sess:
+        sess["user"] = user.name
+        sess["credential_version"] = d._credential_version(user)
+        sess["issued"] = now - issued_delta
+        sess["last"] = now - last_delta
+
+    resp = client.get("/messages", follow_redirects=False)
+
+    assert resp.status_code == 302
+    assert urlparse(resp.headers["Location"]).path == "/login"
+    with client.session_transaction() as sess:
+        assert "user" not in sess
+
+
+def test_database_error_returns_hardened_503(dashboard_db, tmp_path, monkeypatch):
+    user = d._User("viewer", "plain:stable", False, frozenset({"acct-alpha"}))
+    client = _authenticated_client(monkeypatch, user)
+    monkeypatch.setattr(d, "DB_PATH", tmp_path / "missing" / "spamfilter.db")
+
+    resp = client.get("/messages")
+
+    assert resp.status_code == 503
+    assert resp.mimetype == "text/plain"
+    assert b"state DB error" in resp.data
+    assert resp.headers["Cache-Control"] == "no-store"
