@@ -2,10 +2,13 @@
 # The recommended install path on Unraid is via Community Applications
 # (one template per container). See unraid/*.xml and README.md.
 #
-# Production secrets (VPS): do not rely on a compose-adjacent .env
-# (gitignored; easy to recreate empty). Use mode 600:
-#   docker compose --env-file /opt/bytelord/secrets/imap-spamfilter.env up -d
-# A local .env is fine for a laptop/dev clone only.
+# The protected secrets file is bind-mounted into the filter and is also used
+# by bootstrap to render Redis/rspamd configs. Do not rely on a
+# compose-adjacent .env for production credentials.
+#
+# Host paths are parameterized for generic Linux. Defaults remain the Unraid
+# layout; set SPAMFILTER_APP, SPAMFILTER_ACCOUNTS, SPAMFILTER_SECRETS,
+# SPAMFILTER_UID, and SPAMFILTER_GID together for another host.
 
 x-logging: &log-rotate
   driver: json-file
@@ -19,13 +22,15 @@ services:
     container_name: spamfilter-redis
     restart: unless-stopped
     logging: *log-rotate
+    # Keep uid 999 for /data and use the appdata group to read mode-0640 config.
+    user: "999:${SPAMFILTER_GID:-100}"
     volumes:
-      - /mnt/user/appdata/spamfilter/redis:/data
+      - ${SPAMFILTER_APP:-/mnt/user/appdata/spamfilter}/redis:/data
       # Server config dir (persistence, memory cap, requirepass) is
       # rendered into redis-config/ by unraid/bootstrap.sh - run that
       # script before bringing the stack up. A directory is mounted,
       # not the single file, so Unraid's template path mapping is happy.
-      - /mnt/user/appdata/spamfilter/redis-config:/usr/local/etc/redis:ro
+      - ${SPAMFILTER_APP:-/mnt/user/appdata/spamfilter}/redis-config:/usr/local/etc/redis:ro
     command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
     networks: [spamnet]
 
@@ -42,36 +47,43 @@ services:
     restart: unless-stopped
     logging: *log-rotate
     depends_on: [spamfilter-redis, spamfilter-unbound]
+    # bootstrap owns rendered secrets as appdata uid:gid with mode 0640.
+    group_add:
+      - "${SPAMFILTER_GID:-100}"
     # worker-controller.inc is rendered on the host by bootstrap.sh
     # before this container starts, so no entrypoint override is needed.
     volumes:
-      - /mnt/user/appdata/spamfilter/rspamd/local.d:/etc/rspamd/local.d:ro
-      - /mnt/user/appdata/spamfilter/rspamd/data:/var/lib/rspamd
+      - ${SPAMFILTER_APP:-/mnt/user/appdata/spamfilter}/rspamd/local.d:/etc/rspamd/local.d:ro
+      - ${SPAMFILTER_APP:-/mnt/user/appdata/spamfilter}/rspamd/data:/var/lib/rspamd
     networks: [spamnet]
 
   spamfilter:
-    build: ./filter
+    build: ${SPAMFILTER_FILTER_CONTEXT:-./filter}
     image: ghcr.io/marcelverdult/imap-spamfilter:latest
     container_name: spamfilter
     restart: unless-stopped
     logging: *log-rotate
     depends_on: [spamfilter-rspamd]
+    user: "${SPAMFILTER_UID:-99}:${SPAMFILTER_GID:-100}"
     volumes:
-      - /mnt/user/appdata/spamfilter/accounts.yml:/app/accounts.yml:ro
-      - /mnt/user/appdata/spamfilter/state:/state
+      - ${SPAMFILTER_ACCOUNTS:-/mnt/user/appdata/spamfilter/accounts.yml}:/app/accounts.yml:ro
+      - ${SPAMFILTER_SECRETS:-/mnt/user/appdata/spamfilter/secrets/imap-spamfilter.env}:/run/secrets/imap-spamfilter.env:ro
+      - ${SPAMFILTER_APP:-/mnt/user/appdata/spamfilter}/state:/state
     environment:
       - RSPAMD_SCAN_URL=http://spamfilter-rspamd:11333/checkv2
       - RSPAMD_LEARN_URL=http://spamfilter-rspamd:11334
-      - RSPAMD_PASSWORD=${RSPAMD_PASSWORD:-}
+      - SECRETS_FILE=/run/secrets/imap-spamfilter.env
       - STATE_DIR=/state
       - LOG_LEVEL=INFO
       - TZ=Europe/Berlin
       # Optional read-only web dashboard with a login form. Configure
-      # users via DASHBOARD_USERS - comma-separated name:hash pairs;
+      # users via DASHBOARD_USERS - comma-separated name:hash:scope entries;
       # generate a hash with `docker exec -it spamfilter python
-      # dashboard.py`. (Legacy single-user DASHBOARD_USER +
+      # dashboard.py`. Creating the first user requires a container restart;
+      # later user-file edits are re-read at login. (Legacy DASHBOARD_USER +
       # DASHBOARD_PASSWORD still works.) The container always listens
-      # internally on 8080; map a host port in the ports: block below.
+      # internally on 8080 once configured at process startup; map a host port
+      # in the ports: block below.
       # On a VPS bind the host side to loopback, not all interfaces:
       #   "127.0.0.1:8080:8080"
       # - DASHBOARD_USERS=${DASHBOARD_USERS:-}
@@ -86,5 +98,5 @@ services:
 
 networks:
   spamnet:
+    external: true
     name: spamnet
-    driver: bridge

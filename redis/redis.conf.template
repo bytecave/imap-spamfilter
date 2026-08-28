@@ -1,6 +1,6 @@
 # Redis server config for the imap-spamfilter stack. Rendered by
-# unraid/bootstrap.sh (requirepass substituted from the generated
-# state/redis.password) and mounted read-only into the redis container,
+# unraid/bootstrap.sh (requirepass substituted from SPAMFILTER_SECRETS)
+# and mounted read-only into the redis container,
 # which starts with `redis-server /usr/local/etc/redis/redis.conf`.
 dir /data
 

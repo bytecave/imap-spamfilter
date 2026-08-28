@@ -21,13 +21,13 @@
   <WebUI/>
   <TemplateURL>https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/main/unraid/spamfilter-rspamd.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/main/assets/icon.png</Icon>
-  <ExtraParams>--log-opt max-size=50m --log-opt max-file=5</ExtraParams>
+  <ExtraParams>--group-add 100 --log-opt max-size=50m --log-opt max-file=5</ExtraParams>
   <PostArgs/>
   <CPUset/>
   <DateInstalled/>
   <DonateText/>
   <DonateLink/>
-  <Requires>Run unraid/bootstrap.sh first (creates the spamnet network, the appdata layout, and the rspamd controller password file).</Requires>
+  <Requires>Run unraid/bootstrap.sh first. It creates spamnet and renders mode-0640 rspamd configs owned by the appdata group; --group-add 100 lets the official _rspamd user read them.</Requires>
   <Config Name="local.d configs" Target="/etc/rspamd/local.d" Default="/mnt/user/appdata/spamfilter/rspamd/local.d" Mode="ro" Description="Mounted read-only at /etc/rspamd/local.d. Filled by bootstrap.sh." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/spamfilter/rspamd/local.d</Config>
   <Config Name="rspamd state" Target="/var/lib/rspamd" Default="/mnt/user/appdata/spamfilter/rspamd/data" Mode="rw" Description="rspamd-managed runtime state (caches). Does not need backup." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/spamfilter/rspamd/data</Config>
 </Container>

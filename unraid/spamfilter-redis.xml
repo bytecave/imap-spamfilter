@@ -19,13 +19,13 @@
   <WebUI/>
   <TemplateURL>https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/main/unraid/spamfilter-redis.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/marcelverdult/imap-spamfilter/main/assets/icon.png</Icon>
-  <ExtraParams>--log-opt max-size=50m --log-opt max-file=5</ExtraParams>
+  <ExtraParams>--user 999:100 --log-opt max-size=50m --log-opt max-file=5</ExtraParams>
   <PostArgs>redis-server /usr/local/etc/redis/redis.conf</PostArgs>
   <CPUset/>
   <DateInstalled/>
   <DonateText/>
   <DonateLink/>
-  <Requires>Run unraid/bootstrap.sh first: it creates the `spamnet` network, the appdata layout, and renders the Redis server config (including the auth password) that this container starts from.</Requires>
+  <Requires>Run unraid/bootstrap.sh first: it creates `spamnet`, the appdata layout, and the mode-0640 Redis config. The container keeps Redis uid 999 and uses appdata group 100 so the official image can read that protected config.</Requires>
   <Config Name="Data dir" Target="/data" Default="/mnt/user/appdata/spamfilter/redis" Mode="rw" Description="Redis AOF/RDB files. Critical to back up - losing this means retraining Bayes from zero." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/spamfilter/redis</Config>
   <Config Name="Server config dir" Target="/usr/local/etc/redis" Default="/mnt/user/appdata/spamfilter/redis-config" Mode="ro" Description="Directory holding the bootstrap-rendered redis.conf (persistence, memory cap, requirepass auth). Read-only. Run bootstrap.sh before installing." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/spamfilter/redis-config</Config>
 </Container>

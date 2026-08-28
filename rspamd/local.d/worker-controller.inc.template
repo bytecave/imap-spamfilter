@@ -1,6 +1,6 @@
-# Rendered by unraid/bootstrap.sh (sed substitution) into
-# worker-controller.inc before the rspamd container starts. Source of
-# truth for the password is the generated state/controller.password.
+# Rendered by unraid/bootstrap.sh (literal awk substitution) into
+# worker-controller.inc before rspamd starts. The protected
+# SPAMFILTER_SECRETS file is the password source of truth.
 bind_socket = "*:11334";
 password = "${RSPAMD_PASSWORD}";
 enable_password = "${RSPAMD_PASSWORD}";

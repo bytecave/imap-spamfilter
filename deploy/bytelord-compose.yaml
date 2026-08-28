@@ -31,6 +31,8 @@ services:
     container_name: spamfilter-redis
     restart: unless-stopped
     logging: *log-rotate
+    # uid 999 owns /data; the deploy group reads bootstrap-rendered mode-0640 config.
+    user: "999:${SPAMFILTER_GID:-1001}"
     volumes:
       - /opt/bytelord/data/imap-spamfilter/redis:/data
       - /opt/bytelord/data/imap-spamfilter/redis-config:/usr/local/etc/redis:ro
@@ -50,6 +52,8 @@ services:
     restart: unless-stopped
     logging: *log-rotate
     depends_on: [spamfilter-redis, spamfilter-unbound]
+    group_add:
+      - "${SPAMFILTER_GID:-1001}"
     volumes:
       - /opt/bytelord/data/imap-spamfilter/rspamd/local.d:/etc/rspamd/local.d:ro
       - /opt/bytelord/data/imap-spamfilter/rspamd/data:/var/lib/rspamd

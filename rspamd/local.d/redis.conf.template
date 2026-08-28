@@ -1,6 +1,6 @@
 # rspamd Redis client config. Rendered by unraid/bootstrap.sh into
-# redis.conf with the password substituted from state/redis.password
-# (the same value bootstrap.sh writes into the redis server config).
+# redis.conf with the password substituted from SPAMFILTER_SECRETS
+# (the same value bootstrap renders into the Redis server config).
 servers = "spamfilter-redis:6379";
 timeout = 1s;
 password = "${REDIS_PASSWORD}";
