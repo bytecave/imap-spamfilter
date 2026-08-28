@@ -49,6 +49,8 @@ from flask import (
 from markupsafe import escape
 from waitress import serve
 
+from filter import decode_rfc2047
+
 STATE_DIR = Path(os.environ.get("STATE_DIR", "/state"))
 DB_PATH = STATE_DIR / "spamfilter.db"
 SECRET_PATH = STATE_DIR / "dashboard_secret"
@@ -207,16 +209,17 @@ def _current_scope() -> tuple[bool, frozenset[str]]:
     return (u.admin, u.accounts)
 
 
-def _scope_clause(prefix: str = "AND") -> tuple[str, list]:
+def _scope_clause(prefix: str = "AND", column: str = "account") -> tuple[str, list]:
     """SQL fragment + params restricting the `account` column to the
     current user's scope. Empty string for admins; '<prefix> 1=0' for
-    a non-admin with no accounts."""
+    a non-admin with no accounts. `column` lets callers qualify the
+    name (e.g. `e.account`) when the query aliases `events`."""
     admin, accts = _current_scope()
     if admin:
         return ("", [])
     if not accts:
         return (f" {prefix} 1=0", [])
-    return (f" {prefix} account IN ({','.join('?' * len(accts))})",
+    return (f" {prefix} {column} IN ({','.join('?' * len(accts))})",
             list(accts))
 
 
@@ -332,6 +335,26 @@ def _h(value) -> str:
     (subject, sender, Message-Id, ...) are attacker-controlled, so every
     such interpolation must pass through here."""
     return str(escape("" if value is None else value))
+
+
+# Correlated subject lookup: events only store message_id. Prefer the
+# newest messages.subject for that account+Message-Id.
+_EVENTS_WITH_SUBJECT = (
+    "SELECT e.ts, e.account, e.event, e.detail, e.message_id, "
+    "(SELECT m.subject FROM messages m "
+    " WHERE m.account = e.account AND e.message_id IS NOT NULL "
+    "   AND m.message_id = e.message_id AND IFNULL(m.subject,'') != '' "
+    " ORDER BY m.last_seen DESC LIMIT 1) AS subject "
+    "FROM events e "
+)
+
+
+def _fmt_learn_detail(detail) -> str:
+    """Shorten train-folder reasons: train_ham_folder -> train_ham."""
+    text = "" if detail is None else str(detail)
+    if text.endswith("_folder"):
+        return text[:-7]
+    return text
 
 
 def _fmt_ts(ts):
@@ -718,6 +741,7 @@ def summary():
     # WHERE-style fragment for the account-less safe_mode query.
     sc, sp = _scope_clause("AND")
     scw, scwp = _scope_clause("WHERE")
+    sc_e, sp_e = _scope_clause("AND", "e.account")
     with _db() as c:
         def one(sql, params=()):
             return c.execute(sql + sc, (*params, *sp)).fetchone()[0]
@@ -751,9 +775,10 @@ def summary():
             "SELECT account, scope, reason FROM safe_mode" + scw,
             scwp).fetchall()
         last_learns = c.execute(
-            "SELECT ts, account, event, message_id, detail FROM events "
-            "WHERE event IN ('learn_spam','learn_ham')" + sc
-            + " ORDER BY ts DESC LIMIT 15", sp).fetchall()
+            _EVENTS_WITH_SUBJECT
+            + "WHERE e.event IN ('learn_spam','learn_ham')" + sc_e
+            + " ORDER BY e.ts DESC LIMIT 15",
+            sp_e).fetchall()
         scan_by_day = dict(c.execute(
             "SELECT strftime('%Y-%m-%d', ts, 'unixepoch', 'localtime') d, "
             "COUNT(*) FROM events WHERE event='scan' AND ts>=?" + sc
@@ -901,13 +926,13 @@ def summary():
     learn_rows = "".join(
         f"<tr><td>{_fmt_ts(r['ts'])}</td><td>{_h(r['account'])}</td>"
         f"<td>{_kind_badge(r['event'])}</td>"
-        f"<td><code>{_h((r['message_id'] or '')[:60])}</code></td>"
-        f'<td class="muted">{_h(r["detail"])}</td></tr>'
+        f'<td><span class="subj">{_h(decode_rfc2047(r["subject"]) or "-")}</span></td>'
+        f'<td class="muted">{_h(_fmt_learn_detail(r["detail"]))}</td></tr>'
         for r in last_learns)
     learns_block = (
         '<div class="card"><h2>Recent learns</h2><div class="tw">'
         "<table><tr><th>When</th><th>Account</th><th>Kind</th>"
-        "<th>Message-Id</th><th>Reason</th></tr>"
+        "<th>Subject</th><th>Reason</th></tr>"
         + (learn_rows or '<tr><td colspan=5 class=muted>(none yet)</td></tr>')
         + "</table></div></div>")
 
@@ -930,15 +955,26 @@ def messages():
         where = "AND our_score BETWEEN 4 AND 8"
     elif band == "low":
         where = "AND our_score < 4"
-    sc, sp = _scope_clause("AND")
+    sc, sp = _scope_clause("AND", "m.account")
     with _db() as c:
         rows = c.execute(
             f"""
-            SELECT account, message_id, last_seen, received_at, our_score,
-                   our_action, current_folder, sender, subject, learned_as
-              FROM messages
-             WHERE our_score IS NOT NULL {where}{sc}
-             ORDER BY COALESCE(received_at, last_seen) DESC LIMIT 200
+            SELECT m.account, m.message_id, m.last_seen, m.received_at, m.our_score,
+                   m.our_action, m.current_folder, m.sender, m.subject,
+                   COALESCE(
+                     NULLIF(m.learned_as, ''),
+                     (SELECT s.learned_as FROM messages s
+                       WHERE s.account = m.account
+                         AND m.body_sha256 IS NOT NULL AND m.body_sha256 != ''
+                         AND s.body_sha256 = m.body_sha256
+                         AND s.learned_as IS NOT NULL AND s.learned_as != ''
+                       ORDER BY CASE WHEN s.learned_as IN ('ham','spam') THEN 0 ELSE 1 END,
+                                IFNULL(s.learned_at, 0) DESC
+                       LIMIT 1)
+                   ) AS learned_as
+              FROM messages m
+             WHERE m.our_score IS NOT NULL {where}{sc}
+             ORDER BY COALESCE(m.received_at, m.last_seen) DESC LIMIT 200
             """, sp).fetchall()
     body_rows = "".join(
         f'<tr><td>{_fmt_ts(r["received_at"] or r["last_seen"])}</td>'
@@ -949,7 +985,7 @@ def messages():
         f'<td>{_h(r["current_folder"] or "-")}</td>'
         f'<td>{_h(r["learned_as"] or "-")}</td>'
         f'<td><span class="muted">{_h((r["sender"] or "")[:50])}</span></td>'
-        f'<td><span class="subj">{_h(r["subject"])}</span></td></tr>'
+        f'<td><span class="subj">{_h(decode_rfc2047(r["subject"]) or "-")}</span></td></tr>'
         for r in rows)
     bands = [("all", "all"), ("spam", "score >= 8"),
              ("mid", "score 4-8"), ("low", "score < 4")]
@@ -984,25 +1020,25 @@ def _event_table(rows) -> str:
             f'<tr><td>{_fmt_ts(r["ts"])}</td>'
             f'<td class="muted">{_ago(r["ts"])}</td>'
             f'<td>{_h(r["account"])}</td><td>{badge}</td>'
-            f'<td><code>{_h((r["message_id"] or "")[:80])}</code></td>'
-            f'<td class="muted">{_h(r["detail"])}</td></tr>')
+            f'<td><span class="subj">{_h(decode_rfc2047(r["subject"]) or "-")}</span></td>'
+            f'<td class="muted">{_h(_fmt_learn_detail(r["detail"]))}</td></tr>')
     return "".join(out)
 
 
 @app.route("/learned")
 @_requires_auth
 def learned():
-    sc, sp = _scope_clause("AND")
+    sc, sp = _scope_clause("AND", "e.account")
     with _db() as c:
         rows = c.execute(
-            "SELECT ts, account, event, message_id, detail FROM events "
-            "WHERE event IN ('learn_spam','learn_ham','learn_giveup',"
-            "'learn_failed')" + sc + " ORDER BY ts DESC LIMIT 300",
+            _EVENTS_WITH_SUBJECT
+            + "WHERE e.event IN ('learn_spam','learn_ham','learn_giveup',"
+            "'learn_failed')" + sc + " ORDER BY e.ts DESC LIMIT 300",
             sp).fetchall()
     body = (
         '<div class="card"><div class="tw"><table>'
         "<tr><th>When</th><th>Age</th><th>Account</th><th>Event</th>"
-        "<th>Message-Id</th><th>Detail</th></tr>"
+        "<th>Subject</th><th>Detail</th></tr>"
         + (_event_table(rows)
            or '<tr><td colspan=6 class=muted>(no learn events yet)</td></tr>')
         + "</table></div></div>")
@@ -1012,15 +1048,15 @@ def learned():
 @app.route("/events")
 @_requires_auth
 def events():
-    sc, sp = _scope_clause("WHERE")
+    sc, sp = _scope_clause("WHERE", "e.account")
     with _db() as c:
         rows = c.execute(
-            "SELECT ts, account, event, message_id, detail FROM events"
-            + sc + " ORDER BY ts DESC LIMIT 300", sp).fetchall()
+            _EVENTS_WITH_SUBJECT + sc + " ORDER BY e.ts DESC LIMIT 300",
+            sp).fetchall()
     body = (
         '<div class="card"><div class="tw"><table>'
         "<tr><th>When</th><th>Age</th><th>Account</th><th>Event</th>"
-        "<th>Message-Id</th><th>Detail</th></tr>"
+        "<th>Subject</th><th>Detail</th></tr>"
         + (_event_table(rows)
            or '<tr><td colspan=6 class=muted>(no events yet)</td></tr>')
         + "</table></div></div>")
