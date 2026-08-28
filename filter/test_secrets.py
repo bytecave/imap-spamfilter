@@ -25,6 +25,16 @@ def test_parse_env_file_ignores_comments_and_quotes(tmp_path, monkeypatch):
     assert f._load_secret("REDIS_PASSWORD") == "redis-secret"
 
 
+def test_parse_env_file_accepts_export_whitespace_like_bootstrap(tmp_path):
+    path = tmp_path / "secrets.env"
+    path.write_text(
+        'export\tRSPAMD_PASSWORD="first"\n'
+        "RSPAMD_PASSWORD='hash#value'\n"
+    )
+
+    assert f._parse_env_file(path)["RSPAMD_PASSWORD"] == "hash#value"
+
+
 def test_env_wins_over_secrets_file(tmp_path, monkeypatch):
     path = tmp_path / "secrets.env"
     path.write_text("RSPAMD_PASSWORD=from-file\n")
