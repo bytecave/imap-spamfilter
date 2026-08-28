@@ -19,6 +19,8 @@ import time
 
 os.environ.setdefault("STATE_DIR", tempfile.mkdtemp(prefix="sf_test_"))
 
+import pytest  # noqa: E402
+
 import filter as f  # noqa: E402
 
 LOG = logging.getLogger("test")
@@ -87,13 +89,15 @@ class _FakeIMAP:
     assert we no longer look up pending learns via HEADER Message-ID.
     """
 
-    def __init__(self, raw_by_uid, header_hits=None):
+    def __init__(self, raw_by_uid, header_hits=None, uidvalidity=1):
         self._raw = dict(raw_by_uid)
         self._header_hits = header_hits
+        self.uidvalidity = uidvalidity
         self.searches: list[list] = []
+        self.fetches: list[list[int]] = []
 
     def select_folder(self, folder, **kw):
-        return {}
+        return {b"UIDVALIDITY": self.uidvalidity}
 
     def search(self, criteria):
         self.searches.append(list(criteria))
@@ -104,6 +108,7 @@ class _FakeIMAP:
         return []
 
     def fetch(self, uids, parts):
+        self.fetches.append(list(uids))
         parts_b = [p if isinstance(p, bytes) else str(p).encode() for p in parts]
         out = {}
         for u in uids:
@@ -151,11 +156,15 @@ def test_rspamd_learn_5xx_is_error(monkeypatch):
     assert f.rspamd_learn(b"raw", "ham", user="u") == "error"
 
 
-def test_rspamd_learn_4xx_is_error(monkeypatch):
-    # An auth/config 4xx must stay retryable - not be mistaken for a
-    # per-message decline that would mark the message unlearnable.
-    monkeypatch.setattr(f.requests, "post", lambda *a, **k: _FakeResp(403, "forbidden"))
+def test_rspamd_learn_429_is_error(monkeypatch):
+    monkeypatch.setattr(f.requests, "post", lambda *a, **k: _FakeResp(429, "slow down"))
     assert f.rspamd_learn(b"raw", "ham", user="u") == "error"
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_rspamd_learn_auth_is_distinct(monkeypatch, status):
+    monkeypatch.setattr(f.requests, "post", lambda *a, **k: _FakeResp(status, "forbidden"))
+    assert f.rspamd_learn(b"raw", "ham", user="u") == "auth"
 
 
 def test_rspamd_learn_network_exception_is_error(monkeypatch):
@@ -257,10 +266,10 @@ def test_try_learn_already_records_success(tmp_path, monkeypatch):
     assert row["pending_learn"] is None
 
 
-# ----- process_pending_learns: cap retries of a transient error -------------
+# ----- process_pending_learns: preserve transient failures with backoff ------
 
 
-def test_process_pending_learns_caps_repeated_errors(tmp_path, monkeypatch):
+def test_process_pending_learns_backs_off_without_giving_up(tmp_path, monkeypatch):
     db = _mk_db(tmp_path)
     acc = _mk_account(learn_grace_seconds=0)
     _pending(db, "loop1", "INBOX", "ham", int(time.time()) - 10)
@@ -268,14 +277,18 @@ def test_process_pending_learns_caps_repeated_errors(tmp_path, monkeypatch):
     client = _FakeIMAP({1: b"raw-bytes"})
     fmap = {"junk": "Junk", "inbox": "INBOX"}
 
-    for _ in range(8):  # far more polls than the cap
+    for _ in range(8):
         f.process_pending_learns(client, db, LOG, acc, fmap)
 
     fails = sum(e == "learn_failed" for e in _events(db))
     giveups = sum(e == "learn_giveup" for e in _events(db))
-    assert fails <= 3, f"retry cap breached: {fails} learn_failed events"
-    assert giveups == 1
-    assert db.get_imap_message("INBOX", 1, 1)["pending_learn"] is None
+    assert fails == 1
+    assert giveups == 0
+    row = db.get_imap_message("INBOX", 1, 1)
+    assert row["pending_learn"] == "ham"
+    assert row["learned_as"] is None
+    assert row["learn_retry_count"] == 1
+    assert row["learn_retry_at"] > int(time.time())
     assert not any(s and s[0] == "HEADER" for s in client.searches)
 
 

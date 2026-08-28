@@ -17,6 +17,7 @@ import email.policy
 import hashlib
 import ipaddress
 import logging
+import math
 import os
 import re
 import signal
@@ -26,7 +27,9 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from difflib import get_close_matches
 from email.header import decode_header
 from email.utils import getaddresses, parseaddr
 from pathlib import Path
@@ -64,8 +67,9 @@ def _parse_env_file(path: Path) -> dict[str, str]:
         s = line.strip()
         if not s or s.startswith("#"):
             continue
-        if s.startswith("export "):
-            s = s[7:].strip()
+        export_prefix = re.match(r"export\s+", s)
+        if export_prefix:
+            s = s[export_prefix.end():].strip()
         if "=" not in s:
             continue
         key, _, val = s.partition("=")
@@ -124,6 +128,8 @@ _ENV_DEFAULT_OVERRIDES: dict[str, str] = {
 
 FLIP_FLOP_COOLDOWN_S = 600       # 10 min between opposite learns for one msg
 UNLEARNABLE_RETRY_S = 30 * 86400 # retry messages marked 'unlearnable' after 30d
+LEARN_RETRY_BASE_S = 30
+LEARN_RETRY_MAX_S = 3600
 SAFE_MODE_UNSEEN_CAP = 500       # default Inbox-unseen cap; per-account override via safe_mode_unseen_cap
 SCAN_FETCH_CHUNK = 50            # max msgs fetched per scan_inbox FETCH call
 RECONNECT_MIN_BACKOFF = 5
@@ -258,6 +264,8 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
 }
 
 REQUIRED_PER_ACCOUNT: tuple[str, ...] = ("name", "user", "password", "imap_host")
+ROOT_CONFIG_KEYS = frozenset({"defaults", "accounts"})
+ACCOUNT_CONFIG_KEYS = frozenset(BUILTIN_DEFAULTS) | frozenset(REQUIRED_PER_ACCOUNT) | {"ssl"}
 
 
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
@@ -328,6 +336,43 @@ def _parse_bool(value: Any, *, key: str, account: str) -> bool:
     )
 
 
+def _parse_finite_float(value: Any, *, key: str, account: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{key} must be a finite number, not boolean")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as ex:
+        raise ValueError(f"{key} must be a finite number, got {value!r}") from ex
+    if not math.isfinite(parsed):
+        raise ValueError(f"{key} must be finite, got {value!r}")
+    return parsed
+
+
+def _parse_int(value: Any, *, key: str, account: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{key} must be an integer, not boolean")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()):
+        return int(value)
+    raise ValueError(f"{key} must be an integer, got {value!r}")
+
+
+def _reject_unknown_keys(
+    values: Mapping[str, Any], allowed: frozenset[str], *, where: str
+) -> None:
+    unknown = sorted(set(values) - allowed, key=str)
+    if not unknown:
+        return
+    rendered: list[str] = []
+    for key in unknown:
+        close = get_close_matches(str(key), allowed, n=1)
+        rendered.append(
+            f"{key!r} (did you mean {close[0]!r}?)" if close else repr(key)
+        )
+    raise SystemExit(f"{where}: unknown key(s): {', '.join(rendered)}")
+
+
 def _host_is_loopback(host: str) -> bool:
     h = host.strip().lower().rstrip(".")
     if h.startswith("[") and h.endswith("]"):
@@ -346,13 +391,17 @@ def _resolve_tls_mode(
     user_defaults: dict[str, Any],
     account_name: str,
 ) -> str:
-    src: dict[str, Any] = {}
-    for k in ("tls_mode", "ssl"):
-        if k in user_defaults:
-            src[k] = user_defaults[k]
-    for k in ("tls_mode", "ssl"):
-        if k in entry:
-            src[k] = entry[k]
+    # Resolve aliases within one configuration layer. An account-level
+    # deprecated ``ssl`` must override a defaults-level ``tls_mode``.
+    if "tls_mode" in entry or "ssl" in entry:
+        src = {k: entry[k] for k in ("tls_mode", "ssl") if k in entry}
+    elif "tls_mode" in user_defaults or "ssl" in user_defaults:
+        src = {
+            k: user_defaults[k] for k in ("tls_mode", "ssl")
+            if k in user_defaults
+        }
+    else:
+        src = {"tls_mode": BUILTIN_DEFAULTS["tls_mode"]}
     if "tls_mode" in src:
         mode = str(src["tls_mode"]).strip().lower()
         if mode not in VALID_TLS_MODES:
@@ -449,9 +498,15 @@ def load_accounts(path: Path) -> list[Account]:
     raw = yaml.safe_load(path.read_text())
     if not isinstance(raw, dict) or "accounts" not in raw:
         raise SystemExit(f"{path}: missing 'accounts' key")
+    _reject_unknown_keys(raw, ROOT_CONFIG_KEYS, where=str(path))
     user_defaults = raw.get("defaults") or {}
     if not isinstance(user_defaults, dict):
         raise SystemExit(f"{path}: 'defaults' must be a mapping")
+    _reject_unknown_keys(
+        user_defaults, ACCOUNT_CONFIG_KEYS, where=f"{path}: defaults"
+    )
+    if not isinstance(raw["accounts"], list):
+        raise SystemExit(f"{path}: 'accounts' must be a list")
     # Built-ins, then YAML defaults, then env only for keys YAML omitted.
     defaults = _apply_env_overrides(
         _deep_merge(BUILTIN_DEFAULTS, user_defaults),
@@ -462,6 +517,10 @@ def load_accounts(path: Path) -> list[Account]:
     for entry in raw["accounts"]:
         if not isinstance(entry, dict):
             raise SystemExit(f"{path}: each account must be a mapping")
+        _reject_unknown_keys(
+            entry, ACCOUNT_CONFIG_KEYS,
+            where=f"{path}: account {entry.get('name', '?')!r}",
+        )
         merged = _deep_merge(defaults, entry)
         missing = [k for k in REQUIRED_PER_ACCOUNT if not merged.get(k)]
         if missing:
@@ -480,7 +539,9 @@ def load_accounts(path: Path) -> list[Account]:
                 user=merged["user"],
                 password=merged["password"],
                 imap_host=merged["imap_host"],
-                imap_port=int(merged["imap_port"]),
+                imap_port=_parse_int(
+                    merged["imap_port"], key="imap_port", account=str(merged["name"])
+                ),
                 tls_mode=tls_mode,
                 allow_insecure_tls=_parse_bool(
                     merged.get("allow_insecure_tls", False),
@@ -495,22 +556,69 @@ def load_accounts(path: Path) -> list[Account]:
                 ham_train=merged["ham_train"],
                 trained_ham=merged["trained_ham"],
                 mode=str(merged["mode"]),
-                threshold=float(merged["threshold"]),
-                min_threshold_allowed=float(merged["min_threshold_allowed"]),
-                reject_score_above=float(merged["reject_score_above"]),
-                move_grace_seconds=int(merged["move_grace_seconds"]),
-                learn_grace_seconds=int(merged["learn_grace_seconds"]),
-                idle_timeout=int(merged["idle_timeout"]),
-                poll_interval=int(merged["poll_interval"]),
-                junk_poll_interval=int(merged["junk_poll_interval"]),
-                retention_check_interval=int(merged["retention_check_interval"]),
-                max_moves_per_hour=int(merged["max_moves_per_hour"]),
-                max_learns_per_hour=int(merged["max_learns_per_hour"]),
-                max_train_per_run=int(merged["max_train_per_run"]),
-                flip_flop_cooldown_seconds=int(merged["flip_flop_cooldown_seconds"]),
-                safe_mode_unseen_cap=int(merged["safe_mode_unseen_cap"]),
-                junk_retention_days=int(merged["junk_retention_days"]),
-                trained_retention_days=int(merged["trained_retention_days"]),
+                threshold=_parse_finite_float(
+                    merged["threshold"], key="threshold", account=str(merged["name"])
+                ),
+                min_threshold_allowed=_parse_finite_float(
+                    merged["min_threshold_allowed"], key="min_threshold_allowed",
+                    account=str(merged["name"]),
+                ),
+                reject_score_above=_parse_finite_float(
+                    merged["reject_score_above"], key="reject_score_above",
+                    account=str(merged["name"]),
+                ),
+                move_grace_seconds=_parse_int(
+                    merged["move_grace_seconds"], key="move_grace_seconds",
+                    account=str(merged["name"]),
+                ),
+                learn_grace_seconds=_parse_int(
+                    merged["learn_grace_seconds"], key="learn_grace_seconds",
+                    account=str(merged["name"]),
+                ),
+                idle_timeout=_parse_int(
+                    merged["idle_timeout"], key="idle_timeout",
+                    account=str(merged["name"]),
+                ),
+                poll_interval=_parse_int(
+                    merged["poll_interval"], key="poll_interval",
+                    account=str(merged["name"]),
+                ),
+                junk_poll_interval=_parse_int(
+                    merged["junk_poll_interval"], key="junk_poll_interval",
+                    account=str(merged["name"]),
+                ),
+                retention_check_interval=_parse_int(
+                    merged["retention_check_interval"], key="retention_check_interval",
+                    account=str(merged["name"]),
+                ),
+                max_moves_per_hour=_parse_int(
+                    merged["max_moves_per_hour"], key="max_moves_per_hour",
+                    account=str(merged["name"]),
+                ),
+                max_learns_per_hour=_parse_int(
+                    merged["max_learns_per_hour"], key="max_learns_per_hour",
+                    account=str(merged["name"]),
+                ),
+                max_train_per_run=_parse_int(
+                    merged["max_train_per_run"], key="max_train_per_run",
+                    account=str(merged["name"]),
+                ),
+                flip_flop_cooldown_seconds=_parse_int(
+                    merged["flip_flop_cooldown_seconds"],
+                    key="flip_flop_cooldown_seconds", account=str(merged["name"]),
+                ),
+                safe_mode_unseen_cap=_parse_int(
+                    merged["safe_mode_unseen_cap"], key="safe_mode_unseen_cap",
+                    account=str(merged["name"]),
+                ),
+                junk_retention_days=_parse_int(
+                    merged["junk_retention_days"], key="junk_retention_days",
+                    account=str(merged["name"]),
+                ),
+                trained_retention_days=_parse_int(
+                    merged["trained_retention_days"], key="trained_retention_days",
+                    account=str(merged["name"]),
+                ),
                 learn_from_moves=_parse_bool(
                     merged["learn_from_moves"],
                     key="learn_from_moves",
@@ -562,6 +670,10 @@ def validate_account(acc: Account) -> None:
             )
     if not 1 <= acc.imap_port <= 65535:
         raise SystemExit(f"{acc.name}: imap_port out of range ({acc.imap_port})")
+    for key in ("threshold", "min_threshold_allowed", "reject_score_above"):
+        value = getattr(acc, key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise SystemExit(f"{acc.name}: {key} must be a finite non-boolean number")
     if acc.min_threshold_allowed <= 0:
         raise SystemExit(
             f"{acc.name}: min_threshold_allowed must be positive "
@@ -603,17 +715,33 @@ def validate_account(acc: Account) -> None:
         raise SystemExit(
             f"{acc.name}: safe_mode_unseen_cap must be >= 1 ({acc.safe_mode_unseen_cap})"
         )
-    if acc.learn_grace_seconds < 0 or acc.move_grace_seconds < 0:
-        raise SystemExit(f"{acc.name}: grace values must be >= 0")
-    if acc.junk_retention_days < 0 or acc.trained_retention_days < 0:
-        raise SystemExit(f"{acc.name}: retention days must be >= 0")
+    interval_bounds = {
+        "idle_timeout": (1, 1740),
+        "poll_interval": (1, 86400),
+        "junk_poll_interval": (1, 86400),
+        "retention_check_interval": (1, 604800),
+    }
+    for key, (minimum, maximum) in interval_bounds.items():
+        value = getattr(acc, key)
+        if not minimum <= value <= maximum:
+            raise SystemExit(
+                f"{acc.name}: {key} out of range ({minimum}..{maximum})"
+            )
+    for key in ("learn_grace_seconds", "move_grace_seconds"):
+        value = getattr(acc, key)
+        if not 0 <= value <= 604800:
+            raise SystemExit(f"{acc.name}: {key} out of range (0..604800)")
+    for key in ("junk_retention_days", "trained_retention_days"):
+        value = getattr(acc, key)
+        if not 0 <= value <= 3650:
+            raise SystemExit(f"{acc.name}: {key} out of range (0..3650)")
 
 
 # ---------------------------------------------------------------------------
 # SQLite
 # ---------------------------------------------------------------------------
 
-SCHEMA = """
+SCHEMA_TABLES = """
 CREATE TABLE IF NOT EXISTS messages (
     account            TEXT NOT NULL,
     folder             TEXT NOT NULL,
@@ -631,13 +759,13 @@ CREATE TABLE IF NOT EXISTS messages (
     learned_at         INTEGER,
     pending_learn      TEXT,         -- 'spam' | 'ham' | NULL
     pending_learn_at   INTEGER,
+    learn_retry_count  INTEGER NOT NULL DEFAULT 0,
+    learn_retry_at     INTEGER,
     sender             TEXT,
     subject            TEXT,
     received_at        INTEGER,      -- IMAP INTERNALDATE (unix); NULL if unknown
     PRIMARY KEY (account, folder, uidvalidity, uid)
 );
-CREATE INDEX IF NOT EXISTS idx_messages_msgid ON messages(account, message_id);
-CREATE INDEX IF NOT EXISTS idx_messages_sha ON messages(account, body_sha256);
 
 CREATE TABLE IF NOT EXISTS uidvalidity (
     account     TEXT NOT NULL,
@@ -648,11 +776,12 @@ CREATE TABLE IF NOT EXISTS uidvalidity (
 
 CREATE TABLE IF NOT EXISTS pending_move (
     account     TEXT NOT NULL,
+    folder      TEXT NOT NULL,
     uidvalidity INTEGER NOT NULL,
     uid         INTEGER NOT NULL,
     message_id  TEXT NOT NULL,
     flag_at     INTEGER NOT NULL,
-    PRIMARY KEY (account, uidvalidity, uid)
+    PRIMARY KEY (account, folder, uidvalidity, uid)
 );
 
 -- High-water UID per (account, folder, uidvalidity). scan_inbox uses
@@ -677,14 +806,12 @@ CREATE TABLE IF NOT EXISTS events (
     event       TEXT NOT NULL,
     detail      TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_events_time ON events(account, ts);
 
 CREATE TABLE IF NOT EXISTS rate_limit (
     account TEXT NOT NULL,
     action  TEXT NOT NULL,
     ts      INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_rate_limit ON rate_limit(account, action, ts);
 
 CREATE TABLE IF NOT EXISTS safe_mode (
     account     TEXT NOT NULL,
@@ -695,13 +822,27 @@ CREATE TABLE IF NOT EXISTS safe_mode (
 );
 """
 
+SCHEMA_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_messages_msgid ON messages(account, message_id);
+CREATE INDEX IF NOT EXISTS idx_messages_sha ON messages(account, body_sha256);
+CREATE INDEX IF NOT EXISTS idx_events_time ON events(account, ts);
+CREATE INDEX IF NOT EXISTS idx_rate_limit ON rate_limit(account, action, ts);
+CREATE INDEX IF NOT EXISTS idx_pending_move_folder
+    ON pending_move(account, folder, uidvalidity, uid);
+"""
+
+# Kept for tests and external one-shot initializers. Real startup deliberately
+# runs table creation, migrations, then indexes so legacy columns exist first.
+SCHEMA = SCHEMA_TABLES + SCHEMA_INDEXES
+
 
 def init_db() -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(DB_PATH) as conn:
         conn.executescript("PRAGMA journal_mode=WAL;")
-        conn.executescript(SCHEMA)
+        conn.executescript(SCHEMA_TABLES)
         _migrate(conn)
+        conn.executescript(SCHEMA_INDEXES)
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -736,6 +877,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 learned_at         INTEGER,
                 pending_learn      TEXT,
                 pending_learn_at   INTEGER,
+                learn_retry_count  INTEGER NOT NULL DEFAULT 0,
+                learn_retry_at     INTEGER,
                 sender             TEXT,
                 subject            TEXT,
                 received_at        INTEGER,
@@ -749,13 +892,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 account, folder, uidvalidity, uid, message_id, body_sha256,
                 first_seen, last_seen, current_folder, moved_to_junk_at,
                 our_score, our_action, learned_as, learned_at,
-                pending_learn, pending_learn_at, sender, subject, received_at
+                pending_learn, pending_learn_at, learn_retry_count, learn_retry_at,
+                sender, subject, received_at
             )
             SELECT
                 account, current_folder, 0, rowid, message_id, NULL,
                 first_seen, last_seen, current_folder, moved_to_junk_at,
                 our_score, our_action, learned_as, learned_at,
-                pending_learn, pending_learn_at, sender, subject, {received_src}
+                pending_learn, pending_learn_at, 0, NULL,
+                sender, subject, {received_src}
             FROM messages
             """
         )
@@ -770,6 +915,74 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE messages ADD COLUMN received_at INTEGER")
     if "body_sha256" not in cols:
         conn.execute("ALTER TABLE messages ADD COLUMN body_sha256 TEXT")
+    if "learn_retry_count" not in cols:
+        conn.execute(
+            "ALTER TABLE messages ADD COLUMN learn_retry_count "
+            "INTEGER NOT NULL DEFAULT 0"
+        )
+    if "learn_retry_at" not in cols:
+        conn.execute("ALTER TABLE messages ADD COLUMN learn_retry_at INTEGER")
+    pending_info = list(conn.execute("PRAGMA table_info(pending_move)"))
+    pending_cols = {r[1] for r in pending_info}
+    pending_pk = [
+        r[1] for r in sorted(
+            (r for r in pending_info if r[5]), key=lambda r: r[5]
+        )
+    ]
+    pending_folder_not_null = next(
+        (bool(r[3]) for r in pending_info if r[1] == "folder"), False
+    )
+    expected_pending_pk = ["account", "folder", "uidvalidity", "uid"]
+    if pending_cols and (
+        pending_pk != expected_pending_pk or not pending_folder_not_null
+    ):
+        inferred_folder = """
+            (
+                SELECT messages.folder
+                  FROM messages
+                 WHERE messages.account=p.account
+                   AND messages.uidvalidity=p.uidvalidity
+                   AND messages.uid=p.uid
+                   AND messages.our_action='pending_move'
+                 LIMIT 1
+            )
+        """
+        folder_expr = (
+            f"COALESCE(p.folder, {inferred_folder}, 'INBOX')"
+            if "folder" in pending_cols
+            else f"COALESCE({inferred_folder}, 'INBOX')"
+        )
+        conn.executescript(
+            """
+            DROP TABLE IF EXISTS pending_move_imap;
+            CREATE TABLE pending_move_imap (
+                account     TEXT NOT NULL,
+                folder      TEXT NOT NULL,
+                uidvalidity INTEGER NOT NULL,
+                uid         INTEGER NOT NULL,
+                message_id  TEXT NOT NULL,
+                flag_at     INTEGER NOT NULL,
+                PRIMARY KEY (account, folder, uidvalidity, uid)
+            );
+            """
+        )
+        conn.execute(
+            f"""
+            INSERT OR REPLACE INTO pending_move_imap(
+                account, folder, uidvalidity, uid, message_id, flag_at
+            )
+            SELECT
+                p.account, {folder_expr}, p.uidvalidity, p.uid,
+                p.message_id, p.flag_at
+              FROM pending_move AS p
+            """
+        )
+        conn.executescript(
+            """
+            DROP TABLE pending_move;
+            ALTER TABLE pending_move_imap RENAME TO pending_move;
+            """
+        )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_messages_msgid ON messages(account, message_id)"
     )
@@ -882,6 +1095,7 @@ class Db:
     _UPDATABLE_MESSAGE_COLUMNS = frozenset({
         "current_folder", "moved_to_junk_at", "our_score", "our_action",
         "learned_as", "learned_at", "pending_learn", "pending_learn_at",
+        "learn_retry_count", "learn_retry_at",
         "sender", "subject", "message_id", "body_sha256",
     })
 
@@ -922,31 +1136,40 @@ class Db:
 
     # ----- pending_move (flag->move grace, filter-initiated only) ----------
 
-    def add_pending_move(self, uidvalidity: int, uid: int, msgid: str) -> None:
+    def add_pending_move(
+        self, uidvalidity: int, uid: int, msgid: str, folder: str = "INBOX"
+    ) -> None:
         self.conn.execute(
             """
-            INSERT OR IGNORE INTO pending_move(account, uidvalidity, uid, message_id, flag_at)
-            VALUES(?,?,?,?,?)
+            INSERT OR IGNORE INTO pending_move(
+                account, folder, uidvalidity, uid, message_id, flag_at
+            )
+            VALUES(?,?,?,?,?,?)
             """,
-            (self.account, uidvalidity, uid, msgid, int(time.time())),
+            (self.account, folder, uidvalidity, uid, msgid, int(time.time())),
         )
 
-    def due_pending_moves(self, uidvalidity: int, grace_s: int) -> list[sqlite3.Row]:
+    def due_pending_moves(
+        self, folder: str, uidvalidity: int, grace_s: int
+    ) -> list[sqlite3.Row]:
         cutoff = int(time.time()) - grace_s
         cur = self.conn.execute(
             """
             SELECT uid, message_id, flag_at FROM pending_move
-            WHERE account=? AND uidvalidity=? AND flag_at<=?
+            WHERE account=? AND folder=? AND uidvalidity=? AND flag_at<=?
             ORDER BY flag_at
             """,
-            (self.account, uidvalidity, cutoff),
+            (self.account, folder, uidvalidity, cutoff),
         )
         return list(cur.fetchall())
 
-    def drop_pending_move(self, uidvalidity: int, uid: int) -> None:
+    def drop_pending_move(self, folder: str, uidvalidity: int, uid: int) -> None:
         self.conn.execute(
-            "DELETE FROM pending_move WHERE account=? AND uidvalidity=? AND uid=?",
-            (self.account, uidvalidity, uid),
+            """
+            DELETE FROM pending_move
+             WHERE account=? AND folder=? AND uidvalidity=? AND uid=?
+            """,
+            (self.account, folder, uidvalidity, uid),
         )
 
     # ----- scan bookmark ----------------------------------------------------
@@ -1048,6 +1271,7 @@ class Db:
              WHERE account=?
                AND pending_learn IS NOT NULL
                AND pending_learn_at<?
+               AND learn_retry_count=0
             """,
             (self.account, cutoff),
         )
@@ -1137,14 +1361,23 @@ def rspamd_scan(
         resp = requests.post(RSPAMD_SCAN_URL, data=raw, headers=headers, timeout=HTTP_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
+        if not isinstance(data, Mapping):
+            return None
         score = data.get("score")
-        if not isinstance(score, (int, float)):
+        if (
+            isinstance(score, bool)
+            or not isinstance(score, (int, float))
+            or not math.isfinite(float(score))
+            or isinstance(max_score, bool)
+            or not isinstance(max_score, (int, float))
+            or not math.isfinite(float(max_score))
+        ):
             return None
         score = float(score)
         if score < -max_score or score > max_score:
             return None
         return score
-    except (requests.RequestException, ValueError):
+    except (requests.RequestException, TypeError, ValueError, OverflowError):
         return None
 
 
@@ -1158,9 +1391,8 @@ def rspamd_learn(raw: bytes, kind: str, user: str) -> str:
         nothing (too few tokens, or the message is already in that
         class). Re-POSTing the identical bytes always yields the same
         result, so the caller must treat this as terminal, not retry it;
-      * 'error'    - a network failure or any other status (5xx, or a
-        4xx such as a wrong controller password). Transient or operator-
-        fixable; the caller may retry, subject to its own cap.
+      * 'auth'     - HTTP 401/403; retrying content cannot repair credentials;
+      * 'error'    - a network failure, throttling, or service failure.
 
     `user` becomes the classifier user for per-user Bayes
     (`users_enabled = true`) by prepending a `Delivered-To: <user>` header
@@ -1193,6 +1425,12 @@ def rspamd_learn(raw: bytes, kind: str, user: str) -> str:
         return "already"
     if resp.status_code == 204:
         return "declined"
+    if resp.status_code in (401, 403):
+        logging.getLogger("filter").error(
+            "rspamd learn(%s) authentication failed (HTTP %s)",
+            kind, resp.status_code,
+        )
+        return "auth"
     # Any other status: log it so an unexpected reply (or a misconfigured
     # controller password) is visible, and let the caller retry.
     logging.getLogger("filter").warning(
@@ -1308,8 +1546,11 @@ def select_with_uidvalidity_check(
         db.log_event("uidvalidity_change", detail=f"{folder} {stored}->{uv}")
         with db.tx():
             db.conn.execute(
-                "DELETE FROM pending_move WHERE account=? AND uidvalidity=?",
-                (db.account, stored),
+                """
+                DELETE FROM pending_move
+                 WHERE account=? AND folder=? AND uidvalidity=?
+                """,
+                (db.account, folder, stored),
             )
             # Drop the scan_bookmark for the prior uidvalidity. The new
             # uv has its own UID space starting at 1; without this delete
@@ -1474,7 +1715,9 @@ def _log_skipped_oversize(
 
 
 def fetch_under_cap(
-    client: IMAPClient, uids: list[int]
+    client: IMAPClient,
+    uids: list[int],
+    prefetched_meta: Mapping[int, dict] | None = None,
 ) -> Iterator[tuple[int, dict, bool]]:
     """Yield (uid, merged_data, oversize) in SCAN_FETCH_CHUNK batches.
 
@@ -1488,7 +1731,10 @@ def fetch_under_cap(
         if SHUTDOWN.is_set():
             return
         chunk = uids[start : start + SCAN_FETCH_CHUNK]
-        meta = client.fetch(chunk, meta_items)
+        if prefetched_meta is None:
+            meta = client.fetch(chunk, meta_items)
+        else:
+            meta = {uid: prefetched_meta.get(uid, {}) for uid in chunk}
         under: list[int] = []
         oversize_uids: set[int] = set()
         for uid in chunk:
@@ -1584,6 +1830,29 @@ def check_rate(db: Db, log: logging.Logger, action: str, limit: int) -> bool:
     return True
 
 
+def _set_learn_retry(
+    db: Db, folder: str, uidvalidity: int, uid: int
+) -> tuple[int, int]:
+    """Advance bounded retry state on one exact IMAP object."""
+    row = db.get_imap_message(folder, uidvalidity, uid)
+    previous = int(row["learn_retry_count"] or 0) if row is not None else 0
+    attempts = min(previous + 1, 16)
+    delay = min(LEARN_RETRY_BASE_S * (2 ** (attempts - 1)), LEARN_RETRY_MAX_S)
+    retry_at = int(time.time()) + delay
+    db.update_imap_message(
+        folder, uidvalidity, uid,
+        learn_retry_count=attempts, learn_retry_at=retry_at,
+    )
+    return attempts, retry_at
+
+
+def _learn_retry_due(row: sqlite3.Row | None) -> bool:
+    if row is None:
+        return True
+    retry_at = row["learn_retry_at"]
+    return retry_at is None or int(retry_at) <= int(time.time())
+
+
 def try_learn(
     db: Db,
     log: logging.Logger,
@@ -1599,9 +1868,6 @@ def try_learn(
 ) -> bool:
     label = msgid or f"uid={uid}"
     if not acc.learn_from_moves:
-        return False
-    if db.in_safe_mode("learning"):
-        log.warning("skip learn (%s) for %s: in safe mode", kind, label)
         return False
     row = db.get_imap_message(folder, uidvalidity, uid)
     if row is not None:
@@ -1629,12 +1895,54 @@ def try_learn(
                 log.warning("skip learn (%s) for %s: flip-flop cooldown active", kind, label)
                 db.log_event("learn_flipflop_block", msgid, detail=f"{learned}->{kind}")
                 return False
+        if not _learn_retry_due(row):
+            return False
+    object_detail = f"{kind} {folder} uv={uidvalidity} uid={uid}"
+    if db.in_safe_mode("learning"):
+        log.warning("skip learn (%s) for %s: in safe mode", kind, label)
+        if row is not None:
+            with db.tx():
+                attempts, retry_at = _set_learn_retry(
+                    db, folder, uidvalidity, uid
+                )
+                db.log_event(
+                    "learn_deferred_safe_mode", msgid,
+                    detail=f"{object_detail} attempt={attempts} retry_at={retry_at}",
+                )
+        return False
     if not check_rate(db, log, "learn", acc.max_learns_per_hour):
+        if row is not None:
+            with db.tx():
+                _set_learn_retry(db, folder, uidvalidity, uid)
         return False
     outcome = rspamd_learn(raw, kind, user=acc.bayes_user or acc.user)
+    if outcome == "auth":
+        reason_text = "rspamd controller authentication failed"
+        log.error("%s; deferring learning with backoff", reason_text)
+        with db.tx():
+            attempts, retry_at = _set_learn_retry(
+                db, folder, uidvalidity, uid
+            )
+            db.log_event(
+                "learn_auth_failed", msgid,
+                detail=f"{object_detail} attempt={attempts} retry_at={retry_at}",
+            )
+        return False
     if outcome == "error":
         log.warning("rspamd learn(%s) failed for %s", kind, label)
-        db.log_event("learn_failed", msgid, detail=kind)
+        with db.tx():
+            attempts, retry_at = _set_learn_retry(
+                db, folder, uidvalidity, uid
+            )
+            db.log_event(
+                "learn_failed", msgid,
+                detail=f"{object_detail} attempt={attempts} retry_at={retry_at}",
+            )
+        return False
+    if outcome not in ("learned", "already", "declined"):
+        log.error("rspamd learn(%s) returned invalid outcome %r", kind, outcome)
+        with db.tx():
+            _set_learn_retry(db, folder, uidvalidity, uid)
         return False
     if outcome == "declined":
         # rspamd processed the message and deliberately learned nothing
@@ -1648,6 +1956,7 @@ def try_learn(
                 learned_as="unlearnable",
                 learned_at=int(time.time()),
                 pending_learn=None, pending_learn_at=None,
+                learn_retry_count=0, learn_retry_at=None,
             )
             db.log_event("learn_skipped", msgid, detail=kind)
         return True
@@ -1658,6 +1967,7 @@ def try_learn(
             folder, uidvalidity, uid,
             learned_as=kind, learned_at=now,
             pending_learn=None, pending_learn_at=None,
+            learn_retry_count=0, learn_retry_at=None,
         )
         db.record_rate("learn")
         db.log_event(f"learn_{kind}", msgid, detail=reason)
@@ -1704,13 +2014,29 @@ def scan_inbox(
             fmap["inbox"], uv, init_uid, len(existing) if existing else 0,
         )
         return
-    # Only UIDs strictly above the bookmark are candidates. Server-side
-    # filter via UID range avoids transferring 40k+ UID lists for large
-    # mailboxes.
+    # Snapshot candidate UIDs once. RFC sequence ranges are order-independent:
+    # when bookmark+1 is beyond the mailbox high UID, ``bookmark+1:*`` may
+    # still return the old high UID. Enforce the strict bound locally.
     new_range = f"{bookmark + 1}:*"
-    unseen = client.search(["UNSEEN", "UID", new_range])
-    new_uids = client.search(["UID", new_range])
-    candidates = sorted(set(unseen) | set(new_uids))
+    candidates = sorted(
+        uid for uid in set(client.search(["UID", new_range]) or [])
+        if uid > bookmark
+    )
+    if not candidates:
+        return
+
+    # Fetch FLAGS as part of the candidate snapshot rather than issuing a
+    # second UNSEEN search. Mail arriving between two searches could otherwise
+    # appear only in the all-UID result and be mistaken for already-seen mail.
+    metadata: dict[int, dict] = {}
+    meta_items = [b"RFC822.SIZE", b"FLAGS", b"INTERNALDATE"]
+    for start in range(0, len(candidates), SCAN_FETCH_CHUNK):
+        chunk = candidates[start : start + SCAN_FETCH_CHUNK]
+        metadata.update(client.fetch(chunk, meta_items))
+    unseen = {
+        uid for uid in candidates
+        if "\\Seen" not in _kw((metadata.get(uid) or {}).get(b"FLAGS", ()))
+    }
     cap = acc.safe_mode_unseen_cap
     if len(unseen) > cap:
         reason = f"Inbox UNSEEN > {cap} ({len(unseen)}) - refusing to process"
@@ -1729,9 +2055,6 @@ def scan_inbox(
             db.exit_safe_mode("all")
             db.log_event("safe_mode_exit", detail=f"unseen={len(unseen)}")
 
-    if not candidates:
-        return
-
     # Chunk the FETCH so a single oversized inbox does not allocate up
     # to len(candidates) * MAX_FETCH_BYTES at once. With 200 candidates
     # and 5 MB cap that would be 1 GB of resident memory.
@@ -1747,7 +2070,9 @@ def scan_inbox(
         if halted:
             break
         chunk = candidates[chunk_start : chunk_start + SCAN_FETCH_CHUNK]
-        for uid, data, oversize in fetch_under_cap(client, chunk):
+        for uid, data, oversize in fetch_under_cap(
+            client, chunk, prefetched_meta=metadata
+        ):
             if SHUTDOWN.is_set():
                 return
             if oversize:
@@ -1792,11 +2117,24 @@ def scan_inbox(
                 sib = junk_sibs[0]
                 if NOTJUNK_KEYWORD in flags:
                     # User intent confirmed by $NotJunk keyword skips grace.
-                    try_learn(
+                    learned = try_learn(
                         db, log, acc, raw, msgid, "ham",
                         reason="revert+notjunk_kw",
                         folder=fmap["inbox"], uidvalidity=uv, uid=uid,
                     )
+                    if not learned and acc.learn_from_moves:
+                        with db.tx():
+                            db.update_imap_message(
+                                fmap["inbox"], uv, uid,
+                                pending_learn="ham",
+                                pending_learn_at=(
+                                    int(time.time()) - acc.learn_grace_seconds
+                                ),
+                            )
+                            db.log_event(
+                                "pending_ham", msgid,
+                                detail="immediate keyword retry",
+                            )
                 elif sib["learned_as"] != "ham" and sib["pending_learn"] != "ham":
                     with db.tx():
                         db.update_imap_message(
@@ -1808,50 +2146,88 @@ def scan_inbox(
                 last_terminal = uid
                 continue
 
-            # Skip scoring on already-scored messages (avoid duplicate moves).
-            if prior is not None and prior["our_score"] is not None:
-                last_terminal = uid
-                continue
-            # Only score unseen messages on first appearance.
-            if uid not in unseen:
-                last_terminal = uid
-                continue
+            stored_score = prior["our_score"] if prior is not None else None
+            if stored_score is not None:
+                try:
+                    score = float(stored_score)
+                except (TypeError, ValueError):
+                    score = math.nan
+                if not math.isfinite(score):
+                    log.error(
+                        "invalid stored score for %s (uid=%s) - keeping in inbox",
+                        msgid, uid,
+                    )
+                    db.log_event("invalid_stored_score", msgid, detail=f"uid={uid}")
+                    halted = True
+                    break
+            else:
+                # Only score unseen messages on first appearance. A persisted
+                # score bypasses this gate so an interrupted required action
+                # can be replayed even if flags changed after the first pass.
+                if uid not in unseen:
+                    last_terminal = uid
+                    continue
 
-            recipient = first_recipient(raw, acc.user)
-            score = rspamd_scan(
-                raw, recipient, acc.reject_score_above, bayes_user=acc.bayes_user or acc.user
-            )
-            if score is None:
-                log.warning("scan failed for %s (uid=%s) - keeping in inbox", msgid, uid)
-                db.log_event("scan_failed", msgid)
-                if state is not None:
-                    state.scan_fail_streak += 1
-                    # Escalate loudly at 1/10/50/250+ so rspamd downtime
-                    # shows up in logs and Unraid notification scrapers
-                    # without spamming once per scanned message.
-                    if state.scan_fail_streak in (1, 10, 50) or state.scan_fail_streak % 250 == 0:
-                        log.error(
-                            "rspamd scan failing: %d consecutive failures (check rspamd container)",
-                            state.scan_fail_streak,
-                        )
-                        db.log_event("scan_fail_streak", detail=str(state.scan_fail_streak))
-                halted = True
-                break
-            if state is not None and state.scan_fail_streak:
-                log.info("rspamd scan recovered after %d failures", state.scan_fail_streak)
-                db.log_event("scan_recovered", detail=str(state.scan_fail_streak))
-                state.scan_fail_streak = 0
+                recipient = first_recipient(raw, acc.user)
+                score = rspamd_scan(
+                    raw, recipient, acc.reject_score_above,
+                    bayes_user=acc.bayes_user or acc.user,
+                )
+                if score is None:
+                    log.warning("scan failed for %s (uid=%s) - keeping in inbox", msgid, uid)
+                    db.log_event("scan_failed", msgid)
+                    if state is not None:
+                        state.scan_fail_streak += 1
+                        # Escalate loudly at 1/10/50/250+ so rspamd downtime
+                        # shows up in logs and Unraid notification scrapers
+                        # without spamming once per scanned message.
+                        if state.scan_fail_streak in (1, 10, 50) or state.scan_fail_streak % 250 == 0:
+                            log.error(
+                                "rspamd scan failing: %d consecutive failures (check rspamd container)",
+                                state.scan_fail_streak,
+                            )
+                            db.log_event("scan_fail_streak", detail=str(state.scan_fail_streak))
+                    halted = True
+                    break
+                if state is not None and state.scan_fail_streak:
+                    log.info("rspamd scan recovered after %d failures", state.scan_fail_streak)
+                    db.log_event("scan_recovered", detail=str(state.scan_fail_streak))
+                    state.scan_fail_streak = 0
 
-            with db.tx():
-                db.update_imap_message(fmap["inbox"], uv, uid, our_score=score)
-                db.log_event("scan", msgid, detail=f"score={score:.2f} mode={acc.mode}")
-            log.debug("scored %s = %.2f", msgid, score)
+                with db.tx():
+                    db.update_imap_message(fmap["inbox"], uv, uid, our_score=score)
+                    db.log_event("scan", msgid, detail=f"score={score:.2f} mode={acc.mode}")
+                log.debug("scored %s = %.2f", msgid, score)
 
             if score < acc.threshold:
                 last_terminal = uid
                 continue
 
             # Over threshold: act according to mode.
+            prior_action = prior["our_action"] if prior is not None else None
+            pending_exists = False
+            if acc.mode == "move" and prior_action == "pending_move":
+                pending_exists = db.conn.execute(
+                    """
+                    SELECT 1 FROM pending_move
+                     WHERE account=? AND folder=? AND uidvalidity=? AND uid=?
+                    """,
+                    (db.account, fmap["inbox"], uv, uid),
+                ).fetchone() is not None
+            action_complete = (
+                (acc.mode == "shadow" and prior_action == "shadow")
+                or (acc.mode == "flag" and prior_action == "flagged")
+                or (
+                    acc.mode == "move"
+                    and (
+                        prior_action == "moved_to_junk"
+                        or (prior_action == "pending_move" and pending_exists)
+                    )
+                )
+            )
+            if action_complete:
+                last_terminal = uid
+                continue
             match acc.mode:
                 case "shadow":
                     log.info("[shadow] would flag %s score=%.2f subj=%r", msgid, score, subject[:80])
@@ -1874,7 +2250,9 @@ def scan_inbox(
                     # DB row + event - the move happens after
                     # move_grace_seconds whether or not the flag is set.
                     with db.tx():
-                        db.add_pending_move(uv, uid, msgid)
+                        db.add_pending_move(
+                            uv, uid, msgid, folder=fmap["inbox"]
+                        )
                         db.update_imap_message(
                             fmap["inbox"], uv, uid, our_action="pending_move"
                         )
@@ -1892,7 +2270,9 @@ def execute_due_moves(client: IMAPClient, db: Db, log: logging.Logger, acc: Acco
     if db.in_safe_mode("all"):
         return
     uv = select_with_uidvalidity_check(client, db, fmap["inbox"], log)
-    rows = db.due_pending_moves(uv, acc.move_grace_seconds)
+    rows = db.due_pending_moves(
+        fmap["inbox"], uv, acc.move_grace_seconds
+    )
     if not rows:
         return
     if not check_rate(db, log,"move", acc.max_moves_per_hour):
@@ -1905,7 +2285,7 @@ def execute_due_moves(client: IMAPClient, db: Db, log: logging.Logger, acc: Acco
         uid = r["uid"]
         if uid not in fetched:
             with db.tx():
-                db.drop_pending_move(uv, uid)
+                db.drop_pending_move(fmap["inbox"], uv, uid)
                 db.log_event("move_skipped_missing", r["message_id"])
             continue
         to_move.append(uid)
@@ -1934,7 +2314,7 @@ def execute_due_moves(client: IMAPClient, db: Db, log: logging.Logger, acc: Acco
         for r in rows:
             if r["uid"] not in to_move:
                 continue
-            db.drop_pending_move(uv, r["uid"])
+            db.drop_pending_move(fmap["inbox"], uv, r["uid"])
             db.update_imap_message(
                 fmap["inbox"], uv, r["uid"],
                 current_folder=fmap["junk"],
@@ -1972,9 +2352,13 @@ def poll_junk(client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fma
     new_range = f"{bookmark + 1}:*"
     uids = sorted(u for u in (client.search(["UID", new_range]) or []) if u > bookmark)
     if uids:
+        last_terminal: int | None = None
+        halted = False
         for chunk_start in range(0, len(uids), SCAN_FETCH_CHUNK):
             if SHUTDOWN.is_set():
                 return
+            if halted:
+                break
             chunk = uids[chunk_start : chunk_start + SCAN_FETCH_CHUNK]
             for uid, data, oversize in fetch_under_cap(client, chunk):
                 if SHUTDOWN.is_set():
@@ -1983,13 +2367,16 @@ def poll_junk(client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fma
                     _log_skipped_oversize(
                         db, log, uid=uid, folder=junk, size=_rfc822_size(data),
                     )
+                    last_terminal = uid
                     continue
                 raw = _body_bytes(data)
                 if not raw:
-                    continue
+                    halted = True
+                    break
                 flags = _kw(data.get(b"FLAGS", ()))
                 msgid, subject, sender = parse_envelope(raw)
                 if not msgid:
+                    last_terminal = uid
                     continue
                 sha = body_sha256(raw)
                 prior = db.get_imap_message(junk, uv, uid)
@@ -2001,9 +2388,14 @@ def poll_junk(client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fma
                         received_at=_internaldate_ts(data), body_sha256=sha,
                     )
 
-                # Filter put it here (Inbox row marked moved_to_junk after
-                # MOVE): nothing to learn. Skip.
-                if any(r["our_action"] == "moved_to_junk" for r in siblings):
+                # Both completed and uncertain filter-owned moves are excluded
+                # from user feedback. A server may complete MOVE while its
+                # response or our reconciliation write is lost.
+                if any(
+                    r["our_action"] in ("pending_move", "moved_to_junk")
+                    for r in siblings
+                ):
+                    last_terminal = uid
                     continue
                 # Learn spam only from a confirmed user move Inbox -> Junk,
                 # i.e. a sha256 sibling still recorded as living in Inbox.
@@ -2018,15 +2410,29 @@ def poll_junk(client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fma
                         r["folder"] == fmap["inbox"]
                         or r["current_folder"] == fmap["inbox"]
                     )
-                    and r["our_action"] != "moved_to_junk"
+                    and r["our_action"] not in ("pending_move", "moved_to_junk")
                 ]
                 if inbox_sibs:
                     if JUNK_KEYWORD in flags:
-                        try_learn(
+                        learned = try_learn(
                             db, log, acc, raw, msgid, "spam",
                             reason="user_move+junk_kw",
                             folder=junk, uidvalidity=uv, uid=uid,
                         )
+                        if not learned and acc.learn_from_moves:
+                            with db.tx():
+                                db.update_imap_message(
+                                    junk, uv, uid,
+                                    pending_learn="spam",
+                                    pending_learn_at=(
+                                        int(time.time()) - acc.learn_grace_seconds
+                                    ),
+                                    moved_to_junk_at=int(time.time()),
+                                )
+                                db.log_event(
+                                    "pending_spam", msgid,
+                                    detail="immediate keyword retry",
+                                )
                     else:
                         with db.tx():
                             if not prior or prior["pending_learn"] != "spam":
@@ -2040,8 +2446,10 @@ def poll_junk(client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fma
                                     "pending_spam", msgid,
                                     detail="user move inbox->junk",
                                 )
-        with db.tx():
-            db.set_scan_bookmark(junk, uv, max(uids))
+                last_terminal = uid
+        if last_terminal is not None:
+            with db.tx():
+                db.set_scan_bookmark(junk, uv, last_terminal)
 
     process_pending_learns(client, db, log, acc, fmap)
 
@@ -2056,8 +2464,9 @@ def process_pending_learns(
         SELECT folder, uidvalidity, uid, message_id, pending_learn, current_folder
           FROM messages
          WHERE account=? AND pending_learn IS NOT NULL AND pending_learn_at<=?
+           AND (learn_retry_at IS NULL OR learn_retry_at<=?)
         """,
-        (db.account, cutoff),
+        (db.account, cutoff, int(time.time())),
     )
     candidates = list(cur.fetchall())
     if not candidates:
@@ -2071,8 +2480,10 @@ def process_pending_learns(
     for folder, rows in folder_groups.items():
         # Reconfirm folder still expected for the kind.
         try:
-            client.select_folder(folder, readonly=True)
-        except IMAPClientError as ex:
+            current_uv = select_with_uidvalidity_check(
+                client, db, folder, log, readonly=True
+            )
+        except (IMAPClientError, KeyError, TypeError, ValueError) as ex:
             log.warning("select %s for pending learn failed: %s", folder, redact_log(str(ex), acc.password))
             continue
         for r in rows:
@@ -2082,6 +2493,20 @@ def process_pending_learns(
             kind = r["pending_learn"]
             uv = int(r["uidvalidity"])
             uid = int(r["uid"])
+            if uv != current_uv:
+                # select_with_uidvalidity_check normally canceled stale rows;
+                # explicitly clear this candidate too in case the stored
+                # folder epoch was absent or already updated independently.
+                with db.tx():
+                    db.update_imap_message(
+                        folder, uv, uid,
+                        pending_learn=None, pending_learn_at=None,
+                    )
+                    db.log_event(
+                        "pending_canceled_uidvalidity", msgid,
+                        detail=f"{folder} row={uv} selected={current_uv}",
+                    )
+                continue
             # Spam pending must still be in Junk; ham pending must still be in Inbox.
             if kind == "spam" and folder != fmap["junk"]:
                 with db.tx():
@@ -2125,30 +2550,9 @@ def process_pending_learns(
                 folder=folder, uidvalidity=uv, uid=uid,
             ):
                 continue
-            # try_learn returned False: a transient rspamd error left the
-            # pending_learn flag set. Without a cap the same message is
-            # re-POSTed every poll until the stale-pending sweep clears it
-            # (up to 24h). Give up after 3 failures, mirroring
-            # _drain_train_folder.
-            fails = db.conn.execute(
-                "SELECT COUNT(*) FROM events WHERE account=? AND "
-                "message_id=? AND event='learn_failed'",
-                (db.account, msgid),
-            ).fetchone()[0]
-            if fails >= 3:
-                with db.tx():
-                    db.update_imap_message(
-                        folder, uv, uid,
-                        learned_as="unlearnable",
-                        learned_at=int(time.time()),
-                        pending_learn=None, pending_learn_at=None,
-                    )
-                    db.log_event(
-                        "learn_giveup", msgid,
-                        detail=f"{kind} after {fails} failures",
-                    )
-                log.warning("pending learn: giving up on %s after %d "
-                            "failures", msgid or f"uid={uid}", fails)
+            # Retryable/policy outcomes leave the exact object's pending state
+            # intact. try_learn records bounded per-object backoff for service
+            # failures; infrastructure outages never become unlearnable.
 
 
 def _drain_train_folder(
@@ -2178,7 +2582,15 @@ def _drain_train_folder(
     uids = client.search(["ALL"])
     if not uids:
         return
-    uids = uids[: acc.max_train_per_run]
+    due_uids: list[int] = []
+    for uid in uids:
+        if _learn_retry_due(db.get_imap_message(folder, uv, uid)):
+            due_uids.append(uid)
+            if len(due_uids) >= acc.max_train_per_run:
+                break
+    uids = due_uids
+    if not uids:
+        return
     learned_uids: list[int] = []
     log_tag = f"drain_train_{kind}"
     reason = f"train_{kind}_folder"
@@ -2209,30 +2621,9 @@ def _drain_train_folder(
         if ok:
             learned_uids.append(uid)
             continue
-        # try_learn returned False: rspamd refused (min_tokens not met,
-        # encoded body, etc.) or transient. Count prior learn_failed
-        # events for this msgid; after 3 fails, give up so the train
-        # folder cannot loop forever on the same UID.
-        fails = db.conn.execute(
-            "SELECT COUNT(*) FROM events "
-            "WHERE account=? AND message_id IS ? AND event='learn_failed'",
-            (db.account, msgid),
-        ).fetchone()[0]
-        if fails >= 3:
-            log.warning(
-                "%s: giving up on %s after %d learn failures, moving out unlearned",
-                log_tag, msgid or f"uid={uid}", fails,
-            )
-            with db.tx():
-                db.update_imap_message(
-                    folder, uv, uid,
-                    learned_as="unlearnable", learned_at=int(time.time()),
-                )
-                db.log_event(
-                    "learn_giveup", msgid,
-                    detail=f"{kind} after {fails} failures",
-                )
-            learned_uids.append(uid)
+        # Retryable/policy outcomes remain in Train-*; only a successful,
+        # already-learned, deterministic decline, or explicit oversize policy
+        # can move an object to Trained-*.
     if not learned_uids:
         return
     try:
