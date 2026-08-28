@@ -77,3 +77,16 @@ def test_scan_rcpt_falls_back_to_recipient(monkeypatch):
     f.rspamd_scan(RAW_WITH_FROM, "u@example.com", 100.0)
     assert captured["headers"]["Rcpt"] == "u@example.com"
     assert captured["headers"]["From"] == "sender@example.com"
+
+
+def test_parse_envelope_decodes_rfc2047_subject():
+    raw = (
+        b"From: a@example.com\r\n"
+        b"Message-ID: <x@example.com>\r\n"
+        b"Subject: =?utf-8?Q?Hello_World?=\r\n"
+        b"\r\nbody\r\n"
+    )
+    msgid, subject, sender = f.parse_envelope(raw)
+    assert msgid == "x@example.com"
+    assert subject == "Hello World"
+    assert sender == "a@example.com"

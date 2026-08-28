@@ -27,6 +27,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from email.header import decode_header
 from email.utils import getaddresses, parseaddr
 from pathlib import Path
 from typing import Any, Iterator
@@ -1341,6 +1342,32 @@ def select_with_uidvalidity_check(
     return uv
 
 
+def decode_rfc2047(value: str | None) -> str:
+    """Best-effort RFC 2047 subject decode for display. Never raises."""
+    raw = "" if value is None else str(value)
+    if not raw.strip():
+        return ""
+    try:
+        chunks: list[str] = []
+        for data, charset in decode_header(raw):
+            if isinstance(data, bytes):
+                enc = charset or "utf-8"
+                try:
+                    chunks.append(data.decode(enc, errors="replace"))
+                except LookupError:
+                    chunks.append(data.decode("utf-8", errors="replace"))
+            else:
+                chunks.append(str(data))
+        text = "".join(chunks)
+    except Exception:
+        text = raw
+    # Drop leftover encoded-words (including truncated trailing fragments).
+    text = re.sub(r"=\?[^?\s]*\?[BQbq]\?[^?]*\?=", " ", text)
+    text = re.sub(r"=\?[^?\s]*\?[BQbq]\?.*", " ", text)
+    text = re.sub(r"=\?[^?\s]*\??", " ", text)
+    return " ".join(text.split())[:500]
+
+
 def parse_envelope(raw: bytes) -> tuple[str | None, str, str]:
     """Return (message_id, subject, sender_address). Never raises."""
     try:
@@ -1350,7 +1377,7 @@ def parse_envelope(raw: bytes) -> tuple[str | None, str, str]:
             m = re.search(r"<([^>]+)>", msgid)
             if m:
                 msgid = m.group(1)
-        subject = str(msg.get("Subject", "") or "")[:500]
+        subject = decode_rfc2047(str(msg.get("Subject", "") or ""))
         sender = parseaddr(str(msg.get("From", "") or ""))[1][:200]
         return (msgid or None, subject, sender)
     except Exception:
