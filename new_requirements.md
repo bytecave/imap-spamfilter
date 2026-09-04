@@ -1,13 +1,22 @@
 # New requirements — Allowlist / Blocklist
 
-**Status:** requirements capture only (not scheduled for implementation)  
+**Status:** superseded for implementation by design-arch slices 9–12  
 **Captured:** 2026-08-29  
 **Priority driver:** R&J Metal Fab business mail (P.O.s / invoices) must not be lost to Junk; a single false positive can cost tens of thousands of dollars.  
-**Supersedes (for this feature):** README “Known limitations → No allowlist” once implemented.
+**Supersedes (for this feature):** README “Known limitations → No allowlist” once slices 10–12 ship.
 
-This document records product requirements for planning. It is not an
-implementation spec. A later design-arch slice should turn these into
-schema, IMAP folder contracts, dashboard UX, and tests.
+This document is the original product-requirements capture. It is
+**not** the implementation spec. Locked behavior, schema, IMAP
+contracts, dashboard UX, and tests live in:
+
+- [`design-arch/allow_block_sliced_plan.md`](design-arch/allow_block_sliced_plan.md) — index and locked decisions
+- [`design-arch/slice9_shared_bayes.md`](design-arch/slice9_shared_bayes.md) — one VPS Bayes notebook
+- [`design-arch/slice10_list_core.md`](design-arch/slice10_list_core.md) — YAML roster, SQLite, matching, Inbox scan
+- [`design-arch/slice11_imap_list_folders.md`](design-arch/slice11_imap_list_folders.md) — `INBOX/Allowlist` / `Blocklist`
+- [`design-arch/slice12_dashboard_lists.md`](design-arch/slice12_dashboard_lists.md) — admin list editor
+
+Where this file disagrees with those slices (person vs domain drag
+scope, headers, dashboard layout, Bayes pooling), **the slices win**.
 
 ---
 
@@ -219,6 +228,10 @@ whether blocklisted mail is auto-learned as spam.
 ---
 
 ## 10. Open questions for the design slice
+
+**Resolved.** See [`design-arch/allow_block_sliced_plan.md`](design-arch/allow_block_sliced_plan.md)
+“Locked product decisions.” Historical questions left below for
+traceability only.
 
 1. Exact override semantics vs threshold / Bayes learn.
 2. Allow vs block conflict and address-vs-domain precedence.
