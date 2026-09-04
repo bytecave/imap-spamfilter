@@ -27,6 +27,8 @@ FMAP = {
     "trained_spam": "Junk/Trained-Spam",
     "ham_train": "Junk/Train-Ham",
     "trained_ham": "Junk/Trained-Ham",
+    "allowlist": "INBOX/Allowlist",
+    "blocklist": "INBOX/Blocklist",
 }
 
 TRAIN_FOLDERS = (
@@ -35,6 +37,11 @@ TRAIN_FOLDERS = (
     FMAP["ham_train"],
     FMAP["trained_ham"],
 )
+LIST_FOLDERS = (
+    FMAP["allowlist"],
+    FMAP["blocklist"],
+)
+FILTER_OWNED_FOLDERS = TRAIN_FOLDERS + LIST_FOLDERS
 
 RAW_SCAN = (
     b"From: sender@example.com\r\n"
@@ -71,6 +78,7 @@ def _mk_account(**over):
         inbox="INBOX", junk="Junk", trash="Trash",
         spam_train="Junk/Train-Spam", trained_spam="Junk/Trained-Spam",
         ham_train="Junk/Train-Ham", trained_ham="Junk/Trained-Ham",
+        allowlist="INBOX/Allowlist", blocklist="INBOX/Blocklist",
         mode="shadow", threshold=8.0, min_threshold_allowed=5.0,
         reject_score_above=100.0,
         move_grace_seconds=60, learn_grace_seconds=300, idle_timeout=1500,
@@ -81,6 +89,8 @@ def _mk_account(**over):
         safe_mode_unseen_cap=500,
         junk_retention_days=10, trained_retention_days=7,
         learn_from_moves=True, auto_special_folders=True,
+        actual_name="Test User",
+        max_list_per_run=100, max_list_entries=1000,
     )
     base.update(over)
     return f.Account(**base)
@@ -161,7 +171,7 @@ def _core_existing():
 
 
 def _all_existing():
-    return _core_existing() | set(TRAIN_FOLDERS)
+    return _core_existing() | set(FILTER_OWNED_FOLDERS)
 
 
 # ----- helpers --------------------------------------------------------------
@@ -185,8 +195,8 @@ def test_mode_allows_retention_not_shadow():
 def test_ensure_folders_shadow_creates_train_not_core():
     client = RecordingIMAP(existing=_core_existing())
     f.ensure_folders(client, LOG, FMAP)
-    assert client.created == list(TRAIN_FOLDERS)
-    assert client.subscribed == list(TRAIN_FOLDERS)
+    assert client.created == list(FILTER_OWNED_FOLDERS)
+    assert client.subscribed == list(FILTER_OWNED_FOLDERS)
     for name in ("INBOX", "Junk", "Trash"):
         assert name not in client.created
 

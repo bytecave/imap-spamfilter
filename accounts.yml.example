@@ -1,7 +1,7 @@
 # Copy to accounts.yml and fill in real credentials.
 # accounts.yml is gitignored. Keep it out of version control.
 #
-# Minimum required per account: name, imap_host, user, password.
+# Minimum required per account: name, imap_host, user, password, actual_name.
 # Every other field falls back to a built-in default
 # (mode=shadow, threshold=8.0, junk_retention_days=10, ...).
 # Full list of overridable keys: see "Configuration reference" in README.md.
@@ -43,12 +43,14 @@
 #       user: rich@bytecave.net
 #       password: "Dummy"
 #       mode: shadow
+#       actual_name: Your Name
 
 accounts:
   - name: your_name
     imap_host: imap.your-mail-provider.example
     user: you@your-domain.example
     password: "REPLACE_ME"
+    actual_name: Your Name
     # tls_mode: implicit   # default IMAPS :993. starttls = port 143 + STARTTLS
     #                      # none = plaintext; only 127.0.0.1 or allow_insecure_tls
     # mode: shadow     # default; uncomment to set or change
@@ -58,13 +60,24 @@ accounts:
     # safe_mode_unseen_cap: 100000   # default 500; raise if you
     #                                # keep many unread mails in Inbox
 
-# Shared Bayes across multiple of your own accounts:
+# Shared Bayes:
 #   With rspamd's `users_enabled = true` (this project's default) the Bayes
 #   classifier keys tokens by recipient, so each account trains its own
-#   filter. To pool training across several of YOUR accounts while keeping
-#   other users (family, roommates) isolated, set `bayes_user` to the same
-#   string on every account that should share data. Family accounts can
-#   omit the field and stay isolated under their own IMAP user.
+#   filter unless you override `bayes_user`.
+#
+#   Single-site / one VPS notebook (ByteLord): set it once under defaults
+#   and omit per-account bayes_user so every mailbox inherits the same
+#   identity. Switching to a new value starts a *fresh* notebook; old
+#   Redis keys are orphaned (not merged). Re-feed later with
+#   bootstrap_train.py against each account's Trained-Spam / Trained-Ham
+#   *after* the cutover, omitting --move-to so mail stays in Trained-*.
+#   Do that while still in shadow so retention cannot trash the corpus.
+#
+#   defaults:
+#     bayes_user: bytelord
+#
+#   Subset pooling (family isolated): set the same bayes_user on the
+#   accounts that should share, omit it on the others.
 #
 #   accounts:
 #     - name: marcel_main
@@ -89,3 +102,18 @@ accounts:
 #   threshold: 9.0
 #   junk_retention_days: 30
 #   flip_flop_cooldown_seconds: 1   # 0 disables; default 600
+#   max_list_per_run: 100           # IMAP list-folder drain cap (slice 11)
+#   max_list_entries: 1000          # per person/domain × allow/block list
+#
+# Domain roster for shared allow/block lists (root key, not under defaults).
+# The dashboard cannot add/remove these domains. Omit or [] for person lists
+# only. type is company|personal metadata (v1 matching ignores it).
+# list_domains:
+#   - domain: bytecave.net
+#     type: company
+#   - domain: eizenhoefer.net
+#     type: personal
+#   - domain: rjmetalfab.com
+#     type: company
+#   - domain: bytelord.net
+#     type: company

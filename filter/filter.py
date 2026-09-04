@@ -150,6 +150,49 @@ SHUTDOWN = threading.Event()
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class ListRoster:
+    """Root-level domain roster from accounts.yml `list_domains:`.
+
+    `entries` is (lowercase domain, type) in YAML order. `type` is
+    company|personal metadata only; matching does not branch on it.
+    """
+
+    entries: tuple[tuple[str, str], ...] = ()
+
+    def has_domain(self, domain: str) -> bool:
+        d = (domain or "").lower()
+        return any(dom == d for dom, _t in self.entries)
+
+    def domain_type(self, domain: str) -> str | None:
+        d = (domain or "").lower()
+        for dom, typ in self.entries:
+            if dom == d:
+                return typ
+        return None
+
+
+@dataclass(frozen=True)
+class ParsedPattern:
+    pattern: str
+    pattern_type: str  # 'address' | 'domain'
+
+
+@dataclass(frozen=True)
+class ListParseError:
+    line: int
+    message: str
+
+
+@dataclass(frozen=True)
+class ListHit:
+    decision: str  # 'allow' | 'block'
+    pattern: str
+    scope: str  # 'person' | 'domain'
+    conflict: bool
+    rank: int
+
+
 @dataclass
 class Account:
     name: str
@@ -168,6 +211,8 @@ class Account:
     trained_spam: str
     ham_train: str
     trained_ham: str
+    allowlist: str
+    blocklist: str
 
     mode: str
     threshold: float
@@ -193,10 +238,19 @@ class Account:
     learn_from_moves: bool
     auto_special_folders: bool
 
+    # Person-list key. Exact display string; do not lowercase.
+    actual_name: str = ""
+
+    max_list_per_run: int = 100
+    max_list_entries: int = 1000
+
     # Optional rspamd Bayes identity. If unset, falls back to acc.user so
     # each IMAP account has its own per-recipient Bayes data. Set the same
     # value across multiple accounts to pool their Bayes training.
     bayes_user: str | None = None
+
+    # Shared immutable roster from YAML; empty if list_domains omitted.
+    list_roster: ListRoster = field(default_factory=ListRoster)
 
     # Populated at runtime once IMAP delimiter is known.
     delimiter: str = "/"
@@ -236,6 +290,8 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "trained_spam": "Junk/Trained-Spam",
     "ham_train": "Junk/Train-Ham",
     "trained_ham": "Junk/Trained-Ham",
+    "allowlist": "INBOX/Allowlist",
+    "blocklist": "INBOX/Blocklist",
     "mode": "shadow",
     "threshold": 8.0,
     "min_threshold_allowed": 5.0,
@@ -256,6 +312,8 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "learn_from_moves": True,
     # Optional. If unset (None), per-account Bayes is keyed by acc.user.
     "bayes_user": None,
+    "max_list_per_run": 100,
+    "max_list_entries": 1000,
     # When True, look up junk/trash folders via RFC 6154 SPECIAL-USE flags
     # on connect and override the configured names if the server advertises
     # them. Lets Apple Mail / Thunderbird / Outlook users keep their client-
@@ -263,9 +321,17 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "auto_special_folders": True,
 }
 
-REQUIRED_PER_ACCOUNT: tuple[str, ...] = ("name", "user", "password", "imap_host")
-ROOT_CONFIG_KEYS = frozenset({"defaults", "accounts"})
+REQUIRED_PER_ACCOUNT: tuple[str, ...] = (
+    "name", "user", "password", "imap_host", "actual_name",
+)
+ROOT_CONFIG_KEYS = frozenset({"defaults", "accounts", "list_domains"})
 ACCOUNT_CONFIG_KEYS = frozenset(BUILTIN_DEFAULTS) | frozenset(REQUIRED_PER_ACCOUNT) | {"ssl"}
+LIST_DOMAIN_ENTRY_KEYS = frozenset({"domain", "type"})
+VALID_LIST_DOMAIN_TYPES = frozenset({"company", "personal"})
+VALID_LIST_KINDS = frozenset({"allow", "block"})
+VALID_LIST_SCOPE_TYPES = frozenset({"person", "domain"})
+VALID_LIST_PATTERN_TYPES = frozenset({"address", "domain"})
+VALID_LIST_SOURCES = frozenset({"imap", "dashboard"})
 
 
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
@@ -315,6 +381,103 @@ def _clean_bayes_user(raw: Any, account_name: str) -> str | None:
             f"account {account_name!r}: bayes_user must not contain CR or LF"
         )
     return s
+
+
+def _clean_actual_name(raw: Any, account_name: str) -> str:
+    """Required person-list key. Preserve case; reject empty/CR/LF."""
+    s = "" if raw is None else str(raw).strip()
+    if not s:
+        raise SystemExit(f"account {account_name!r}: actual_name is required")
+    if "\r" in s or "\n" in s:
+        raise SystemExit(
+            f"account {account_name!r}: actual_name must not contain CR or LF"
+        )
+    return s
+
+
+def mailbox_domain(user: str) -> str | None:
+    """Lowercase domain of an IMAP user address, or None if unusable."""
+    if not user or "@" not in user:
+        return None
+    host = user.rsplit("@", 1)[-1].strip().lower()
+    return host or None
+
+
+def parse_list_domains(raw: Any, *, where: str) -> ListRoster:
+    """Parse root-level list_domains. Empty/omitted → empty roster."""
+    if raw is None:
+        return ListRoster()
+    if not isinstance(raw, list):
+        raise SystemExit(f"{where}: list_domains must be a list")
+    entries: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for i, item in enumerate(raw):
+        loc = f"{where}: list_domains[{i}]"
+        if not isinstance(item, dict):
+            raise SystemExit(f"{loc} must be a mapping")
+        _reject_unknown_keys(item, LIST_DOMAIN_ENTRY_KEYS, where=loc)
+        domain = str(item.get("domain") or "").strip().lower()
+        typ = str(item.get("type") or "").strip().lower()
+        if not domain:
+            raise SystemExit(f"{loc}: domain is required")
+        if typ not in VALID_LIST_DOMAIN_TYPES:
+            raise SystemExit(
+                f"{loc}: type must be 'company' or 'personal' (got {typ!r})"
+            )
+        if domain in seen:
+            raise SystemExit(f"{loc}: duplicate domain {domain!r}")
+        seen.add(domain)
+        entries.append((domain, typ))
+    return ListRoster(entries=tuple(entries))
+
+
+def parse_list_line(line: str, *, allow_domain: bool) -> ParsedPattern | None:
+    """Parse one allow/block line. None = blank (skip). Raises ValueError."""
+    stripped = line.strip()
+    if not stripped:
+        return None
+    if any(ch.isspace() for ch in stripped):
+        raise ValueError("internal whitespace is not allowed")
+    if "*" in stripped:
+        raise ValueError("wildcards are not allowed")
+    folded = stripped.lower()
+    at = folded.count("@")
+    if at == 1:
+        local, host = folded.split("@", 1)
+        if local and host:
+            return ParsedPattern(pattern=f"{local}@{host}", pattern_type="address")
+        if not local and host:
+            if not allow_domain:
+                raise ValueError("whole-domain patterns are not allowed on person lists")
+            return ParsedPattern(pattern=f"@{host}", pattern_type="domain")
+        raise ValueError("invalid address")
+    if at == 0:
+        if not allow_domain:
+            raise ValueError("expected user@host")
+        if not folded:
+            raise ValueError("invalid domain")
+        return ParsedPattern(pattern=f"@{folded}", pattern_type="domain")
+    raise ValueError("invalid address")
+
+
+def parse_list_text(
+    text: str, *, allow_domain: bool
+) -> tuple[list[ParsedPattern], ListParseError | None]:
+    """Walk textarea/file lines. First error includes 1-based line number."""
+    out: list[ParsedPattern] = []
+    seen: set[str] = set()
+    for i, line in enumerate(text.splitlines(), start=1):
+        try:
+            parsed = parse_list_line(line, allow_domain=allow_domain)
+        except ValueError as ex:
+            return out, ListParseError(line=i, message=str(ex))
+        if parsed is None:
+            continue
+        if parsed.pattern in seen:
+            continue
+        seen.add(parsed.pattern)
+        out.append(parsed)
+    return out, None
 
 
 _BOOL_TRUE = {True, 1, "true", "yes", "on", "1"}
@@ -507,6 +670,7 @@ def load_accounts(path: Path) -> list[Account]:
     )
     if not isinstance(raw["accounts"], list):
         raise SystemExit(f"{path}: 'accounts' must be a list")
+    roster = parse_list_domains(raw.get("list_domains"), where=str(path))
     # Built-ins, then YAML defaults, then env only for keys YAML omitted.
     defaults = _apply_env_overrides(
         _deep_merge(BUILTIN_DEFAULTS, user_defaults),
@@ -555,6 +719,8 @@ def load_accounts(path: Path) -> list[Account]:
                 trained_spam=merged["trained_spam"],
                 ham_train=merged["ham_train"],
                 trained_ham=merged["trained_ham"],
+                allowlist=merged["allowlist"],
+                blocklist=merged["blocklist"],
                 mode=str(merged["mode"]),
                 threshold=_parse_finite_float(
                     merged["threshold"], key="threshold", account=str(merged["name"])
@@ -629,7 +795,19 @@ def load_accounts(path: Path) -> list[Account]:
                     key="auto_special_folders",
                     account=str(merged["name"]),
                 ),
+                actual_name=_clean_actual_name(
+                    merged.get("actual_name"), str(merged["name"])
+                ),
+                max_list_per_run=_parse_int(
+                    merged["max_list_per_run"], key="max_list_per_run",
+                    account=str(merged["name"]),
+                ),
+                max_list_entries=_parse_int(
+                    merged["max_list_entries"], key="max_list_entries",
+                    account=str(merged["name"]),
+                ),
                 bayes_user=_clean_bayes_user(merged.get("bayes_user"), merged.get("name", "?")),
+                list_roster=roster,
             )
         except (KeyError, ValueError, TypeError) as ex:
             raise SystemExit(f"account {entry.get('name')!r}: {ex}") from ex
@@ -662,12 +840,14 @@ def validate_account(acc: Account) -> None:
     # inject into the rspamd /learn body. Reject CR/LF here for the same
     # reason _clean_bayes_user does, otherwise an operator who pastes a
     # multi-line value into accounts.yml smuggles arbitrary headers.
-    for field_name in ("user", "name"):
+    for field_name in ("user", "name", "actual_name"):
         val = str(getattr(acc, field_name))
         if "\r" in val or "\n" in val:
             raise SystemExit(
                 f"{acc.name}: account {field_name} must not contain CR or LF"
             )
+        if field_name == "actual_name" and not val.strip():
+            raise SystemExit(f"{acc.name}: actual_name is required")
     if not 1 <= acc.imap_port <= 65535:
         raise SystemExit(f"{acc.name}: imap_port out of range ({acc.imap_port})")
     for key in ("threshold", "min_threshold_allowed", "reject_score_above"):
@@ -694,11 +874,12 @@ def validate_account(acc: Account) -> None:
         acc.inbox, acc.junk, acc.trash,
         acc.spam_train, acc.trained_spam,
         acc.ham_train, acc.trained_ham,
+        acc.allowlist, acc.blocklist,
     }
-    if len(folder_set) != 7:
+    if len(folder_set) != 9:
         raise SystemExit(
             f"{acc.name}: inbox/junk/trash/spam_train/trained_spam/"
-            f"ham_train/trained_ham must all be distinct"
+            f"ham_train/trained_ham/allowlist/blocklist must all be distinct"
         )
     if not 1 <= acc.max_moves_per_hour <= 1000:
         raise SystemExit(f"{acc.name}: max_moves_per_hour out of range")
@@ -706,6 +887,10 @@ def validate_account(acc: Account) -> None:
         raise SystemExit(f"{acc.name}: max_learns_per_hour out of range")
     if not 1 <= acc.max_train_per_run <= 5000:
         raise SystemExit(f"{acc.name}: max_train_per_run out of range")
+    if not 1 <= acc.max_list_per_run <= 5000:
+        raise SystemExit(f"{acc.name}: max_list_per_run out of range")
+    if not 1 <= acc.max_list_entries <= 10000:
+        raise SystemExit(f"{acc.name}: max_list_entries out of range")
     if not 0 <= acc.flip_flop_cooldown_seconds <= 86400:
         raise SystemExit(
             f"{acc.name}: flip_flop_cooldown_seconds out of range "
@@ -820,6 +1005,21 @@ CREATE TABLE IF NOT EXISTS safe_mode (
     reason      TEXT NOT NULL,
     PRIMARY KEY (account, scope)
 );
+
+CREATE TABLE IF NOT EXISTS address_lists (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    scope_type        TEXT NOT NULL,
+    scope_key         TEXT NOT NULL,
+    kind              TEXT NOT NULL,
+    pattern           TEXT NOT NULL,
+    pattern_type      TEXT NOT NULL,
+    source            TEXT NOT NULL,
+    actor             TEXT,
+    sample_message_id TEXT,
+    created_at        INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL,
+    UNIQUE(scope_type, scope_key, kind, pattern)
+);
 """
 
 SCHEMA_INDEXES = """
@@ -829,6 +1029,8 @@ CREATE INDEX IF NOT EXISTS idx_events_time ON events(account, ts);
 CREATE INDEX IF NOT EXISTS idx_rate_limit ON rate_limit(account, action, ts);
 CREATE INDEX IF NOT EXISTS idx_pending_move_folder
     ON pending_move(account, folder, uidvalidity, uid);
+CREATE INDEX IF NOT EXISTS idx_address_lists_lookup
+    ON address_lists(scope_type, scope_key, kind, pattern);
 """
 
 # Kept for tests and external one-shot initializers. Real startup deliberately
@@ -1022,6 +1224,196 @@ class Db:
             "INSERT INTO events(account, ts, message_id, event, detail) VALUES(?,?,?,?,?)",
             (self.account, int(time.time()), message_id, event, detail),
         )
+
+    # ----- address lists ----------------------------------------------------
+
+    def list_get(self, scope_type: str, scope_key: str, kind: str) -> list[str]:
+        cur = self.conn.execute(
+            """
+            SELECT pattern FROM address_lists
+             WHERE scope_type=? AND scope_key=? AND kind=?
+             ORDER BY pattern
+            """,
+            (scope_type, scope_key, kind),
+        )
+        return [r["pattern"] for r in cur.fetchall()]
+
+    def list_count(self, scope_type: str, scope_key: str, kind: str) -> int:
+        cur = self.conn.execute(
+            """
+            SELECT COUNT(*) FROM address_lists
+             WHERE scope_type=? AND scope_key=? AND kind=?
+            """,
+            (scope_type, scope_key, kind),
+        )
+        return int(cur.fetchone()[0])
+
+    def list_has(
+        self, scope_type: str, scope_key: str, kind: str, pattern: str
+    ) -> bool:
+        cur = self.conn.execute(
+            """
+            SELECT 1 FROM address_lists
+             WHERE scope_type=? AND scope_key=? AND kind=? AND pattern=?
+            """,
+            (scope_type, scope_key, kind, pattern),
+        )
+        return cur.fetchone() is not None
+
+    def list_rows_for_match(
+        self, person_key: str, domain_key: str | None
+    ) -> list[sqlite3.Row]:
+        if domain_key:
+            cur = self.conn.execute(
+                """
+                SELECT scope_type, scope_key, kind, pattern, pattern_type
+                  FROM address_lists
+                 WHERE (scope_type='person' AND scope_key=?)
+                    OR (scope_type='domain' AND scope_key=?)
+                """,
+                (person_key, domain_key),
+            )
+        else:
+            cur = self.conn.execute(
+                """
+                SELECT scope_type, scope_key, kind, pattern, pattern_type
+                  FROM address_lists
+                 WHERE scope_type='person' AND scope_key=?
+                """,
+                (person_key,),
+            )
+        return list(cur.fetchall())
+
+    def list_delete_sibling(
+        self, scope_type: str, scope_key: str, kind: str, pattern: str
+    ) -> int:
+        other = "block" if kind == "allow" else "allow"
+        cur = self.conn.execute(
+            """
+            DELETE FROM address_lists
+             WHERE scope_type=? AND scope_key=? AND kind=? AND pattern=?
+            """,
+            (scope_type, scope_key, other, pattern),
+        )
+        return int(cur.rowcount)
+
+    def list_upsert_address(
+        self,
+        scope_type: str,
+        scope_key: str,
+        kind: str,
+        parsed: ParsedPattern,
+        *,
+        source: str,
+        actor: str | None = None,
+        sample_message_id: str | None = None,
+        max_entries: int,
+    ) -> str:
+        """Insert or bump updated_at. Returns inserted|exists|capped."""
+        if self.list_has(scope_type, scope_key, kind, parsed.pattern):
+            now = int(time.time())
+            self.conn.execute(
+                """
+                UPDATE address_lists SET updated_at=?, source=?, actor=?,
+                       sample_message_id=COALESCE(?, sample_message_id)
+                 WHERE scope_type=? AND scope_key=? AND kind=? AND pattern=?
+                """,
+                (
+                    now, source, actor, sample_message_id,
+                    scope_type, scope_key, kind, parsed.pattern,
+                ),
+            )
+            return "exists"
+        if self.list_count(scope_type, scope_key, kind) >= max_entries:
+            return "capped"
+        now = int(time.time())
+        self.conn.execute(
+            """
+            INSERT INTO address_lists(
+                scope_type, scope_key, kind, pattern, pattern_type,
+                source, actor, sample_message_id, created_at, updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                scope_type, scope_key, kind, parsed.pattern, parsed.pattern_type,
+                source, actor, sample_message_id, now, now,
+            ),
+        )
+        return "inserted"
+
+    def list_flip_address(
+        self,
+        scope_type: str,
+        scope_key: str,
+        kind: str,
+        parsed: ParsedPattern,
+        *,
+        source: str,
+        actor: str | None = None,
+        sample_message_id: str | None = None,
+        max_entries: int,
+    ) -> str:
+        """Move pattern to `kind`, deleting the sibling. May return capped."""
+        other = "block" if kind == "allow" else "allow"
+        sibling = self.list_has(scope_type, scope_key, other, parsed.pattern)
+        outcome = self.list_upsert_address(
+            scope_type, scope_key, kind, parsed,
+            source=source, actor=actor,
+            sample_message_id=sample_message_id,
+            max_entries=max_entries,
+        )
+        if outcome != "capped" and sibling:
+            self.list_delete_sibling(scope_type, scope_key, kind, parsed.pattern)
+            return "flipped"
+        return outcome
+
+    def list_replace(
+        self,
+        scope_type: str,
+        scope_key: str,
+        kind: str,
+        items: list[ParsedPattern],
+        *,
+        source: str,
+        actor: str | None,
+        max_entries: int,
+    ) -> None:
+        if len(items) > max_entries:
+            raise ValueError("list exceeds max_list_entries")
+        now = int(time.time())
+        self.conn.execute(
+            """
+            DELETE FROM address_lists
+             WHERE scope_type=? AND scope_key=? AND kind=?
+            """,
+            (scope_type, scope_key, kind),
+        )
+        flipped = 0
+        for parsed in items:
+            flipped += self.list_delete_sibling(
+                scope_type, scope_key, kind, parsed.pattern,
+            )
+            self.conn.execute(
+                """
+                INSERT INTO address_lists(
+                    scope_type, scope_key, kind, pattern, pattern_type,
+                    source, actor, sample_message_id, created_at, updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    scope_type, scope_key, kind, parsed.pattern,
+                    parsed.pattern_type, source, actor, None, now, now,
+                ),
+            )
+        if source == "dashboard":
+            self.log_event(
+                "list_dashboard_save",
+                detail=(
+                    f"scope={scope_type}:{scope_key} kind={kind} "
+                    f"n={len(items)} flipped={flipped}"
+                    + (f" actor={actor}" if actor else "")
+                ),
+            )
 
     # ----- messages ---------------------------------------------------------
 
@@ -1470,6 +1862,8 @@ def build_folder_map(acc: Account, delim: str) -> dict[str, str]:
         "trained_spam": resolve_folder(acc.trained_spam, delim),
         "ham_train": resolve_folder(acc.ham_train, delim),
         "trained_ham": resolve_folder(acc.trained_ham, delim),
+        "allowlist": resolve_folder(acc.allowlist, delim),
+        "blocklist": resolve_folder(acc.blocklist, delim),
     }
 
 
@@ -1501,7 +1895,10 @@ def ensure_folders(client: IMAPClient, log: logging.Logger, fmap: dict[str, str]
     # We only auto-create the filter-specific training folders.
     REQUIRED = ("inbox", "junk", "trash")
     # Shadow may CREATE these: they are filter-owned, not Inbox/Junk/Trash.
-    AUTO_CREATE = ("spam_train", "trained_spam", "ham_train", "trained_ham")
+    AUTO_CREATE = (
+        "spam_train", "trained_spam", "ham_train", "trained_ham",
+        "allowlist", "blocklist",
+    )
 
     missing: list[str] = []
     for key in REQUIRED:
@@ -1623,6 +2020,80 @@ def parse_envelope(raw: bytes) -> tuple[str | None, str, str]:
         return (msgid or None, subject, sender)
     except Exception:
         return (None, "", "")
+
+
+def iter_list_header_addrs(raw: bytes) -> list[str]:
+    """From, Sender, Reply-To addresses, lowercased, unique, first-seen order."""
+    out: list[str] = []
+    seen: set[str] = set()
+    try:
+        msg = email.message_from_bytes(raw, policy=email.policy.compat32)
+    except Exception:
+        return out
+    for header in ("From", "Sender", "Reply-To"):
+        try:
+            pairs = getaddresses(msg.get_all(header, []))
+        except Exception:
+            continue
+        for _name, addr in pairs:
+            folded = (addr or "").strip().lower()
+            if not folded or "@" not in folded or folded in seen:
+                continue
+            seen.add(folded)
+            out.append(folded)
+    return out
+
+
+def classify_list_hit(
+    acc: Account, db: Db, addrs: list[str]
+) -> ListHit | None:
+    """Highest-specificity list match across all addrs. Allow wins ties."""
+    if not addrs or not acc.actual_name:
+        return None
+    mbox_dom = mailbox_domain(acc.user)
+    domain_key = (
+        mbox_dom if (mbox_dom and acc.list_roster.has_domain(mbox_dom)) else None
+    )
+    rows = db.list_rows_for_match(acc.actual_name, domain_key)
+    by_key: set[tuple[str, str, str, str]] = set()
+    for r in rows:
+        by_key.add((r["scope_type"], r["scope_key"], r["kind"], r["pattern"]))
+
+    hits: list[tuple[int, str, str, str]] = []  # rank, decision, pattern, scope
+    for addr in addrs:
+        host = addr.rsplit("@", 1)[-1] if "@" in addr else ""
+        domain_pat = f"@{host}" if host else None
+        if ("person", acc.actual_name, "allow", addr) in by_key:
+            hits.append((3, "allow", addr, "person"))
+        if ("person", acc.actual_name, "block", addr) in by_key:
+            hits.append((3, "block", addr, "person"))
+        if domain_key:
+            if ("domain", domain_key, "allow", addr) in by_key:
+                hits.append((2, "allow", addr, "domain"))
+            if ("domain", domain_key, "block", addr) in by_key:
+                hits.append((2, "block", addr, "domain"))
+            if domain_pat:
+                if ("domain", domain_key, "allow", domain_pat) in by_key:
+                    hits.append((1, "allow", domain_pat, "domain"))
+                if ("domain", domain_key, "block", domain_pat) in by_key:
+                    hits.append((1, "block", domain_pat, "domain"))
+    if not hits:
+        return None
+    best = max(h[0] for h in hits)
+    at_best = [h for h in hits if h[0] == best]
+    kinds = {h[1] for h in at_best}
+    conflict = "allow" in kinds and "block" in kinds
+    if "allow" in kinds:
+        chosen = next(h for h in at_best if h[1] == "allow")
+    else:
+        chosen = at_best[0]
+    return ListHit(
+        decision=chosen[1],
+        pattern=chosen[2],
+        scope=chosen[3],
+        conflict=conflict,
+        rank=best,
+    )
 
 
 def body_sha256(raw: bytes) -> str:
@@ -2199,7 +2670,49 @@ def scan_inbox(
                     db.log_event("scan", msgid, detail=f"score={score:.2f} mode={acc.mode}")
                 log.debug("scored %s = %.2f", msgid, score)
 
-            if score < acc.threshold:
+            addrs = iter_list_header_addrs(raw)
+            hit = classify_list_hit(acc, db, addrs)
+            if hit is not None and hit.decision == "allow":
+                detail = (
+                    f"pattern={hit.pattern} scope={hit.scope} "
+                    f"score={score:.2f} rank={hit.rank}"
+                )
+                if acc.mode == "shadow":
+                    log.info(
+                        "[shadow] allowlist hit %s %s subj=%r",
+                        msgid, detail, subject[:80],
+                    )
+                else:
+                    log.info("allowlist hit %s %s", msgid, detail)
+                with db.tx():
+                    db.update_imap_message(
+                        fmap["inbox"], uv, uid, our_action="allowlisted"
+                    )
+                    db.log_event("allowlisted", msgid, detail=detail)
+                    if hit.conflict:
+                        db.log_event("list_conflict", msgid, detail=detail)
+                last_terminal = uid
+                continue
+            over_threshold = score >= acc.threshold
+            if hit is not None and hit.decision == "block":
+                over_threshold = True
+                detail = (
+                    f"pattern={hit.pattern} scope={hit.scope} "
+                    f"score={score:.2f} rank={hit.rank}"
+                )
+                if acc.mode == "shadow":
+                    log.info(
+                        "[shadow] blocklist hit %s %s subj=%r",
+                        msgid, detail, subject[:80],
+                    )
+                else:
+                    log.info("blocklist hit %s %s", msgid, detail)
+                with db.tx():
+                    db.log_event("blocklisted", msgid, detail=detail)
+                    if hit.conflict:
+                        db.log_event("list_conflict", msgid, detail=detail)
+
+            if not over_threshold:
                 last_terminal = uid
                 continue
 
@@ -2665,6 +3178,102 @@ def drain_train_ham(
     )
 
 
+def drain_list_allow(
+    client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fmap: dict[str, str]
+) -> None:
+    _drain_list_folder(client, db, log, acc, fmap, kind="allow")
+
+
+def drain_list_block(
+    client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fmap: dict[str, str]
+) -> None:
+    _drain_list_folder(client, db, log, acc, fmap, kind="block")
+
+
+def _drain_list_folder(
+    client: IMAPClient,
+    db: Db,
+    log: logging.Logger,
+    acc: Account,
+    fmap: dict[str, str],
+    *,
+    kind: str,
+) -> None:
+    """Person-list upsert/flip from INBOX/Allowlist or Blocklist, then MOVE
+    the message back to Inbox. From address only; never a domain pattern."""
+    assert kind in {"allow", "block"}
+    src_key = "allowlist" if kind == "allow" else "blocklist"
+    folder = fmap[src_key]
+    try:
+        uv = select_with_uidvalidity_check(client, db, folder, log)
+    except IMAPClientError as ex:
+        log.warning("select %s failed: %s", folder, redact_log(str(ex), acc.password))
+        return
+    uids = list(client.search(["ALL"]) or [])
+    if not uids:
+        return
+    uids = uids[: acc.max_list_per_run]
+    to_move: list[int] = []
+    for uid, data, oversize in fetch_under_cap(client, uids):
+        if SHUTDOWN.is_set():
+            return
+        to_move.append(uid)
+        if oversize:
+            _log_skipped_oversize(
+                db, log, uid=uid, folder=folder, size=_rfc822_size(data),
+            )
+            continue
+        raw = _body_bytes(data)
+        if not raw:
+            log.info("list drain uid=%s: empty body, returning to Inbox", uid)
+            continue
+        msgid, _subject, sender = parse_envelope(raw)
+        if not sender:
+            log.info("list drain uid=%s: empty From, returning to Inbox", uid)
+            continue
+        try:
+            parsed = parse_list_line(sender, allow_domain=False)
+        except ValueError as ex:
+            log.info("list drain uid=%s from=%r: %s", uid, sender, ex)
+            continue
+        if parsed is None:
+            continue
+        with db.tx():
+            outcome = db.list_flip_address(
+                "person", acc.actual_name, kind, parsed,
+                source="imap", actor=acc.name,
+                sample_message_id=msgid, max_entries=acc.max_list_entries,
+            )
+            if outcome == "capped":
+                db.log_event(
+                    "list_cap", msgid,
+                    detail=f"kind={kind} pattern={parsed.pattern}",
+                )
+                log.warning(
+                    "list_cap %s %s (max_list_entries=%d)",
+                    kind, parsed.pattern, acc.max_list_entries,
+                )
+            elif outcome == "flipped":
+                db.log_event(
+                    "list_flip", msgid,
+                    detail=f"kind={kind} pattern={parsed.pattern}",
+                )
+            else:
+                db.log_event(
+                    "list_imap_add", msgid,
+                    detail=f"kind={kind} pattern={parsed.pattern} outcome={outcome}",
+                )
+    if not to_move:
+        return
+    try:
+        client.move(to_move, fmap["inbox"])
+    except IMAPClientError as ex:
+        log.warning(
+            "list drain MOVE %s -> Inbox failed: %s",
+            folder, redact_log(str(ex), acc.password),
+        )
+
+
 # ----- retention ----------------------------------------------------------
 
 
@@ -2833,6 +3442,12 @@ def _run_account(acc: Account, db: Db) -> None:
                 if SHUTDOWN.is_set():
                     break
                 drain_train_ham(client, db, log, acc, acc.folder_map)
+                if SHUTDOWN.is_set():
+                    break
+                drain_list_allow(client, db, log, acc, acc.folder_map)
+                if SHUTDOWN.is_set():
+                    break
+                drain_list_block(client, db, log, acc, acc.folder_map)
                 if SHUTDOWN.is_set():
                     break
 

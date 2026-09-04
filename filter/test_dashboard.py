@@ -427,6 +427,38 @@ def test_messages_route_uses_sibling_learning_query(dashboard_db, monkeypatch):
     assert b">ham<" in resp.data
 
 
+def test_messages_sort_by_score(dashboard_db, monkeypatch):
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    resp = client.get("/messages")
+    assert b'sort=score' in resp.data
+    assert b'dir=desc' in resp.data
+    desc = client.get("/messages?sort=score&dir=desc")
+    assert desc.status_code == 200
+    html = desc.data.decode()
+    assert html.index("ALPHA SUBJECT") < html.index("BETA SUBJECT")
+    assert 'dir=asc' in html
+    asc = client.get("/messages?sort=score&dir=asc")
+    html = asc.data.decode()
+    assert html.index("BETA SUBJECT") < html.index("ALPHA SUBJECT")
+    assert 'dir=desc' in html
+
+
+def test_learned_sort_by_event(dashboard_db, monkeypatch):
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    resp = client.get("/learned")
+    assert b'sort=event' in resp.data
+    assert b'dir=asc' in resp.data
+    asc = client.get("/learned?sort=event&dir=asc")
+    assert asc.status_code == 200
+    html = asc.data.decode()
+    assert html.index("ALPHA SUBJECT") < html.index("BETA SUBJECT")
+    desc = client.get("/learned?sort=event&dir=desc")
+    html = desc.data.decode()
+    assert html.index("BETA SUBJECT") < html.index("ALPHA SUBJECT")
+
+
 def test_rspamd_stats_are_admin_only(dashboard_db, monkeypatch):
     calls = []
 
@@ -461,7 +493,10 @@ def test_security_headers_and_secure_cookie(monkeypatch):
         "/login", data={"username": "admin", "password": "pw"})
 
     assert resp.status_code == 302
-    assert resp.headers["Content-Security-Policy"].startswith("default-src 'none'")
+    csp = resp.headers["Content-Security-Policy"]
+    assert csp.startswith("default-src 'none'")
+    assert "script-src 'self'" in csp
+    assert "script-src 'unsafe-inline'" not in csp
     assert resp.headers["X-Content-Type-Options"] == "nosniff"
     assert resp.headers["X-Frame-Options"] == "DENY"
     assert resp.headers["Referrer-Policy"] == "no-referrer"
@@ -551,3 +586,199 @@ def test_database_error_returns_hardened_503(dashboard_db, tmp_path, monkeypatch
     assert resp.mimetype == "text/plain"
     assert b"state DB error" in resp.data
     assert resp.headers["Cache-Control"] == "no-store"
+
+
+def _list_yaml(tmp_path):
+    path = tmp_path / "accounts.yml"
+    path.write_text(
+        "list_domains:\n"
+        "  - domain: rjmetalfab.com\n"
+        "    type: company\n"
+        "accounts:\n"
+        "  - name: a\n"
+        "    imap_host: h\n"
+        "    user: u@rjmetalfab.com\n"
+        "    password: x\n"
+        "    actual_name: Rich Eizenhoefer\n"
+    )
+    return path
+
+
+def test_admin_list_page_and_js(dashboard_db, tmp_path, monkeypatch):
+    monkeypatch.setattr(d, "CONFIG_PATH", _list_yaml(tmp_path))
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    resp = client.get("/lists/domains")
+    assert resp.status_code == 200
+    assert b"/lists.js" in resp.data
+    assert b"list-body-hl" in resp.data
+    assert b"rjmetalfab.com" in resp.data
+    resp = client.get("/lists/users")
+    assert resp.status_code == 200
+    assert b"/lists.js" in resp.data
+    assert b"Rich Eizenhoefer" in resp.data
+    js = client.get("/lists.js")
+    assert js.status_code == 200
+    assert b"list-editor" in js.data
+    resp = client.get("/")
+    assert b"Domain lists" in resp.data
+    assert b"User lists" in resp.data
+
+
+def test_non_admin_lists_forbidden(dashboard_db, tmp_path, monkeypatch):
+    monkeypatch.setattr(d, "CONFIG_PATH", _list_yaml(tmp_path))
+    user = d._User("viewer", "plain:stable", False, frozenset({"acct-alpha"}))
+    client = _authenticated_client(monkeypatch, user)
+    assert client.get("/lists/domains").status_code == 403
+    assert client.get("/lists/users").status_code == 403
+    assert b"Domain lists" not in client.get("/").data
+
+
+def test_list_post_requires_csrf(dashboard_db, tmp_path, monkeypatch):
+    monkeypatch.setattr(d, "CONFIG_PATH", _list_yaml(tmp_path))
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    resp = client.post(
+        "/lists/domains",
+        data={"scope": "rjmetalfab.com", "kind": "allow", "body": "a@x.com\n"},
+    )
+    assert resp.status_code == 400
+    import filter as f
+    f.DB_PATH = d.DB_PATH
+    db = f.Db("_dashboard")
+    assert db.list_get("domain", "rjmetalfab.com", "allow") == []
+    db.close()
+
+
+def test_list_post_invalid_line_does_not_persist(dashboard_db, tmp_path, monkeypatch):
+    monkeypatch.setattr(d, "CONFIG_PATH", _list_yaml(tmp_path))
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    client.get("/lists/domains")
+    with client.session_transaction() as sess:
+        token = sess["csrf"]
+    resp = client.post(
+        "/lists/domains",
+        data={
+            "csrf_token": token,
+            "scope": "rjmetalfab.com",
+            "kind": "allow",
+            "body": "a @x.com\n",
+        },
+    )
+    assert resp.status_code == 400
+    assert b"whitespace" in resp.data
+    import filter as f
+    f.DB_PATH = d.DB_PATH
+    db = f.Db("_dashboard")
+    assert db.list_get("domain", "rjmetalfab.com", "allow") == []
+    db.close()
+
+
+def test_list_post_person_rejects_domain_pattern(dashboard_db, tmp_path, monkeypatch):
+    monkeypatch.setattr(d, "CONFIG_PATH", _list_yaml(tmp_path))
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    client.get("/lists/users")
+    with client.session_transaction() as sess:
+        token = sess["csrf"]
+    resp = client.post(
+        "/lists/users",
+        data={
+            "csrf_token": token,
+            "scope": "Rich Eizenhoefer",
+            "kind": "allow",
+            "body": "@x.com\n",
+        },
+    )
+    assert resp.status_code == 400
+    assert b"person lists" in resp.data or b"whole-domain" in resp.data
+
+
+def test_list_post_domain_normalizes_bare_host(dashboard_db, tmp_path, monkeypatch):
+    monkeypatch.setattr(d, "CONFIG_PATH", _list_yaml(tmp_path))
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    client.get("/lists/domains?scope=rjmetalfab.com&kind=allow")
+    with client.session_transaction() as sess:
+        token = sess["csrf"]
+    resp = client.post(
+        "/lists/domains",
+        data={
+            "csrf_token": token,
+            "scope": "rjmetalfab.com",
+            "kind": "allow",
+            "body": "x.com\n",
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    import filter as f
+    f.DB_PATH = d.DB_PATH
+    db = f.Db("_dashboard")
+    assert db.list_get("domain", "rjmetalfab.com", "allow") == ["@x.com"]
+    db.close()
+
+
+def test_list_post_allow_flips_block_sibling(dashboard_db, tmp_path, monkeypatch):
+    monkeypatch.setattr(d, "CONFIG_PATH", _list_yaml(tmp_path))
+    import filter as f
+    f.DB_PATH = d.DB_PATH
+    db = f.Db("_dashboard")
+    with db.tx():
+        db.list_upsert_address(
+            "domain", "rjmetalfab.com", "block",
+            f.ParsedPattern("a@x.com", "address"),
+            source="dashboard", max_entries=1000,
+        )
+    db.close()
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    client.get("/lists/domains?scope=rjmetalfab.com&kind=allow")
+    with client.session_transaction() as sess:
+        token = sess["csrf"]
+    resp = client.post(
+        "/lists/domains",
+        data={
+            "csrf_token": token,
+            "scope": "rjmetalfab.com",
+            "kind": "allow",
+            "body": "a@x.com\n",
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    db = f.Db("_dashboard")
+    assert db.list_get("domain", "rjmetalfab.com", "allow") == ["a@x.com"]
+    assert db.list_get("domain", "rjmetalfab.com", "block") == []
+    db.close()
+
+
+def test_list_post_unknown_scope_404(dashboard_db, tmp_path, monkeypatch):
+    monkeypatch.setattr(d, "CONFIG_PATH", _list_yaml(tmp_path))
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    client.get("/lists/domains")
+    with client.session_transaction() as sess:
+        token = sess["csrf"]
+    resp = client.post(
+        "/lists/domains",
+        data={
+            "csrf_token": token,
+            "scope": "not-a-domain.com",
+            "kind": "allow",
+            "body": "a@x.com\n",
+        },
+    )
+    assert resp.status_code == 404
+
+
+def test_non_admin_list_post_403(dashboard_db, tmp_path, monkeypatch):
+    monkeypatch.setattr(d, "CONFIG_PATH", _list_yaml(tmp_path))
+    user = d._User("viewer", "plain:stable", False, frozenset({"acct-alpha"}))
+    client = _authenticated_client(monkeypatch, user)
+    resp = client.post(
+        "/lists/domains",
+        data={"scope": "rjmetalfab.com", "kind": "allow", "body": "a@x.com\n"},
+    )
+    assert resp.status_code == 403

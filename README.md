@@ -3,7 +3,7 @@
 Docker-based IMAP spam filter for any IMAP server that supports IDLE.
 Designed to run 24/7 on Unraid (templates included) or any Linux host with
 Docker. Per-account modes, move-based Bayes training, never deletes mail.
-Optional read-only web dashboard with per-user access levels.
+Optional web dashboard with per-user access; admins can edit allow/block lists.
 Multi-arch image (`linux/amd64`, `linux/arm64`).
 
 ## Architecture
@@ -20,7 +20,10 @@ Four containers on a shared `spamnet` Docker network:
 Per-account operating modes (set in `accounts.yml`, promoted manually):
 - **shadow**  - scan + log only. No writes to Inbox, Junk, or Trash.
   Train-* folders may still be created and drained so Bayes can be
-  bootstrapped during evaluation.
+  bootstrapped during evaluation. `INBOX/Allowlist` and `INBOX/Blocklist`
+  may also be created and drained (person-list the From address, then
+  MOVE the message back to Inbox). Inbox/Junk/Trash are not auto-junked
+  in shadow.
 - **flag**    - shadow + sets `\Flagged` on suspect Inbox mail; retention on
 - **move**    - flag + after `move_grace_seconds`, MOVEs Inbox → Junk
 
@@ -445,6 +448,13 @@ override `defaults:` values; both override built-in defaults from `filter.py`.
 | `imap_host` | `imap.example.de` | hostname only, no scheme |
 | `user` | `you@example.de` | login username (usually the full address) |
 | `password` | `"..."` | quote to keep YAML happy with special chars |
+| `actual_name` | `Rich Eizenhoefer` | person-list key; same string on every mailbox that person owns |
+
+### Domain roster (root key, not per-account)
+
+| Key | Default | Notes |
+| --- | --- | --- |
+| `list_domains` | omitted | list of `{domain, type}` maps (`company` or `personal`). Domains that share allow/block lists. Empty/omitted → person lists only. Dashboard cannot edit this roster. `type` is metadata in v1. |
 
 ### Connection
 
@@ -466,7 +476,12 @@ override `defaults:` values; both override built-in defaults from `filter.py`.
 | `trained_spam` | `Junk/Trained-Spam` | post-learn archive (auto-trashed by retention) |
 | `ham_train` | `Junk/Train-Ham` | drop (or **copy**) known-good mail here for ham training |
 | `trained_ham` | `Junk/Trained-Ham` | post-learn archive for ham (auto-trashed by retention) |
+| `allowlist` | `INBOX/Allowlist` | drag mail here to person-allow the From address; filter MOVEs it back to Inbox |
+| `blocklist` | `INBOX/Blocklist` | drag mail here to person-block the From address; filter MOVEs it back to Inbox |
 | `auto_special_folders` | `true` | set `false` to use literal `junk`/`trash` names |
+
+IMAP drags persist immediately (no Save). The dashboard Save button is
+the only batched editor.
 
 All four train/trained folders live under the server's junk parent and are
 auto-relocated together when SPECIAL-USE remaps the junk name (e.g. when
@@ -502,6 +517,8 @@ user's mailbox.
 | `max_moves_per_hour` | `30` | breach triggers safe-mode for the account |
 | `max_learns_per_hour` | `50` | breach triggers learning-only safe-mode |
 | `max_train_per_run` | `100` | cap per `drain_train_spam` batch |
+| `max_list_per_run` | `100` | cap per IMAP allow/block folder drain (slice 11) |
+| `max_list_entries` | `1000` | cap per `(scope, kind)` list |
 | `flip_flop_cooldown_seconds` | `600` | block opposite-class relearn on the same IMAP UID; `0` disables |
 | `safe_mode_unseen_cap` | `500` | sticky safe-mode if Inbox UNSEEN exceeds this; raise for accounts that normally keep many unread |
 
@@ -530,10 +547,22 @@ in `accounts.yml` trains its own Bayes namespace keyed by its `user`.
 | --- | --- | --- |
 | `bayes_user` | unset | HTTP `Rcpt` on scan (and `Delivered-To` on learn); overrides the per-recipient default |
 
-Use `bayes_user` to pool training across several of your own mailboxes
-while leaving other users (e.g. family members) isolated. Set the same
-`bayes_user` value on every account that should share data. Accounts that
-omit the field stay isolated under their own IMAP user.
+Use `bayes_user` to pool training across mailboxes. Accounts that omit
+the field stay isolated under their own IMAP user. Allow/block lists
+(design-arch slices 10–12) are a separate policy layer and do not share
+this identity.
+
+**One VPS notebook** (typical for a single-site deployment): set the
+same token once so every account inherits it. Do not also set a
+per-account `bayes_user` unless you intend a split.
+
+```yaml
+defaults:
+  bayes_user: bytelord
+```
+
+**Subset pooling** (family isolated): set the same value only on the
+accounts that should share.
 
 ```yaml
 accounts:
@@ -552,10 +581,18 @@ accounts:
 ```
 
 Switching an existing account from per-recipient to a `bayes_user` value
-(or vice versa) starts a fresh Bayes namespace. The prior tokens stay in
-Redis under the old key but are no longer consulted. Either re-train under
-the new identity (drop mail back into Train-Spam) or migrate the keys in
-Redis manually.
+(or vice versa) starts a **fresh** Bayes namespace. `min_learns` (200) is
+per notebook, so Bayes will not contribute until that notebook is trained
+again. The prior tokens stay in Redis under the old key but are no longer
+consulted. This project does not merge Redis keys.
+
+To re-feed an existing Trained-* corpus into the new notebook, after
+`bayes_user` is set, run `bootstrap_train.py` against each account's
+`Trained-Spam` / `Trained-Ham` IMAP folders and **omit `--move-to`** so
+messages stay put. Use the real IMAP names (SPECIAL-USE may be
+`Junk Email/Trained-Spam`). Do this while still in `shadow` so retention
+cannot MOVE Trained-* to Trash. Alternative: MOVE Trained-* → Train-* and
+let the running filter drain.
 
 ---
 
@@ -595,11 +632,13 @@ bootstrap. A full Redis **fails writes** (learns), it does not evict.
 
 ## Web dashboard (optional)
 
-A small read-only Flask dashboard is available for at-a-glance stats:
+A small Flask dashboard is available for at-a-glance stats:
 a health banner, filter KPIs, a 14-day scan trend, rspamd Bayes
-progress, recent scans/learns, and per-account activity. Responsive,
-dark-mode aware. **Off by default.** No actions, no buttons —
-read-only.
+progress, recent scans/learns, and per-account activity. Admins can
+also edit domain and user allow/block lists from a textarea (one
+pattern per line). IMAP folder drags still apply immediately and do
+not wait for dashboard Save. Responsive, dark-mode aware. **Off by
+default.** Scan/learn/config pages stay read-only.
 
 When enabled at process startup, the dashboard listens internally on **port
 8080**; pick any free host port in your orchestrator's port mapping.
@@ -630,7 +669,8 @@ limits before relying on dashboard access after upgrading.
 **Access levels.** The helper also asks for a scope:
 
 - `admin` — sees everything: all accounts plus the system-wide rspamd
-  lifetime totals and Bayes stats.
+  lifetime totals and Bayes stats, and can edit Domain lists / User
+  lists.
 - one or more **account names** (the `name:` values from
   `accounts.yml`) — a restricted user who sees only those accounts'
   scans, learns, events and per-account stats, and not the global
@@ -682,6 +722,8 @@ Pages:
 - `/events`   tail of the full events table
 - `/accounts` per-account scan / learn / fail counts, total spam &
               ham learns, plus safe-mode
+- `/lists/domains` admin: domain allow/block textarea (YAML roster)
+- `/lists/users` admin: person allow/block textarea (`actual_name`)
 
 ---
 
@@ -778,17 +820,15 @@ Restore is the reverse: stop the four containers, extract the tar over
 
 ## Known limitations
 
-- **No allowlist.** Intentional. rspamd's DKIM/SPF symbols already give
-  negative score to aligned mail. Fix misclassifications by training, not
-  by allowlisting.
 - **IMAP scoring has no SMTP client IP.** The filter does not send `Ip`
   or `Helo` to `/checkv2`. RBL `from` lookups, SPF, and DMARC envelope
   alignment are degraded; they rely on `Received:` chains in the message
   plus Bayes/fuzzy/neural. HTTP `From` is the message From (not the IMAP
   recipient). `Rcpt` remains the Bayes identity (`bayes_user` or the
   account user).
-- **Dashboard is read-only.** It shows activity; it has no controls to
-  move, learn, or change config. Inspect deeper via SQLite if needed.
+- **Dashboard writes are list-only.** Admins can edit allow/block
+  lists; there are no controls to move, learn, or change accounts.yml.
+  Inspect deeper via SQLite if needed.
 - **IDLE re-issued every `idle_timeout` (default 1500s).** Lower it if your
   server drops idle connections faster.
 - **No multi-host coordination.** Don't run two filter instances against
@@ -815,6 +855,7 @@ Restore is the reverse: stop the four containers, extract the tar over
 │   ├── requirements.txt
 │   ├── filter.py
 │   ├── dashboard.py
+│   ├── lists.js
 │   └── bootstrap_train.py
 ├── redis/                        # Redis server config template
 ├── rspamd/local.d/               # rspamd config templates + static configs

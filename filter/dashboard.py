@@ -1,10 +1,11 @@
-"""Read-only web dashboard for the imap-spamfilter.
+"""Web dashboard for the imap-spamfilter.
 
 Disabled by default. Enable it by configuring at least one dashboard
 user (see below); the daemon then serves it on a fixed internal port
-8080 and the orchestrator maps a host port. Reads the SQLite state DB
-read-only and queries rspamd /stat. Intended for LAN access behind a
-reverse proxy that terminates TLS.
+8080 and the orchestrator maps a host port. Most pages read the SQLite
+state DB read-only. Admin list editors (Domain lists / User lists) can
+write allow/block rows. Intended for LAN / VPN access behind a reverse
+proxy that terminates TLS.
 
 Authentication uses a signed client-side session with a real login form.
 Each session is bound to the active credential verifier, so password
@@ -43,6 +44,7 @@ import requests
 from flask import (
     Flask,
     Response,
+    abort,
     redirect,
     render_template_string,
     request,
@@ -81,6 +83,8 @@ LOGIN_FAIL_STATE_MAX = 2048
 LOGIN_USERNAME_MAX = 128
 LOGIN_PASSWORD_MAX = 1024
 LOGIN_REQUEST_MAX = 16 * 1024
+LIST_POST_MAX = 256 * 1024
+LISTS_JS_PATH = Path(__file__).with_name("lists.js")
 _NEXT_OK = re.compile(r"^/(?:[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*)?$")
 _DUMMY_VERIFIER = (
     f"pbkdf2${PBKDF2_ITERATIONS}${'00' * 16}${'00' * 32}"
@@ -335,8 +339,8 @@ app.config.update(
 @app.after_request
 def _security_headers(resp: Response) -> Response:
     resp.headers["Content-Security-Policy"] = (
-        "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; "
-        "form-action 'self'; base-uri 'none'"
+        "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; "
+        "img-src 'self'; form-action 'self'; base-uri 'none'"
     )
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["X-Frame-Options"] = "DENY"
@@ -470,6 +474,38 @@ def _requires_auth(view):
     return wrapped
 
 
+def _requires_admin(view):
+    """Auth plus admin. Non-admins get 403 (not a login redirect)."""
+    @wraps(view)
+    @_requires_auth
+    def wrapped(*args, **kwargs):
+        if not _current_scope()[0]:
+            abort(403)
+        return view(*args, **kwargs)
+    return wrapped
+
+
+def _csrf_token() -> str:
+    tok = session.get("csrf")
+    if not tok:
+        tok = secrets.token_hex(32)
+        session["csrf"] = tok
+    return tok
+
+
+def _check_csrf() -> None:
+    got = request.form.get("csrf_token") or ""
+    want = session.get("csrf") or ""
+    if not want or not hmac.compare_digest(got, want):
+        abort(400)
+
+
+@app.before_request
+def _list_post_size() -> None:
+    if request.path.startswith("/lists/") and request.method == "POST":
+        request.max_content_length = LIST_POST_MAX
+
+
 # ----- helpers --------------------------------------------------------------
 
 
@@ -478,6 +514,15 @@ def _db() -> sqlite3.Connection:
     uri = f"file:{DB_PATH}?mode=ro"
     conn = sqlite3.connect(uri, uri=True, check_same_thread=False, timeout=5)
     conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _db_rw() -> sqlite3.Connection:
+    """Writable connection for list GET/POST only."""
+    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     return conn
 
 
@@ -551,6 +596,40 @@ def _score_class(s):
     if f >= 4:
         return "score-mid"
     return ""
+
+
+def _parse_dir(raw: str | None, default: str = "desc") -> str:
+    v = (raw or "").strip().lower()
+    return v if v in ("asc", "desc") else default
+
+
+def _sort_th(
+    label: str,
+    col: str,
+    current: str,
+    direction: str,
+    *,
+    extra: str = "",
+    css: str = "",
+    first_dir: str = "desc",
+) -> str:
+    """Clickable column header. Toggles asc/desc when already sorting
+    by this column; otherwise starts at `first_dir`."""
+    if current == col:
+        next_dir = "asc" if direction == "desc" else "desc"
+        marker = " ▲" if direction == "asc" else " ▼"
+        cls = f"{css} sort-active".strip()
+    else:
+        next_dir = first_dir
+        marker = ""
+        cls = css
+    parts = [p for p in (extra, f"sort={col}", f"dir={next_dir}") if p]
+    href = "?" + "&".join(parts)
+    cls_attr = f' class="{_h(cls)}"' if cls else ""
+    return (
+        f'<th{cls_attr}><a class="th-sort" href="{_h(href)}">'
+        f"{_h(label)}{marker}</a></th>"
+    )
 
 
 def _bar(value: float, maximum: float, cls: str = "ok") -> str:
@@ -751,6 +830,9 @@ svg.spark polyline { fill:none; stroke:var(--accent); stroke-width:2;
   border:1px solid var(--border); color:var(--text); font-size:0.85em; }
 .filterbar a.active { background:var(--accent); border-color:var(--accent);
   color:#fff; }
+th a.th-sort { color:inherit; text-decoration:none; }
+th a.th-sort:hover { color:var(--accent); }
+th.sort-active a.th-sort { color:var(--accent); }
 footer { font-size:0.78em; color:var(--muted); padding:1em 1.3em;
   text-align:center; }
 .login-wrap { max-width:320px; margin:8vh auto; padding:0 1em; }
@@ -771,6 +853,25 @@ footer { font-size:0.78em; color:var(--muted); padding:1em 1.3em;
   nav { padding:0.5em 0.6em; }
   .subj { max-width:60vw; }
 }
+.list-chrome { position:sticky; top:0; background:var(--bg); padding:0.4em 0 0.8em;
+  z-index:1; border-bottom:1px solid var(--border); }
+.list-chrome select, .list-chrome button, .list-chrome label { margin-right:0.6em; }
+.list-chrome button:disabled { opacity:0.45; cursor:not-allowed; }
+.list-search { display:flex; gap:0.4em; margin:0.8em 0 0.4em; align-items:center; }
+.list-search input { flex:1; padding:0.45em 0.6em; border-radius:7px;
+  border:1px solid var(--border); background:var(--bg); color:var(--text); }
+.list-body-wrap { position:relative; border:1px solid var(--border);
+  border-radius:7px; background:var(--bg); }
+.list-body, .list-body-hl { width:100%; min-height:22em;
+  font-family:ui-monospace,monospace; font-size:0.92em; line-height:1.45;
+  padding:0.6em; margin:0; white-space:pre-wrap; overflow-wrap:anywhere; }
+.list-body-hl { position:absolute; inset:0; border:0; overflow:hidden;
+  pointer-events:none; color:transparent; background:transparent; z-index:0; }
+.list-body-hl mark { background:var(--warn-bg); color:transparent; border-radius:2px; }
+.list-body { position:relative; z-index:1; display:block; border:0;
+  background:transparent; color:var(--text); resize:vertical; }
+.list-err { background:var(--bad-bg); color:var(--bad); border-radius:7px;
+  padding:0.5em 0.7em; margin:0.6em 0; }
 """
 
 BASE = """<!doctype html>
@@ -789,6 +890,10 @@ BASE = """<!doctype html>
   <a href="/learned" {% if active=='learned' %}class="active"{% endif %}>Learned</a>
   <a href="/events" {% if active=='events' %}class="active"{% endif %}>Events</a>
   <a href="/accounts" {% if active=='accounts' %}class="active"{% endif %}>Accounts</a>
+  {% if is_admin %}
+  <a href="/lists/domains" {% if active=='lists-domains' %}class="active"{% endif %}>Domain lists</a>
+  <a href="/lists/users" {% if active=='lists-users' %}class="active"{% endif %}>User lists</a>
+  {% endif %}
   <span class="spacer"></span>
   {% if user %}<span class="who">{{ user }}{% if is_admin %} &middot; admin{% endif %}</span>
   <form method="post" action="/logout" class="logout">
@@ -799,7 +904,8 @@ BASE = """<!doctype html>
 <h1>{{ title }}</h1>
 {{ body|safe }}
 </main>
-<footer>imap-spamfilter dashboard &middot; read-only</footer>
+<footer>imap-spamfilter dashboard &middot; list edits: admin only</footer>
+<script src="/lists.js" defer></script>
 </body></html>
 """
 
@@ -848,6 +954,12 @@ def favicon():
     """Serve the project logo as the favicon. No auth - it is only the
     logo, and browsers request favicons without credentials."""
     return send_file(FAVICON_PATH, mimetype="image/png", max_age=86400)
+
+
+@app.route("/lists.js")
+def lists_js():
+    # Short TTL so list-editor UX fixes reach browsers without a hard refresh.
+    return send_file(LISTS_JS_PATH, mimetype="text/javascript", max_age=60)
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -1124,6 +1236,17 @@ def messages():
         where = "AND our_score BETWEEN 4 AND 8"
     elif band == "low":
         where = "AND our_score < 4"
+    sort = (request.args.get("sort") or "").strip().lower()
+    if sort != "score":
+        sort = ""
+    direction = _parse_dir(request.args.get("dir"), "desc")
+    if sort == "score":
+        order = (
+            f"m.our_score {direction.upper()}, "
+            "COALESCE(m.received_at, m.last_seen) DESC"
+        )
+    else:
+        order = "COALESCE(m.received_at, m.last_seen) DESC"
     sc, sp = _scope_clause("AND", "m.account")
     with _db() as c:
         rows = c.execute(
@@ -1143,7 +1266,7 @@ def messages():
                    ) AS learned_as
               FROM messages m
              WHERE m.our_score IS NOT NULL {where}{sc}
-             ORDER BY COALESCE(m.received_at, m.last_seen) DESC LIMIT 200
+             ORDER BY {order} LIMIT 200
             """, sp).fetchall()
     body_rows = "".join(
         f'<tr><td>{_fmt_ts(r["received_at"] or r["last_seen"])}</td>'
@@ -1156,16 +1279,22 @@ def messages():
         f'<td><span class="muted">{_h((r["sender"] or "")[:50])}</span></td>'
         f'<td><span class="subj">{_h(decode_rfc2047(r["subject"]) or "-")}</span></td></tr>'
         for r in rows)
+    extra = f"band={band}" if band != "all" else ""
+    score_th = _sort_th(
+        "Score", "score", sort, direction, extra=extra, css="num",
+        first_dir="desc",
+    )
     bands = [("all", "all"), ("spam", "score >= 8"),
              ("mid", "score 4-8"), ("low", "score < 4")]
+    sort_qs = f"&sort=score&dir={direction}" if sort == "score" else ""
     filt = "".join(
-        f'<a href="?band={b}" class="{"active" if band==b else ""}">'
+        f'<a href="?band={b}{sort_qs}" class="{"active" if band==b else ""}">'
         f"{_h(lbl)}</a>" for b, lbl in bands)
     body = (
         f'<div class="filterbar">{filt}</div>'
         '<div class="card"><div class="tw"><table>'
-        "<tr><th>When</th><th>Account</th><th class=num>Score</th>"
-        "<th>Action</th><th>Folder</th><th>Learn</th><th>Sender</th>"
+        "<tr><th>When</th><th>Account</th>" + score_th
+        + "<th>Action</th><th>Folder</th><th>Learn</th><th>Sender</th>"
         "<th>Subject</th></tr>"
         + (body_rows
            or '<tr><td colspan=8 class=muted>(no scored messages yet)</td></tr>')
@@ -1197,17 +1326,28 @@ def _event_table(rows) -> str:
 @app.route("/learned")
 @_requires_auth
 def learned():
+    sort = (request.args.get("sort") or "").strip().lower()
+    if sort != "event":
+        sort = ""
+    direction = _parse_dir(request.args.get("dir"), "asc")
+    if sort == "event":
+        order = f"e.event {direction.upper()}, e.ts DESC"
+    else:
+        order = "e.ts DESC"
     sc, sp = _scope_clause("AND", "e.account")
     with _db() as c:
         rows = c.execute(
             _EVENTS_WITH_SUBJECT
             + "WHERE e.event IN ('learn_spam','learn_ham','learn_giveup',"
-            "'learn_failed')" + sc + " ORDER BY e.ts DESC LIMIT 300",
+            "'learn_failed')" + sc + f" ORDER BY {order} LIMIT 300",
             sp).fetchall()
+    event_th = _sort_th(
+        "Event", "event", sort, direction, first_dir="asc",
+    )
     body = (
         '<div class="card"><div class="tw"><table>'
-        "<tr><th>When</th><th>Age</th><th>Account</th><th>Event</th>"
-        "<th>Subject</th><th>Detail</th></tr>"
+        "<tr><th>When</th><th>Age</th><th>Account</th>" + event_th
+        + "<th>Subject</th><th>Detail</th></tr>"
         + (_event_table(rows)
            or '<tr><td colspan=6 class=muted>(no learn events yet)</td></tr>')
         + "</table></div></div>")
@@ -1230,6 +1370,177 @@ def events():
            or '<tr><td colspan=6 class=muted>(no events yet)</td></tr>')
         + "</table></div></div>")
     return render(f"All events ({len(rows)} shown)", "events", body)
+
+
+def _list_config():
+    """Roster + actual_names from accounts.yml. None if unreadable."""
+    try:
+        from filter import load_accounts
+        accs = load_accounts(CONFIG_PATH)
+    except Exception as ex:  # noqa: BLE001
+        log.warning("list config load failed: %s", ex)
+        return None
+    roster = accs[0].list_roster if accs else None
+    names = sorted({a.actual_name for a in accs if a.actual_name})
+    return roster, names
+
+
+def _list_page(which: str, error: str | None = None, error_line: int | None = None,
+               posted_body: str | None = None):
+    from filter import Db
+    import filter as fmod
+    fmod.DB_PATH = DB_PATH
+
+    cfg = _list_config()
+    if cfg is None:
+        return render(
+            "Lists", f"lists-{which}",
+            '<div class="card list-err">Could not read accounts.yml.</div>',
+        )
+    roster, actual_names = cfg
+    kind = (request.values.get("kind") or "allow").strip().lower()
+    if kind not in ("allow", "block"):
+        abort(400)
+    if which == "domains":
+        options = [
+            (dom, f"{dom} ({typ})") for dom, typ in roster.entries
+        ]
+        scope_type = "domain"
+        default_key = options[0][0] if options else ""
+        allow_domain = True
+        title = "Domain lists"
+        active = "lists-domains"
+        action = "/lists/domains"
+    else:
+        options = [(n, n) for n in actual_names]
+        scope_type = "person"
+        default_key = options[0][0] if options else ""
+        allow_domain = False
+        title = "User lists"
+        active = "lists-users"
+        action = "/lists/users"
+    scope_key = request.values.get("scope") or default_key
+    valid_keys = {k for k, _l in options}
+    if request.method == "POST" and scope_key not in valid_keys:
+        abort(404)
+    if request.method == "GET" and scope_key and scope_key not in valid_keys:
+        abort(404)
+    if not options:
+        body = (
+            '<div class="card"><p class="muted">Nothing to edit yet '
+            "(no roster domains or actual_name values).</p></div>"
+        )
+        return render(title, active, body)
+
+    if request.method == "POST":
+        _check_csrf()
+        from filter import parse_list_text
+        raw_text = request.form.get("body") or ""
+        items, perr = parse_list_text(raw_text, allow_domain=allow_domain)
+        if perr is not None:
+            return _list_page_render(
+                title, active, action, options, scope_key, kind,
+                raw_text, perr.message, perr.line, allow_domain,
+            ), 400
+        import filter as fmod
+        cap = int(fmod.BUILTIN_DEFAULTS["max_list_entries"])
+        # Prefer YAML defaults if any account loaded them
+        cfg_accs = _list_config()
+        if cfg_accs and cfg_accs[0]:
+            # max from first account (defaults merge)
+            from filter import load_accounts
+            accs = load_accounts(CONFIG_PATH)
+            if accs:
+                cap = accs[0].max_list_entries
+        try:
+            db = Db("_dashboard")
+            try:
+                with db.tx():
+                    db.list_replace(
+                        scope_type, scope_key, kind, items,
+                        source="dashboard", actor=session.get("user"),
+                        max_entries=cap,
+                    )
+            finally:
+                db.close()
+        except ValueError as ex:
+            return _list_page_render(
+                title, active, action, options, scope_key, kind,
+                raw_text, str(ex), 1, allow_domain,
+            ), 400
+        return redirect(f"{action}?scope={scope_key}&kind={kind}")
+
+    db = Db("_dashboard")
+    try:
+        lines = db.list_get(scope_type, scope_key, kind)
+    finally:
+        db.close()
+    body_text = posted_body if posted_body is not None else "\n".join(lines)
+    if body_text and not body_text.endswith("\n"):
+        body_text += "\n"
+    return _list_page_render(
+        title, active, action, options, scope_key, kind,
+        body_text, error, error_line, allow_domain,
+    )
+
+
+def _list_page_render(
+    title, active, action, options, scope_key, kind, body_text,
+    error, error_line, allow_domain,
+):
+    opts = "".join(
+        f'<option value="{_h(k)}"{" selected" if k == scope_key else ""}>'
+        f"{_h(lab)}</option>"
+        for k, lab in options
+    )
+    err_html = f'<div class="list-err">{_h(error)}</div>' if error else ""
+    line_attr = f' data-error-line="{int(error_line)}"' if error_line else ""
+    csrf = _h(_csrf_token())
+    allow_checked = " checked" if kind == "allow" else ""
+    block_checked = " checked" if kind == "block" else ""
+    hint = (
+        "One address or domain per line (user@host or @host)."
+        if allow_domain else
+        "One address per line (user@host only)."
+    )
+    html = f"""
+<div class="card">
+<form id="list-editor" method="post" action="{_h(action)}" class="list-form">
+<input type="hidden" name="csrf_token" value="{csrf}">
+<div class="list-chrome">
+  <select id="scope-key" name="scope">{opts}</select>
+  <label><input type="radio" name="kind" value="allow"{allow_checked}> Allow</label>
+  <label><input type="radio" name="kind" value="block"{block_checked}> Block</label>
+  <button type="submit" id="list-save" disabled>Save</button>
+  <button type="button" id="list-cancel" disabled>Cancel</button>
+</div>
+{err_html}
+<p class="muted">{_h(hint)}</p>
+<div class="list-search">
+  <input id="list-search" type="search" placeholder="Find in list" autocomplete="off">
+  <button type="button" id="list-search-clear" aria-label="Clear search">(x)</button>
+  <span id="list-search-status" class="muted"></span>
+</div>
+<div class="list-body-wrap">
+<pre class="list-body-hl" id="list-body-hl" aria-hidden="true"></pre>
+<textarea class="list-body" id="list-body" name="body" spellcheck="false"{line_attr}>{_h(body_text)}</textarea>
+</div>
+</form>
+</div>
+"""
+    return render(title, active, html)
+
+
+@app.route("/lists/domains", methods=["GET", "POST"])
+@_requires_admin
+def lists_domains():
+    return _list_page("domains")
+
+
+@app.route("/lists/users", methods=["GET", "POST"])
+@_requires_admin
+def lists_users():
+    return _list_page("users")
 
 
 @app.route("/accounts")

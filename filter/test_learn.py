@@ -46,6 +46,7 @@ def _mk_account(**over):
         inbox="INBOX", junk="Junk", trash="Trash",
         spam_train="Junk/Train-Spam", trained_spam="Junk/Trained-Spam",
         ham_train="Junk/Train-Ham", trained_ham="Junk/Trained-Ham",
+        allowlist="INBOX/Allowlist", blocklist="INBOX/Blocklist",
         mode="shadow", threshold=8.0, min_threshold_allowed=5.0,
         reject_score_above=100.0,
         move_grace_seconds=60, learn_grace_seconds=300, idle_timeout=1500,
@@ -56,6 +57,8 @@ def _mk_account(**over):
         safe_mode_unseen_cap=500,
         junk_retention_days=10, trained_retention_days=7,
         learn_from_moves=True, auto_special_folders=True,
+        actual_name="Test User",
+        max_list_per_run=100, max_list_entries=1000,
     )
     base.update(over)
     return f.Account(**base)

@@ -19,7 +19,11 @@ LOG = logging.getLogger("test")
 
 
 def _write_accounts(tmp_path: Path, account_lines: str, defaults: str = "") -> Path:
-    body = "accounts:\n  - name: a\n    imap_host: imap.example.com\n    user: u@example.com\n    password: \"x\"\n"
+    body = (
+        "accounts:\n  - name: a\n    imap_host: imap.example.com\n"
+        "    user: u@example.com\n    password: \"x\"\n"
+        "    actual_name: Tester\n"
+    )
     if account_lines:
         body += account_lines
     text = (f"defaults:\n{defaults}" if defaults else "") + body
@@ -53,6 +57,7 @@ def test_tls_mode_none_loopback_allowed(tmp_path):
         "    imap_host: 127.0.0.1\n"
         "    user: u@example.com\n"
         "    password: \"x\"\n"
+        "    actual_name: Tester\n"
         "    tls_mode: none\n"
         "    imap_port: 143\n"
     )

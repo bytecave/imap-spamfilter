@@ -20,7 +20,7 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-COPY filter.py bootstrap_train.py dashboard.py favicon.png ./
+COPY filter.py bootstrap_train.py dashboard.py lists.js favicon.png ./
 
 # Read-only web dashboard; disabled by default. Operator opts in by
 # setting DASHBOARD_USER + DASHBOARD_PASSWORD.
