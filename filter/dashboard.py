@@ -735,6 +735,8 @@ def _kind_badge(event: str) -> str:
         return '<span class="pill pill-bad">spam</span>'
     if event == "learn_ham":
         return '<span class="pill pill-ok">ham</span>'
+    if event == "learn_skipped_list":
+        return '<span class="pill">list-skip</span>'
     return _h(event)
 
 
@@ -1347,6 +1349,8 @@ def _event_table(rows) -> str:
             badge = '<span class="pill pill-bad">spam</span>'
         elif ev == "learn_ham":
             badge = '<span class="pill pill-ok">ham</span>'
+        elif ev == "learn_skipped_list":
+            badge = '<span class="pill">list-skip</span>'
         elif ev in ("learn_failed", "learn_giveup", "scan_failed"):
             badge = f'<span class="pill pill-warn">{_h(ev)}</span>'
         else:
@@ -1376,7 +1380,7 @@ def learned():
         rows = c.execute(
             _EVENTS_WITH_SUBJECT
             + "WHERE e.event IN ('learn_spam','learn_ham','learn_giveup',"
-            "'learn_failed')" + sc + f" ORDER BY {order} LIMIT 300",
+            "'learn_failed','learn_skipped_list')" + sc + f" ORDER BY {order} LIMIT 300",
             sp).fetchall()
     event_th = _sort_th(
         "Event", "event", sort, direction, first_dir="asc",

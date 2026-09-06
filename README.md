@@ -655,9 +655,12 @@ address or `@host` per line). User lists override roster-scoped
 domain lists. Matching uses From and Sender only (not Reply-To).
 A list hit skips rspamd scan (`/checkv2`) so it cannot train Bayes or
 neural; it only changes routing (keep Inbox vs treat as spam).
-IMAP folder drags still apply immediately (From address only) and do
-not wait for dashboard Save. Responsive, dark-mode aware. **Off by
-default.** Scan/learn/config pages stay read-only.
+Train-* / Inbox↔Junk / bootstrap skip Bayes when a list hit
+contradicts the requested class (allow + spam, block + ham); aligned
+learns still run. Remove or flip the list entry, then train again, to
+override. IMAP folder drags still apply immediately (From address
+only) and do not wait for dashboard Save. Responsive, dark-mode aware.
+**Off by default.** Scan/learn/config pages stay read-only.
 
 When enabled at process startup, the dashboard listens internally on **port
 8080**; pick any free host port in your orchestrator's port mapping.

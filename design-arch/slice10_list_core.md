@@ -32,7 +32,10 @@ no dashboard writes.
    key on that exact string and apply to every account sharing it.
 3. Allow/block rows live in SQLite. Matching runs on Inbox scan
    using From + Sender (not Reply-To). Hits override flag/move and
-   skip rspamd scan; Bayes does not learn from a hit.
+   skip rspamd scan; Bayes does not learn from a hit. Train-* /
+   Inbox↔Junk / bootstrap skip `rspamd_learn` when the same From +
+   Sender hit **contradicts** the requested class (allow+spam,
+   block+ham). Aligned learns still run.
 4. Tests lock parser, loader, precedence, and scan routing without
    needing Outlook or the dashboard.
 
@@ -381,5 +384,8 @@ Do not claim IMAP folders or dashboard editors exist until 11/12.
   parses `list_domains`.
 - Inbox scan allow skips junk actions **and rspamd scan**; block forces the mode path
   without Bayes learn or `/checkv2`.
-- `poll_junk` unchanged.
+- Train-* / Inbox↔Junk / bootstrap skip contradictory learns
+  (`learn_skipped_list`); aligned learns still call `rspamd_learn`.
+- `poll_junk` unchanged (except Inbox→Junk learn uses `try_learn`, so
+  the contradiction skip applies there too).
 - Tests in §8 pass.

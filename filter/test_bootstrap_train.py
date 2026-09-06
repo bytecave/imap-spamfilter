@@ -387,3 +387,41 @@ def test_train_folder_dry_run_does_not_write_db(tmp_path, monkeypatch):
     evs = list(db.conn.execute("SELECT event FROM events"))
     assert evs == []
     db.close()
+
+
+def test_train_folder_skips_allowlisted_spam(tmp_path, monkeypatch):
+    db = _mk_learn_db(tmp_path)
+    acc = SimpleNamespace(
+        name="acct",
+        user="user@example.com",
+        bayes_user="bytelord",
+        actual_name="Rich",
+        list_roster=f.ListRoster(),
+    )
+    parsed = f.parse_list_line("sender@example.com", allow_domain=False)
+    with db.tx():
+        assert db.list_upsert_address(
+            "person", "Rich", "allow", parsed,
+            source="dashboard", actor="test", max_entries=1000,
+        ) == "inserted"
+    client = FakeIMAP([1])
+    monkeypatch.setattr(
+        bt, "rspamd_learn",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("no learn")),
+    )
+    f.SHUTDOWN.clear()
+    counts, skipped_folder = bt.train_folder(
+        client, acc,
+        src="Junk/Trained-Spam", kind="spam",
+        dry_run=False, limit=10_000, db=db,
+    )
+    assert skipped_folder is False
+    assert counts["skipped"] == 1
+    assert counts["learned"] == 0
+    assert counts["failed"] == 0
+    row = db.get_imap_message("Junk/Trained-Spam", 1, 1)
+    assert row is not None
+    assert row["learned_as"] is None
+    evs = [r["event"] for r in db.conn.execute("SELECT event FROM events")]
+    assert evs == ["learn_skipped_list"]
+    db.close()

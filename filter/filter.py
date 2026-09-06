@@ -7,7 +7,8 @@ Hard rules enforced in this file:
   * Fail closed: on any uncertainty (rspamd unreachable, parse error,
     folder missing) keep messages in their current folder.
   * No autolearn from rspamd scoring. Bayes learns only from explicit
-    user moves (or the Train-Spam folder).
+    user moves (or the Train-* folders). Allow + spam and block + ham
+    skip rspamd_learn (list contradiction); aligned learns still run.
 """
 
 from __future__ import annotations
@@ -2265,6 +2266,20 @@ def classify_list_hit(
     )
 
 
+def list_blocks_learn(hit: ListHit | None, kind: str) -> bool:
+    """True when a list hit contradicts the requested Bayes class.
+
+    Allow + spam and block + ham must not train. Aligned learns proceed.
+    """
+    if hit is None:
+        return False
+    if kind == "spam" and hit.decision == "allow":
+        return True
+    if kind == "ham" and hit.decision == "block":
+        return True
+    return False
+
+
 def body_sha256(raw: bytes) -> str:
     """Hex SHA-256 of the fetched RFC822 body. Used to correlate MOVE
     across folders; Message-ID is not identity."""
@@ -2537,6 +2552,22 @@ def try_learn(
                 return False
         if not _learn_retry_due(row):
             return False
+    hit = classify_list_hit(acc, db, iter_list_header_addrs(raw))
+    if list_blocks_learn(hit, kind):
+        detail = (
+            f"pattern={hit.pattern} scope={hit.scope} "
+            f"kind={kind} rank={hit.rank}"
+        )
+        log.info("skip learn (%s) for %s: list contradiction %s", kind, label, detail)
+        with db.tx():
+            if row is not None:
+                db.update_imap_message(
+                    folder, uidvalidity, uid,
+                    pending_learn=None, pending_learn_at=None,
+                    learn_retry_count=0, learn_retry_at=None,
+                )
+            db.log_event("learn_skipped_list", msgid, detail=detail)
+        return True
     object_detail = f"{kind} {folder} uv={uidvalidity} uid={uid}"
     if db.in_safe_mode("learning"):
         log.warning("skip learn (%s) for %s: in safe mode", kind, label)

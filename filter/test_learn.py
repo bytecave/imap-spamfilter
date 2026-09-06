@@ -344,3 +344,142 @@ def test_try_learn_flipflop_zero_cooldown_allows_relearn(tmp_path, monkeypatch):
     assert ok is True
     assert db.get_imap_message("Junk", 1, 1)["learned_as"] == "ham"
     assert "learn_ham" in _events(db)
+
+
+RAW_FROM = (
+    b"From: sender@example.com\r\n"
+    b"Subject: hi\r\n"
+    b"Message-ID: <listed@example.com>\r\n"
+    b"\r\nbody\r\n"
+)
+
+
+def _seed_person_list(db, acc, kind, pattern):
+    parsed = f.parse_list_line(pattern, allow_domain=False)
+    assert parsed is not None
+    with db.tx():
+        outcome = db.list_upsert_address(
+            "person", acc.actual_name, kind, parsed,
+            source="dashboard", actor="test", max_entries=1000,
+        )
+    assert outcome == "inserted"
+
+
+def test_list_blocks_learn_matrix():
+    allow = f.ListHit("allow", "a@x.com", "person", False, 4)
+    block = f.ListHit("block", "a@x.com", "person", False, 4)
+    assert f.list_blocks_learn(allow, "spam") is True
+    assert f.list_blocks_learn(allow, "ham") is False
+    assert f.list_blocks_learn(block, "ham") is True
+    assert f.list_blocks_learn(block, "spam") is False
+    assert f.list_blocks_learn(None, "spam") is False
+
+
+def test_try_learn_allow_skips_spam(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account()
+    _pending(db, "listed@example.com", "Junk/Train-Spam", "spam", int(time.time()))
+    _seed_person_list(db, acc, "allow", "sender@example.com")
+    monkeypatch.setattr(
+        f, "rspamd_learn",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no learn")),
+    )
+    ok = f.try_learn(
+        db, LOG, acc, RAW_FROM, "listed@example.com", "spam", reason="train_spam_folder",
+        folder="Junk/Train-Spam", uidvalidity=1, uid=1,
+    )
+    assert ok is True
+    row = db.get_imap_message("Junk/Train-Spam", 1, 1)
+    assert row["pending_learn"] is None
+    assert row["learned_as"] is None
+    assert "learn_skipped_list" in _events(db)
+    assert "learn_spam" not in _events(db)
+
+
+def test_try_learn_allow_still_learns_ham(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account()
+    _pending(db, "listed@example.com", "Junk/Train-Ham", "ham", int(time.time()))
+    _seed_person_list(db, acc, "allow", "sender@example.com")
+    monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: "learned")
+    ok = f.try_learn(
+        db, LOG, acc, RAW_FROM, "listed@example.com", "ham", reason="train_ham_folder",
+        folder="Junk/Train-Ham", uidvalidity=1, uid=1,
+    )
+    assert ok is True
+    assert db.get_imap_message("Junk/Train-Ham", 1, 1)["learned_as"] == "ham"
+    assert "learn_ham" in _events(db)
+
+
+def test_try_learn_block_skips_ham(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account()
+    _pending(db, "listed@example.com", "INBOX", "ham", int(time.time()))
+    _seed_person_list(db, acc, "block", "sender@example.com")
+    monkeypatch.setattr(
+        f, "rspamd_learn",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no learn")),
+    )
+    ok = f.try_learn(
+        db, LOG, acc, RAW_FROM, "listed@example.com", "ham", reason="user revert",
+        folder="INBOX", uidvalidity=1, uid=1,
+    )
+    assert ok is True
+    row = db.get_imap_message("INBOX", 1, 1)
+    assert row["learned_as"] is None
+    assert "learn_skipped_list" in _events(db)
+
+
+def test_try_learn_block_still_learns_spam(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account()
+    _pending(db, "listed@example.com", "Junk", "spam", int(time.time()))
+    _seed_person_list(db, acc, "block", "sender@example.com")
+    monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: "learned")
+    ok = f.try_learn(
+        db, LOG, acc, RAW_FROM, "listed@example.com", "spam", reason="user_move",
+        folder="Junk", uidvalidity=1, uid=1,
+    )
+    assert ok is True
+    assert db.get_imap_message("Junk", 1, 1)["learned_as"] == "spam"
+    assert "learn_spam" in _events(db)
+
+
+def test_try_learn_unlisted_still_learns_spam(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account()
+    _pending(db, "listed@example.com", "Junk/Train-Spam", "spam", int(time.time()))
+    monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: "learned")
+    ok = f.try_learn(
+        db, LOG, acc, RAW_FROM, "listed@example.com", "spam", reason="train_spam_folder",
+        folder="Junk/Train-Spam", uidvalidity=1, uid=1,
+    )
+    assert ok is True
+    assert db.get_imap_message("Junk/Train-Spam", 1, 1)["learned_as"] == "spam"
+    assert "learn_spam" in _events(db)
+    assert "learn_skipped_list" not in _events(db)
+
+
+def test_try_learn_allow_sender_header_skips_spam(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account()
+    raw = (
+        b"From: other@example.com\r\n"
+        b"Sender: sender@example.com\r\n"
+        b"Subject: hi\r\n"
+        b"Message-ID: <listed@example.com>\r\n"
+        b"\r\nbody\r\n"
+    )
+    _pending(db, "listed@example.com", "Junk/Train-Spam", "spam", int(time.time()))
+    _seed_person_list(db, acc, "allow", "sender@example.com")
+    monkeypatch.setattr(
+        f, "rspamd_learn",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no learn")),
+    )
+    ok = f.try_learn(
+        db, LOG, acc, raw, "listed@example.com", "spam", reason="train_spam_folder",
+        folder="Junk/Train-Spam", uidvalidity=1, uid=1,
+    )
+    assert ok is True
+    assert db.get_imap_message("Junk/Train-Spam", 1, 1)["learned_as"] is None
+    assert "learn_skipped_list" in _events(db)

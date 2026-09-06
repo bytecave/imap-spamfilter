@@ -36,10 +36,13 @@ from filter import (
     apply_special_use_remap,
     body_sha256,
     build_folder_map,
+    classify_list_hit,
     connect_imap,
     detect_delimiter,
     fetch_under_cap,
     init_db,
+    iter_list_header_addrs,
+    list_blocks_learn,
     load_accounts,
     parse_envelope,
     resolve_folder,
@@ -47,7 +50,7 @@ from filter import (
     _internaldate_ts,
 )
 
-COUNT_KEYS = ("learned", "already", "declined", "failed", "dry_run")
+COUNT_KEYS = ("learned", "already", "declined", "failed", "skipped", "dry_run")
 
 
 def positive_limit(value: str) -> int:
@@ -170,6 +173,33 @@ def train_folder(
         if dry_run:
             print(f"[dry-run] would learn-{kind}: uid={uid} subj={short!r}")
             counts["dry_run"] += 1
+            continue
+        hit = None
+        if db is not None and getattr(acc, "actual_name", None):
+            hit = classify_list_hit(acc, db, iter_list_header_addrs(raw))
+        if list_blocks_learn(hit, kind):
+            counts["skipped"] += 1
+            print(
+                f"  skip list uid={uid} msgid={msgid} "
+                f"pattern={hit.pattern} kind={kind}"
+            )
+            if db is not None and hit is not None:
+                with db.tx():
+                    db.upsert_imap_message(
+                        src, uv, uid,
+                        message_id=msgid, sender=sender, subject=subject,
+                        received_at=_internaldate_ts(data),
+                        body_sha256=body_sha256(raw),
+                    )
+                    db.log_event(
+                        "learn_skipped_list", msgid,
+                        detail=(
+                            f"bootstrap pattern={hit.pattern} scope={hit.scope} "
+                            f"kind={kind} rank={hit.rank} {src} uv={uv} uid={uid}"
+                        ),
+                    )
+            if move_to:
+                move_uids.append(uid)
             continue
         outcome = rspamd_learn(raw, kind, user=acc.bayes_user or acc.user)
         if outcome in ("learned", "already", "declined"):

@@ -473,6 +473,27 @@ def test_learned_sort_by_event(dashboard_db, monkeypatch):
     assert html.index("BETA SUBJECT") < html.index("ALPHA SUBJECT")
 
 
+def test_learned_includes_list_skip_event(dashboard_db, monkeypatch):
+    now = int(time.time())
+    conn = sqlite3.connect(dashboard_db)
+    conn.execute(
+        "INSERT INTO events(account, ts, message_id, event, detail) VALUES (?,?,?,?,?)",
+        (
+            "acct-alpha", now, "alpha@id", "learn_skipped_list",
+            "pattern=sender@example.com scope=person kind=spam rank=4",
+        ),
+    )
+    conn.commit()
+    conn.close()
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    resp = client.get("/learned")
+    assert resp.status_code == 200
+    html = resp.data.decode()
+    assert "list-skip" in html
+    assert "ALPHA SUBJECT" in html
+
+
 def test_rspamd_stats_are_admin_only(dashboard_db, monkeypatch):
     calls = []
 

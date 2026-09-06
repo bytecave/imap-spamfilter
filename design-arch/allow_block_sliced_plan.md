@@ -53,7 +53,11 @@ Specs 9–12 must implement these. Do not invent a different policy
 - A list hit never calls `rspamd_learn`. Fresh hits store no numeric
   score (`our_score` stays NULL). A previously stored score is kept
   for audit and is not re-scanned.
-- Train-* and Inbox↔Junk moves remain the only learn paths.
+- Train-* and Inbox↔Junk remain the only learn paths. Those paths skip
+  `rspamd_learn` on **contradiction only**: allow + spam, block + ham.
+  Allow + ham and block + spam still learn. Escape hatch: remove or
+  flip the list entry, then Train-* / Junk-move again. Do **not**
+  auto-unlearn mail already in Bayes.
 
 **Headers**
 
