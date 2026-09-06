@@ -48,10 +48,11 @@ Specs 9–12 must implement these. Do not invent a different policy
 
 **Override vs score vs Bayes**
 
-- Scoring still runs (`rspamd_scan`) and the numeric score is stored
-  and logged.
-- Lists override **routing only** (keep in Inbox vs flag vs MOVE to
-  Junk). A list hit never calls `rspamd_learn`.
+- Lists override **routing** and **skip rspamd scan** (`/checkv2`) on a
+  hit, so neural/Bayes never see those messages.
+- A list hit never calls `rspamd_learn`. Fresh hits store no numeric
+  score (`our_score` stays NULL). A previously stored score is kept
+  for audit and is not re-scanned.
 - Train-* and Inbox↔Junk moves remain the only learn paths.
 
 **Headers**

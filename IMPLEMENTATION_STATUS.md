@@ -13,7 +13,7 @@ Read this first in a new agent/chat session before exploring the tree.
 
 ## Snapshot in one paragraph
 
-Allow/block lists + one VPS Bayes notebook (design-arch slices 9–12) are **implemented and on `origin/main`**. User lists may include `@host` as well as addresses; matching is From + Sender only (Reply-To ignored). User-list hits override roster-scoped domain lists. All live mailboxes are M365 via `email-oauth2-proxy`, still in **shadow**. Shared Bayes re-feed: `bootstrap_train.py --all-trained`. High scores are explainable via `explain_score.py` and `messages.score_detail` (Amazon ~25 was `BROKEN_HEADERS` + `BLACKLIST_DMARC` + auth fails — **not Bayes**). **Do not** wire `bytelord.net` mailboxes through the OAuth proxy. Product policy for allow/block lists is **reopenable whenever asked**.
+Allow/block lists + one VPS Bayes notebook (design-arch slices 9–12) are **implemented and on `origin/main`**. User lists may include `@host` as well as addresses; matching is From + Sender only (Reply-To ignored). User-list hits override roster-scoped domain lists. **List hits skip `/checkv2`** (no score, no neural, no Bayes). All live mailboxes are M365 via `email-oauth2-proxy`, still in **shadow**. **2026-09-06 Phase 2:** wiped Redis Bayes/neural (old per-user notebooks + shared `bytelord`) and SQLite `messages` + `learn_*` events; re-fed Trained-* into `bytelord` (`learned=1570 already=29 declined=330 failed=5` oversize). Dashboard Messages/Events/Learned now show those bootstrap rows. **Do not** wire `bytelord.net` mailboxes through the OAuth proxy. Product policy for allow/block lists is **reopenable whenever asked**.
 
 ---
 
@@ -48,7 +48,7 @@ Architecture: `design-arch/allow_block_sliced_plan.md` + `slice9_shared_bayes.md
 
 **Current product policy (reopenable):**
 
-- Lists override **routing only**. Still scan; **never Bayes-learn** from list hits.
+- Lists override **routing** and **skip rspamd scan** on hit. **Never Bayes-learn** from list hits; neural never sees them either.
 - Scan **From + Sender** only. Reply-To is ignored (spoofable). IMAP drag writes **From only**, never `@host`.
 - **User lists** (`actual_name`): addresses **and** `@host` / bare host. **Domain lists** (YAML roster): addresses and `@host`.
 - Match stop-on-first-hit: (1) user address (2) user `@host` (3) domain-list address (4) domain-list `@host`. User list overrides the roster domain list. Address beats whole-domain on the same list.
@@ -66,7 +66,7 @@ Architecture: `design-arch/allow_block_sliced_plan.md` + `slice9_shared_bayes.md
 - Learned: click **Event** to sort (SQL); first click A→Z, click again toggles
 - `script-src 'self'`; `filter/lists.js` served as `/lists.js`
 
-**Tests:** full `filter/` suite **191 passed** (Docker `python:3.12-slim`). Host has no pytest/`ensurepip`. Use:
+**Tests:** full `filter/` suite **195 passed** (Docker `python:3.12-slim`). Host has no pytest/`ensurepip`. Use:
 
 ```bash
 docker run --rm -v /opt/bytelord/projects/imap-spamfilter/filter:/app -w /app \
@@ -80,7 +80,7 @@ After code edits: `graphify update .` (graph in `graphify-out/`, gitignored).
 
 ## Live VPS state
 
-**Filter image** is built from the local `filter/` tree (`compose` build context). Last rebuild included list editors, search overlay, and column sort.
+**Filter image** is built from the local `filter/` tree (`compose` build context). Last rebuild: list-skip scan (no `/checkv2` on allow/block hits) + bootstrap dashboard learn rows.
 
 **Compose / data (unchanged layout):**
 
@@ -178,12 +178,11 @@ Gmail / live.com: still deferred (not client-credentials).
 
 ## What’s next (suggested)
 
-1. **High-score remediation (follow-up)** — Amazon ~25 was mostly `BROKEN_HEADERS` + `BLACKLIST_DMARC` + SPF/DKIM fails on the IMAP path, not Bayes. Next: rspamd local.d weight overrides / disable misleading IMAP auth symbols; fix Spamhaus open-resolver / URIBL blocked. Use `explain_score.py` to confirm before changing weights.
+1. **High-score remediation (unlisted mail)** — Amazon ~25 on the IMAP path was `BROKEN_HEADERS` + `BLACKLIST_DMARC` + SPF/DKIM fails, not Bayes. List-skip now prevents that from training neural when `@amazon.com` is allowlisted. Remaining: rspamd local.d weight overrides for *unlisted* mail; fix Spamhaus open-resolver / URIBL blocked.
 2. **Mode promotion** — Stay in **shadow** until scores look sane; then `flag` then `move`.
 3. **Do not** implement generic IMAP user/password for `bytelord.net` unless asked (new auth path).
 4. More M365 mailboxes only with Exchange grant + proxy section + YAML.
-5. Dashboard: Domain/User lists accept addresses and `@host`; Score column shows top symbols when `score_detail` is present.
-6. Deferred from older handoff: container lockdown, Redis LRU, GHA SHA pins, oversize MIME, Entra cert instead of client secret.
+5. Deferred from older handoff: container lockdown, Redis LRU, GHA SHA pins, oversize MIME, Entra cert instead of client secret.
 
 ---
 

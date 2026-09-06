@@ -14,7 +14,9 @@ Usage (inside the container):
 
 --all-trained re-learns every account's Trained-Spam / Trained-Ham in
 place (no MOVE) into acc.bayes_user or acc.user. Missing folders are
-skipped. Rspamd HTTP 208 counts as already (no second train).
+skipped. Rspamd HTTP 208 counts as already (no second train). Successful
+learns (learned/already) are written to spamfilter.db so the dashboard
+Messages, Events, and Learned tabs show the re-feed.
 """
 
 from __future__ import annotations
@@ -30,15 +32,19 @@ from imapclient.exceptions import IMAPClientError
 from filter import (
     CONFIG_PATH,
     RSPAMD_PASSWORD,
+    Db,
     apply_special_use_remap,
+    body_sha256,
     build_folder_map,
     connect_imap,
     detect_delimiter,
     fetch_under_cap,
+    init_db,
     load_accounts,
     parse_envelope,
     resolve_folder,
     rspamd_learn,
+    _internaldate_ts,
 )
 
 COUNT_KEYS = ("learned", "already", "declined", "failed", "dry_run")
@@ -71,6 +77,46 @@ def _format_counts(counts: dict[str, int], *, seconds: float | None = None) -> s
     return f"{parts} in {seconds:.1f}s"
 
 
+def _uidvalidity(info: Any) -> int:
+    try:
+        return int(info[b"UIDVALIDITY"])
+    except (KeyError, TypeError, ValueError):
+        return 1
+
+
+def _record_bootstrap_learn(
+    db: Db,
+    *,
+    folder: str,
+    uidvalidity: int,
+    uid: int,
+    data: dict,
+    raw: bytes,
+    msgid: str | None,
+    subject: str,
+    sender: str,
+    kind: str,
+    outcome: str,
+) -> None:
+    now = int(time.time())
+    with db.tx():
+        db.upsert_imap_message(
+            folder, uidvalidity, uid,
+            message_id=msgid, sender=sender, subject=subject,
+            received_at=_internaldate_ts(data), body_sha256=body_sha256(raw),
+        )
+        db.update_imap_message(
+            folder, uidvalidity, uid,
+            learned_as=kind, learned_at=now,
+            pending_learn=None, pending_learn_at=None,
+            learn_retry_count=0, learn_retry_at=None,
+        )
+        db.log_event(
+            f"learn_{kind}", msgid,
+            detail=f"bootstrap {outcome} {folder} uv={uidvalidity} uid={uid}",
+        )
+
+
 def train_folder(
     client: Any,
     acc: Any,
@@ -82,6 +128,7 @@ def train_folder(
     move_to: str | None = None,
     move_declined: bool = False,
     readonly: bool = False,
+    db: Db | None = None,
 ) -> tuple[dict[str, int], bool]:
     """Learn (and optionally MOVE) messages in one IMAP folder.
 
@@ -95,6 +142,7 @@ def train_folder(
         print(f"  skip {src}: {ex}")
         return counts, True
     exists = info.get(b"EXISTS", "?")
+    uv = _uidvalidity(info)
     print(f"selected {src} ({exists} messages)")
     uids = list(client.search(["ALL"]) or [])
     uids = uids[:limit]
@@ -117,7 +165,7 @@ def train_folder(
             counts["failed"] += 1
             print(f"  FAILED uid={uid} (body unavailable)")
             continue
-        msgid, subject, _ = parse_envelope(raw)
+        msgid, subject, sender = parse_envelope(raw)
         short = (subject or "")[:60].replace("\n", " ")
         if dry_run:
             print(f"[dry-run] would learn-{kind}: uid={uid} subj={short!r}")
@@ -126,7 +174,15 @@ def train_folder(
         outcome = rspamd_learn(raw, kind, user=acc.bayes_user or acc.user)
         if outcome in ("learned", "already", "declined"):
             counts[outcome] += 1
-            if outcome in ("learned", "already") or move_declined:
+            if outcome in ("learned", "already"):
+                if db is not None:
+                    _record_bootstrap_learn(
+                        db, folder=src, uidvalidity=uv, uid=uid,
+                        data=data, raw=raw, msgid=msgid, subject=subject,
+                        sender=sender, kind=kind, outcome=outcome,
+                    )
+                move_uids.append(uid)
+            elif move_declined:
                 move_uids.append(uid)
         else:
             counts["failed"] += 1
@@ -196,6 +252,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 def _run_one_account(args: argparse.Namespace, acc: Any) -> int:
     client = None
+    db = Db(acc.name)
     try:
         client = connect_imap(acc)
         delim = detect_delimiter(client)
@@ -207,9 +264,11 @@ def _run_one_account(args: argparse.Namespace, acc: Any) -> int:
             dry_run=args.dry_run, limit=args.limit,
             move_to=dst, move_declined=args.move_declined,
             readonly=args.dry_run,
+            db=None if args.dry_run else db,
         )
         return 1 if counts["failed"] else 0
     finally:
+        db.close()
         if client is not None:
             try:
                 client.logout()
@@ -225,6 +284,7 @@ def _run_all_trained(args: argparse.Namespace, accounts: list[Any]) -> int:
     any_failed = False
     for acc in accounts:
         client = None
+        db = Db(acc.name)
         try:
             client = connect_imap(acc)
             delim = detect_delimiter(client)
@@ -242,6 +302,7 @@ def _run_all_trained(args: argparse.Namespace, accounts: list[Any]) -> int:
                     src=src, kind=kind,
                     dry_run=args.dry_run, limit=args.limit,
                     readonly=True,
+                    db=None if args.dry_run else db,
                 )
                 if skipped:
                     skipped_folders += 1
@@ -253,6 +314,7 @@ def _run_all_trained(args: argparse.Namespace, accounts: list[Any]) -> int:
             any_failed = True
             print(f"[{acc.name}] FAILED: {ex}", file=sys.stderr)
         finally:
+            db.close()
             if client is not None:
                 try:
                     client.logout()
@@ -273,6 +335,7 @@ def main(argv: list[str] | None = None) -> int:
         print("RSPAMD_PASSWORD env var is unset", file=sys.stderr)
         return 2
 
+    init_db()
     accounts = load_accounts(Path(args.config))
     if args.all_trained:
         return _run_all_trained(args, accounts)

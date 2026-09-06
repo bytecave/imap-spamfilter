@@ -302,6 +302,9 @@ docker exec spamfilter python bootstrap_train.py --all-trained
 
 Rspamd HTTP 208 (`already`) means that body is already in this notebook;
 it is not trained twice. `--kind spam` or `--kind ham` limits to one class.
+Successful learns (`learned` / `already`) are written to `spamfilter.db`
+(`learn_ham` / `learn_spam` events plus a Messages row for that IMAP UID)
+so the dashboard Messages, Events, and Learned tabs show the re-feed.
 
 ### 5. Mode promotion
 
@@ -650,6 +653,8 @@ progress, recent scans/learns, and per-account activity. Admins can
 also edit domain and user allow/block lists from a textarea (one
 address or `@host` per line). User lists override roster-scoped
 domain lists. Matching uses From and Sender only (not Reply-To).
+A list hit skips rspamd scan (`/checkv2`) so it cannot train Bayes or
+neural; it only changes routing (keep Inbox vs treat as spam).
 IMAP folder drags still apply immediately (From address only) and do
 not wait for dashboard Save. Responsive, dark-mode aware. **Off by
 default.** Scan/learn/config pages stay read-only.
@@ -731,7 +736,7 @@ Pages:
               action breakdown) + Bayes learn progress bars with
               per-class status and learn-balance check + active
               safe-mode + recent learns
-- `/messages` last 200 scored msgs with score-band filter
+- `/messages` last 200 scored or learned msgs with score-band filter
 - `/learned`  last 300 learn / learn_failed / learn_giveup events
 - `/events`   tail of the full events table
 - `/accounts` per-account scan / learn / fail counts, total spam &

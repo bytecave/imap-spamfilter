@@ -37,7 +37,7 @@ class FakeIMAP:
         return []
 
     def select_folder(self, folder, readonly=False):
-        return {b"EXISTS": len(self.uids)}
+        return {b"EXISTS": len(self.uids), b"UIDVALIDITY": 1}
 
     def search(self, criteria):
         assert criteria == ["ALL"]
@@ -228,7 +228,7 @@ class FolderIMAP(FakeIMAP):
         self.uids = list(self.folder_uids[folder])
         self.bodies = {uid: _raw(uid) for uid in self.uids}
         self.sizes = {uid: len(self.bodies[uid]) for uid in self.uids}
-        return {b"EXISTS": len(self.uids)}
+        return {b"EXISTS": len(self.uids), b"UIDVALIDITY": 1}
 
 
 def _run_all(monkeypatch, clients, outcomes, *extra_args):
@@ -327,3 +327,63 @@ def test_all_trained_kind_spam_only(monkeypatch, capsys):
     assert users == ["bytelord", "bytelord"]
     selected = [folder for folder, _ro in one.selects + two.selects]
     assert selected == ["Junk/Trained-Spam", "Junk/Trained-Spam"]
+
+
+def _mk_learn_db(tmp_path, account="acct"):
+    f.DB_PATH = tmp_path / "spamfilter.db"
+    f.init_db()
+    return f.Db(account)
+
+
+def test_train_folder_writes_messages_and_learn_events(tmp_path, monkeypatch):
+    db = _mk_learn_db(tmp_path)
+    acc = SimpleNamespace(name="acct", user="user@example.com", bayes_user="bytelord")
+    client = FakeIMAP([1, 2, 3])
+    outcomes = iter(["learned", "already", "declined"])
+    monkeypatch.setattr(
+        bt, "rspamd_learn", lambda _raw, _kind, *, user: next(outcomes)
+    )
+    f.SHUTDOWN.clear()
+    counts, skipped = bt.train_folder(
+        client, acc,
+        src="Junk/Trained-Spam", kind="spam",
+        dry_run=False, limit=10_000, db=db,
+    )
+    assert skipped is False
+    assert counts["learned"] == 1
+    assert counts["already"] == 1
+    assert counts["declined"] == 1
+    row1 = db.get_imap_message("Junk/Trained-Spam", 1, 1)
+    row2 = db.get_imap_message("Junk/Trained-Spam", 1, 2)
+    row3 = db.get_imap_message("Junk/Trained-Spam", 1, 3)
+    assert row1["learned_as"] == "spam"
+    assert row1["sender"] == "sender@example.com"
+    assert row1["message_id"] == "1@example.com"
+    assert row2["learned_as"] == "spam"
+    assert row3 is None
+    evs = list(db.conn.execute(
+        "SELECT event, message_id, detail FROM events ORDER BY rowid"
+    ))
+    assert [r["event"] for r in evs] == ["learn_spam", "learn_spam"]
+    assert all("bootstrap" in (r["detail"] or "") for r in evs)
+    db.close()
+
+
+def test_train_folder_dry_run_does_not_write_db(tmp_path, monkeypatch):
+    db = _mk_learn_db(tmp_path)
+    acc = SimpleNamespace(name="acct", user="user@example.com", bayes_user=None)
+    client = FakeIMAP([1])
+    monkeypatch.setattr(
+        bt, "rspamd_learn", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("no learn"))
+    )
+    f.SHUTDOWN.clear()
+    counts, _skipped = bt.train_folder(
+        client, acc,
+        src="Junk/Trained-Ham", kind="ham",
+        dry_run=True, limit=10_000, db=db,
+    )
+    assert counts["dry_run"] == 1
+    assert db.get_imap_message("Junk/Trained-Ham", 1, 1) is None
+    evs = list(db.conn.execute("SELECT event FROM events"))
+    assert evs == []
+    db.close()

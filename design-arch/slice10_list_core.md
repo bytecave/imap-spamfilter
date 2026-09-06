@@ -31,8 +31,8 @@ no dashboard writes.
 2. Every account has a required `actual_name`. Person-scoped lists
    key on that exact string and apply to every account sharing it.
 3. Allow/block rows live in SQLite. Matching runs on Inbox scan
-   using From + Sender (not Reply-To). Hits override flag/move only;
-   rspamd still scores; Bayes does not learn from a hit.
+   using From + Sender (not Reply-To). Hits override flag/move and
+   skip rspamd scan; Bayes does not learn from a hit.
 4. Tests lock parser, loader, precedence, and scan routing without
    needing Outlook or the dashboard.
 
@@ -263,26 +263,27 @@ If `addrs` is empty, no hit.
 
 ## 7. `scan_inbox` integration (locked)
 
-Site: [`scan_inbox`](../filter/filter.py) (~L1981), **after** a
-numeric `score` is obtained (or reused from `prior`) and **before**
-the `if score < acc.threshold` skip (~L2202).
+Site: [`scan_inbox`](../filter/filter.py), **before** `rspamd_scan_detail`.
+Classify first; scan only on a miss.
 
-Always score first (route-only). Then `classify_list_hit`.
+Always `classify_list_hit` first (even if the UID is already Seen).
+On a hit, do **not** call `/checkv2`.
 
 **allow**
 
-- Log `allowlist hit` (include msgid, pattern, score). In shadow
-  prefix `[shadow]` like the existing would-flag line (~L2233).
+- Log `allowlist hit` (include msgid, pattern, `score=skipped` or a
+  previously stored score). In shadow prefix `[shadow]` like the
+  existing would-flag line.
 - `our_action=allowlisted`.
 - `log_event("allowlisted", msgid, detail=...)`.
 - If `conflict`: also `log_event("list_conflict", ...)`.
-- **Skip** flag / pending_move / MOVE even if `score >= threshold`.
+- **Skip** flag / pending_move / MOVE even if an old stored score
+  was ≥ threshold.
 - Bookmark: treat as **terminal** (`last_terminal = uid`).
 
 **block**
 
-- Treat as ≥ threshold **regardless of score** (including scores
-  below `threshold`).
+- Treat as ≥ threshold **regardless of score**. No scan.
 - Log `blocklist hit`. Events `blocklisted` (and `list_conflict` if
   set — should be rare because allow wins ties; conflict on a
   block-winning path only if implementation bug).
@@ -352,10 +353,11 @@ Use tmp `STATE_DIR` like other filter tests. Fake IMAP only where
 
 **Scan**
 
-- Score ≥ threshold + allow → no flag/move; `our_action=allowlisted`.
-- Score < threshold + block → mode action still runs (shadow: no
-  MOVE).
-- Shadow + block → no Inbox/Junk MOVE.
+- Allow hit → no `/checkv2`; no flag/move; `our_action=allowlisted`;
+  `our_score` NULL on a fresh hit.
+- Block hit even when a scan would have been below threshold → mode
+  action still runs (shadow: no MOVE); no `/checkv2`.
+- Unlisted mail still scans.
 
 `cd filter && python -m pytest -q` stays green including the new
 file.
@@ -377,7 +379,7 @@ Do not claim IMAP folders or dashboard editors exist until 11/12.
 - Schema creates `address_lists` on `init_db` / existing DB.
 - `load_accounts` (or `load_config`) requires `actual_name` and
   parses `list_domains`.
-- Inbox scan allow skips junk actions; block forces the mode path
-  without Bayes learn.
+- Inbox scan allow skips junk actions **and rspamd scan**; block forces the mode path
+  without Bayes learn or `/checkv2`.
 - `poll_junk` unchanged.
 - Tests in §8 pass.

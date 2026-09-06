@@ -1260,13 +1260,18 @@ def summary():
 @_requires_auth
 def messages():
     band = request.args.get("band", "all")
-    where = ""
     if band == "spam":
-        where = "AND our_score >= 8"
+        where = "AND m.our_score >= 8"
     elif band == "mid":
-        where = "AND our_score BETWEEN 4 AND 8"
+        where = "AND m.our_score BETWEEN 4 AND 8"
     elif band == "low":
-        where = "AND our_score < 4"
+        where = "AND m.our_score < 4"
+    else:
+        # Scanned Inbox rows, plus bootstrap/Train-* learns that have no score.
+        where = (
+            "AND (m.our_score IS NOT NULL "
+            "OR m.learned_as IN ('ham', 'spam'))"
+        )
     sort = (request.args.get("sort") or "").strip().lower()
     if sort != "score":
         sort = ""
@@ -1296,7 +1301,7 @@ def messages():
                        LIMIT 1)
                    ) AS learned_as
               FROM messages m
-             WHERE m.our_score IS NOT NULL {where}{sc}
+             WHERE 1=1 {where}{sc}
              ORDER BY {order} LIMIT 200
             """, sp).fetchall()
     body_rows = "".join(
@@ -1329,7 +1334,7 @@ def messages():
         + "<th>Action</th><th>Folder</th><th>Learn</th><th>Sender</th>"
         "<th>Subject</th></tr>"
         + (body_rows
-           or '<tr><td colspan=8 class=muted>(no scored messages yet)</td></tr>')
+           or '<tr><td colspan=8 class=muted>(no messages yet)</td></tr>')
         + "</table></div></div>")
     return render(f"Messages ({len(rows)} shown)", "messages", body)
 

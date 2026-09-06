@@ -429,6 +429,17 @@ def test_messages_route_uses_sibling_learning_query(dashboard_db, monkeypatch):
     assert b">ham<" in resp.data
 
 
+def test_messages_shows_learned_rows_without_score(dashboard_db, monkeypatch):
+    user = d._User("viewer", "plain:stable", False, frozenset({"acct-alpha"}))
+    client = _authenticated_client(monkeypatch, user)
+    resp = client.get("/messages")
+    assert resp.status_code == 200
+    assert b"ALPHA TRAIN COPY" in resp.data
+    spam = client.get("/messages?band=spam")
+    assert b"ALPHA TRAIN COPY" not in spam.data
+    assert b"ALPHA SUBJECT" in spam.data
+
+
 def test_messages_sort_by_score(dashboard_db, monkeypatch):
     user = d._User("admin", "plain:stable", True, frozenset())
     client = _authenticated_client(monkeypatch, user)

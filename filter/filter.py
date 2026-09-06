@@ -2618,6 +2618,49 @@ def try_learn(
 # ----- scan / poll / drain -------------------------------------------------
 
 
+def _finite_score(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(score):
+        return None
+    return score
+
+
+def _score_log(score: float | None) -> str:
+    if score is None:
+        return "skipped"
+    return f"{score:.2f}"
+
+
+def _list_hit_event_detail(hit: ListHit, score: float | None) -> str:
+    return (
+        f"pattern={hit.pattern} scope={hit.scope} "
+        f"score={_score_log(score)} rank={hit.rank}"
+    )
+
+
+def _log_list_hit(
+    log: logging.Logger,
+    acc: Account,
+    hit: ListHit,
+    msgid: str | None,
+    subject: str,
+    detail: str,
+) -> None:
+    kind = "allow" if hit.decision == "allow" else "block"
+    if acc.mode == "shadow":
+        log.info(
+            "[shadow] %slist hit %s %s subj=%r",
+            kind, msgid, detail, subject[:80],
+        )
+    else:
+        log.info("%slist hit %s %s", kind, msgid, detail)
+
+
 def scan_inbox(
     client: IMAPClient,
     db: Db,
@@ -2786,13 +2829,36 @@ def scan_inbox(
                 last_terminal = uid
                 continue
 
-            stored_score = prior["our_score"] if prior is not None else None
-            if stored_score is not None:
-                try:
-                    score = float(stored_score)
-                except (TypeError, ValueError):
-                    score = math.nan
-                if not math.isfinite(score):
+            addrs = iter_list_header_addrs(raw)
+            hit = classify_list_hit(acc, db, addrs)
+            stored_raw = prior["our_score"] if prior is not None else None
+            score: float | None = None
+            over_threshold = False
+
+            if hit is not None:
+                # Lists skip /checkv2 so neural/Bayes never see these
+                # messages. Keep a previously stored score for audit only.
+                score = _finite_score(stored_raw)
+                hit_detail = _list_hit_event_detail(hit, score)
+                _log_list_hit(log, acc, hit, msgid, subject, hit_detail)
+                if hit.decision == "allow":
+                    with db.tx():
+                        db.update_imap_message(
+                            fmap["inbox"], uv, uid, our_action="allowlisted"
+                        )
+                        db.log_event("allowlisted", msgid, detail=hit_detail)
+                        if hit.conflict:
+                            db.log_event("list_conflict", msgid, detail=hit_detail)
+                    last_terminal = uid
+                    continue
+                with db.tx():
+                    db.log_event("blocklisted", msgid, detail=hit_detail)
+                    if hit.conflict:
+                        db.log_event("list_conflict", msgid, detail=hit_detail)
+                over_threshold = True
+            elif stored_raw is not None:
+                score = _finite_score(stored_raw)
+                if score is None:
                     log.error(
                         "invalid stored score for %s (uid=%s) - keeping in inbox",
                         msgid, uid,
@@ -2800,6 +2866,7 @@ def scan_inbox(
                     db.log_event("invalid_stored_score", msgid, detail=f"uid={uid}")
                     halted = True
                     break
+                over_threshold = score >= acc.threshold
             else:
                 # Only score unseen messages on first appearance. A persisted
                 # score bypasses this gate so an interrupted required action
@@ -2809,11 +2876,11 @@ def scan_inbox(
                     continue
 
                 recipient = first_recipient(raw, acc.user)
-                detail = rspamd_scan_detail(
+                scan_detail = rspamd_scan_detail(
                     raw, recipient, acc.reject_score_above,
                     bayes_user=acc.bayes_user or acc.user,
                 )
-                if detail is None:
+                if scan_detail is None:
                     log.warning("scan failed for %s (uid=%s) - keeping in inbox", msgid, uid)
                     db.log_event("scan_failed", msgid)
                     if state is not None:
@@ -2834,8 +2901,8 @@ def scan_inbox(
                     db.log_event("scan_recovered", detail=str(state.scan_fail_streak))
                     state.scan_fail_streak = 0
 
-                score = detail.score
-                detail_json = score_detail_json(detail)
+                score = scan_detail.score
+                detail_json = score_detail_json(scan_detail)
                 with db.tx():
                     db.update_imap_message(
                         fmap["inbox"], uv, uid,
@@ -2851,50 +2918,9 @@ def scan_inbox(
                 if score >= explain_floor:
                     log.info(
                         "score_explain %s score=%.2f top=%s",
-                        msgid, score, format_top_symbols_line(detail.symbols),
+                        msgid, score, format_top_symbols_line(scan_detail.symbols),
                     )
-
-            addrs = iter_list_header_addrs(raw)
-            hit = classify_list_hit(acc, db, addrs)
-            if hit is not None and hit.decision == "allow":
-                detail = (
-                    f"pattern={hit.pattern} scope={hit.scope} "
-                    f"score={score:.2f} rank={hit.rank}"
-                )
-                if acc.mode == "shadow":
-                    log.info(
-                        "[shadow] allowlist hit %s %s subj=%r",
-                        msgid, detail, subject[:80],
-                    )
-                else:
-                    log.info("allowlist hit %s %s", msgid, detail)
-                with db.tx():
-                    db.update_imap_message(
-                        fmap["inbox"], uv, uid, our_action="allowlisted"
-                    )
-                    db.log_event("allowlisted", msgid, detail=detail)
-                    if hit.conflict:
-                        db.log_event("list_conflict", msgid, detail=detail)
-                last_terminal = uid
-                continue
-            over_threshold = score >= acc.threshold
-            if hit is not None and hit.decision == "block":
-                over_threshold = True
-                detail = (
-                    f"pattern={hit.pattern} scope={hit.scope} "
-                    f"score={score:.2f} rank={hit.rank}"
-                )
-                if acc.mode == "shadow":
-                    log.info(
-                        "[shadow] blocklist hit %s %s subj=%r",
-                        msgid, detail, subject[:80],
-                    )
-                else:
-                    log.info("blocklist hit %s %s", msgid, detail)
-                with db.tx():
-                    db.log_event("blocklisted", msgid, detail=detail)
-                    if hit.conflict:
-                        db.log_event("list_conflict", msgid, detail=detail)
+                over_threshold = score >= acc.threshold
 
             if not over_threshold:
                 last_terminal = uid
@@ -2927,19 +2953,24 @@ def scan_inbox(
                 continue
             match acc.mode:
                 case "shadow":
-                    log.info("[shadow] would flag %s score=%.2f subj=%r", msgid, score, subject[:80])
+                    log.info(
+                        "[shadow] would flag %s score=%s subj=%r",
+                        msgid, _score_log(score), subject[:80],
+                    )
                     with db.tx():
                         db.update_imap_message(
                             fmap["inbox"], uv, uid, our_action="shadow"
                         )
                 case "flag":
                     client.add_flags(uid, [b"\\Flagged"])
-                    log.info("[flag] flagged %s score=%.2f", msgid, score)
+                    log.info("[flag] flagged %s score=%s", msgid, _score_log(score))
                     with db.tx():
                         db.update_imap_message(
                             fmap["inbox"], uv, uid, our_action="flagged"
                         )
-                        db.log_event("flagged", msgid, detail=f"score={score:.2f}")
+                        db.log_event(
+                            "flagged", msgid, detail=f"score={_score_log(score)}"
+                        )
                 case "move":
                     # Do NOT set \Flagged: that is the user's "starred"
                     # flag and we pollute it once per spam during the
@@ -2953,7 +2984,10 @@ def scan_inbox(
                         db.update_imap_message(
                             fmap["inbox"], uv, uid, our_action="pending_move"
                         )
-                        db.log_event("pending_move", msgid, detail=f"score={score:.2f}")
+                        db.log_event(
+                            "pending_move", msgid,
+                            detail=f"score={_score_log(score)}",
+                        )
             last_terminal = uid
 
     if last_terminal is not None:

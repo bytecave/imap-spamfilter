@@ -319,16 +319,23 @@ def test_scan_allow_skips_flag_over_threshold(tmp_path, monkeypatch):
     _seed(db, "person", "Rich", "allow", "sender@example.com")
     with db.tx():
         db.set_scan_bookmark("INBOX", 1, 0)
-    monkeypatch.setattr(f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(9.0, (), None))
+    calls = []
+
+    def boom(*a, **k):
+        calls.append(1)
+        raise AssertionError("must not scan list hits")
+
+    monkeypatch.setattr(f, "rspamd_scan_detail", boom)
     client = _scan_client()
     f.scan_inbox(client, db, LOG, acc, FMAP)
+    assert calls == []
     assert client.flags_added == []
     row = db.get_imap_message("INBOX", 1, 1)
     assert row["our_action"] == "allowlisted"
-    assert row["our_score"] == 9.0
+    assert row["our_score"] is None
     evs = [r["event"] for r in db.conn.execute("SELECT event FROM events")]
     assert "allowlisted" in evs
-    assert "scan" in evs
+    assert "scan" not in evs
 
 
 def test_scan_block_under_threshold_still_acts_flag(tmp_path, monkeypatch):
@@ -337,12 +344,23 @@ def test_scan_block_under_threshold_still_acts_flag(tmp_path, monkeypatch):
     _seed(db, "person", "Rich", "block", "sender@example.com")
     with db.tx():
         db.set_scan_bookmark("INBOX", 1, 0)
-    monkeypatch.setattr(f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(2.0, (), None))
+    calls = []
+
+    def boom(*a, **k):
+        calls.append(1)
+        raise AssertionError("must not scan list hits")
+
+    monkeypatch.setattr(f, "rspamd_scan_detail", boom)
     client = _scan_client()
     f.scan_inbox(client, db, LOG, acc, FMAP)
+    assert calls == []
     assert client.flags_added == [(1, [b"\\Flagged"])]
     evs = [r["event"] for r in db.conn.execute("SELECT event FROM events")]
     assert "blocklisted" in evs
+    assert "scan" not in evs
+    row = db.get_imap_message("INBOX", 1, 1)
+    assert row["our_score"] is None
+    assert row["our_action"] == "flagged"
 
 
 def test_scan_block_shadow_does_not_move(tmp_path, monkeypatch):
@@ -351,13 +369,69 @@ def test_scan_block_shadow_does_not_move(tmp_path, monkeypatch):
     _seed(db, "person", "Rich", "block", "sender@example.com")
     with db.tx():
         db.set_scan_bookmark("INBOX", 1, 0)
-    monkeypatch.setattr(f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(9.0, (), None))
+
+    def boom(*a, **k):
+        raise AssertionError("must not scan list hits")
+
+    monkeypatch.setattr(f, "rspamd_scan_detail", boom)
     client = _scan_client()
     f.scan_inbox(client, db, LOG, acc, FMAP)
     assert client.moved == []
     assert client.flags_added == []
     row = db.get_imap_message("INBOX", 1, 1)
     assert row["our_action"] == "shadow"
+    assert row["our_score"] is None
+
+
+def test_scan_unlisted_still_scans(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="flag", actual_name="Rich")
+    with db.tx():
+        db.set_scan_bookmark("INBOX", 1, 0)
+    calls = []
+
+    def scan(*a, **k):
+        calls.append(1)
+        return f.ScanResult(1.0, (), None)
+
+    monkeypatch.setattr(f, "rspamd_scan_detail", scan)
+    client = _scan_client()
+    f.scan_inbox(client, db, LOG, acc, FMAP)
+    assert calls == [1]
+    row = db.get_imap_message("INBOX", 1, 1)
+    assert row["our_score"] == 1.0
+    evs = [r["event"] for r in db.conn.execute("SELECT event FROM events")]
+    assert "scan" in evs
+    assert "allowlisted" not in evs
+    assert "blocklisted" not in evs
+
+
+def test_scan_allow_keeps_prior_score_without_rescan(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="flag", actual_name="Rich")
+    _seed(db, "person", "Rich", "allow", "sender@example.com")
+    with db.tx():
+        db.set_scan_bookmark("INBOX", 1, 0)
+        db.upsert_imap_message(
+            "INBOX", 1, 1,
+            message_id="<scan1@example.com>",
+            sender="sender@example.com",
+            subject="suspicious offer",
+        )
+        db.update_imap_message("INBOX", 1, 1, our_score=9.0)
+
+    def boom(*a, **k):
+        raise AssertionError("must not rescan list hits")
+
+    monkeypatch.setattr(f, "rspamd_scan_detail", boom)
+    client = _scan_client()
+    f.scan_inbox(client, db, LOG, acc, FMAP)
+    row = db.get_imap_message("INBOX", 1, 1)
+    assert row["our_action"] == "allowlisted"
+    assert row["our_score"] == 9.0
+    evs = [r["event"] for r in db.conn.execute("SELECT event FROM events")]
+    assert "scan" not in evs
+    assert "allowlisted" in evs
 
 
 def test_list_upsert_cap(tmp_path):
