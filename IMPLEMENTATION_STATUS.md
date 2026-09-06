@@ -24,7 +24,7 @@ Allow/block lists + one VPS Bayes notebook (design-arch slices 9–12) are **imp
 | Previous `origin/main` | `a4a0b7d` — “Refresh implementation status for list-skip scan and Phase 2 wipe.” |
 | Tag | `before-allow-block-list` (annotated) at `a0b8897` |
 | Previous list-skip | `cc1eb29` — list hits skip `/checkv2`; bootstrap writes dashboard learns; Messages shows learned-without-score rows |
-| This change | skip contradictory Train-* / Junk / bootstrap learns (`learn_skipped_list`) |
+| This change | `b991f71` — skip contradictory Train-* / Junk / bootstrap learns (`learn_skipped_list`) |
 
 **Never commit:** live `accounts.yml` (gitignored), `/opt/bytelord/secrets/*`, token caches.
 
