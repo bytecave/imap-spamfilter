@@ -675,7 +675,7 @@ def test_list_post_invalid_line_does_not_persist(dashboard_db, tmp_path, monkeyp
     db.close()
 
 
-def test_list_post_person_rejects_domain_pattern(dashboard_db, tmp_path, monkeypatch):
+def test_list_post_person_accepts_domain_pattern(dashboard_db, tmp_path, monkeypatch):
     monkeypatch.setattr(d, "CONFIG_PATH", _list_yaml(tmp_path))
     user = d._User("admin", "plain:stable", True, frozenset())
     client = _authenticated_client(monkeypatch, user)
@@ -690,9 +690,14 @@ def test_list_post_person_rejects_domain_pattern(dashboard_db, tmp_path, monkeyp
             "kind": "allow",
             "body": "@x.com\n",
         },
+        follow_redirects=False,
     )
-    assert resp.status_code == 400
-    assert b"person lists" in resp.data or b"whole-domain" in resp.data
+    assert resp.status_code == 302
+    import filter as f
+    f.DB_PATH = d.DB_PATH
+    db = f.Db("_dashboard")
+    assert db.list_get("person", "Rich Eizenhoefer", "allow") == ["@x.com"]
+    db.close()
 
 
 def test_list_post_domain_normalizes_bare_host(dashboard_db, tmp_path, monkeypatch):

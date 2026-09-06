@@ -1,6 +1,6 @@
 # Implementation status — imap-spamfilter (ByteLord)
 
-**Last updated:** 2026-09-04  
+**Last updated:** 2026-09-05  
 **Supersedes for current work:** [`SESSION_HANDOFF.md`](SESSION_HANDOFF.md) (that file is still useful for VPS layout and OAuth, but its “what’s next” and mailbox list are stale).
 
 **Repo:** `/opt/bytelord/projects/imap-spamfilter`  
@@ -13,7 +13,7 @@ Read this first in a new agent/chat session before exploring the tree.
 
 ## Snapshot in one paragraph
 
-Allow/block lists + one VPS Bayes notebook (design-arch slices 9–12) are **implemented and running** on the live `spamfilter` container. Architecture docs were committed and tagged; **the implementation is still uncommitted local work**. All live mailboxes are M365 via `email-oauth2-proxy`, still in **shadow**. Dashboard list editors work (admin only). Follow-up UX: Save no longer warns, search highlights without stealing focus, Messages/Learned column sort. User is unhappy with Bayes score quality (upstream rspamd/project behavior, not a slice-9–12 bug). **Do not** wire `bytelord.net` mailboxes through the OAuth proxy.
+Allow/block lists + one VPS Bayes notebook (design-arch slices 9–12) are **implemented and on `origin/main`**. User lists may include `@host` as well as addresses; matching is From + Sender only (Reply-To ignored). User-list hits override roster-scoped domain lists. All live mailboxes are M365 via `email-oauth2-proxy`, still in **shadow**. Dashboard list editors work (admin only). User is unhappy with Bayes score quality (upstream rspamd/project behavior, not a list-policy bug). **Do not** wire `bytelord.net` mailboxes through the OAuth proxy. Product policy for allow/block lists is **reopenable whenever asked**.
 
 ---
 
@@ -21,14 +21,9 @@ Allow/block lists + one VPS Bayes notebook (design-arch slices 9–12) are **imp
 
 | Item | Value |
 |---|---|
-| `origin/main` HEAD | `a0b8897` — “Add allow/block list architecture slices 9–12.” |
-| Tag | `before-allow-block-list` (annotated; “Before Allow/Block List”) at that commit |
-| Implementation | **Not committed, not pushed.** Working tree has the slice 9–12 code plus later dashboard UX. |
-
-**Uncommitted (commit only if the user asks):**
-
-- Modified: `README.md`, `accounts.yml.example`, `filter/Dockerfile`, `filter/dashboard.py`, `filter/filter.py`, `filter/test_connection.py`, `filter/test_dashboard.py`, `filter/test_learn.py`, `filter/test_shadow_mode.py`
-- Untracked: `filter/lists.js`, `filter/test_address_lists.py`, `filter/test_list_folders.py`
+| Previous `origin/main` | `441b951` — “Implement allow/block lists, shared Bayes, and dashboard list UX.” |
+| Tag | `before-allow-block-list` (annotated) at `a0b8897` |
+| This change | User-list `@host`, From+Sender-only match, user list overrides domain list (commit on `main`) |
 
 **Never commit:** live `accounts.yml` (gitignored), `/opt/bytelord/secrets/*`, token caches.
 
@@ -40,9 +35,9 @@ Allow/block lists + one VPS Bayes notebook (design-arch slices 9–12) are **imp
 
 Slices 1–8 (hybrid shadow, FETCH cap, inbox bookmark, `tls_mode`, IMAP UID identity, rspamd From/Rcpt, secrets/bootstrap, dashboard hardening). OAuth proxy PoC, then more M365 mailboxes. Parent plan: `design-arch/sliced_plan_code_review_fixes.md`.
 
-### This push of work (local, uncommitted)
+### This push of work (on `main`, plus follow-up matcher policy)
 
-Architecture: `design-arch/allow_block_sliced_plan.md` + `slice9_shared_bayes.md` … `slice12_dashboard_lists.md`. **`new_requirements.md` is historical; slices win on disagreement.**
+Architecture: `design-arch/allow_block_sliced_plan.md` + `slice9_shared_bayes.md` … `slice12_dashboard_lists.md`. **`new_requirements.md` is historical; slices win on disagreement.** Product policy is **reopenable whenever asked** — do not treat the list below as frozen.
 
 | Slice | Spec | Status |
 |---|---|---|
@@ -51,18 +46,19 @@ Architecture: `design-arch/allow_block_sliced_plan.md` + `slice9_shared_bayes.md
 | 11 | `INBOX/Allowlist` / `INBOX/Blocklist` drain | Done |
 | 12 | Admin Domain/User list editors | Done |
 
-**Locked product policy (do not reopen):**
+**Current product policy (reopenable):**
 
 - Lists override **routing only**. Still scan; **never Bayes-learn** from list hits.
-- Scan From + Sender + Reply-To. IMAP drag writes **From only**.
-- Person lists by exact `actual_name`; domain lists from YAML roster.
-- Allow wins same-specificity ties; log `list_conflict`.
+- Scan **From + Sender** only. Reply-To is ignored (spoofable). IMAP drag writes **From only**, never `@host`.
+- **User lists** (`actual_name`): addresses **and** `@host` / bare host. **Domain lists** (YAML roster): addresses and `@host`.
+- Match stop-on-first-hit: (1) user address (2) user `@host` (3) domain-list address (4) domain-list `@host`. User list overrides the roster domain list. Address beats whole-domain on the same list.
+- Allow wins **only** on a true tie at the winning step; `list_conflict` is **audit-only** (events row; routing still allow).
 - After IMAP drag: upsert/flip then **MOVE mail back to Inbox**.
 - Inbox scan only (not Junk poll). Caps: `max_list_per_run=100`, `max_list_entries=1000`.
 - Roster type (`company`/`personal`) is v1 metadata only.
 - IMAP drags persist immediately. Dashboard Save is the only batched editor.
 
-**Dashboard UX after slice 12 (also uncommitted):**
+**Dashboard UX after slice 12:**
 
 - Save: clear dirty on submit so the browser does not show “Leave site?”
 - Find-in-list: keep caret in the search box; highlight **all** matching textarea lines via overlay; clear highlights when query is empty or has no matches
@@ -70,7 +66,7 @@ Architecture: `design-arch/allow_block_sliced_plan.md` + `slice9_shared_bayes.md
 - Learned: click **Event** to sort (SQL); first click A→Z, click again toggles
 - `script-src 'self'`; `filter/lists.js` served as `/lists.js`
 
-**Tests:** last full dashboard file run **47 passed**; earlier full `filter/` suite was **176 passed** (then more tests were added). Host has no pytest/`ensurepip`. Use:
+**Tests:** full `filter/` suite **184 passed** (Docker `python:3.12-slim`). Host has no pytest/`ensurepip`. Use:
 
 ```bash
 docker run --rm -v /opt/bytelord/projects/imap-spamfilter/filter:/app -w /app \
@@ -170,7 +166,7 @@ Gmail / live.com: still deferred (not client-credentials).
 
 - **graphify first:** `.cursor/rules/graphify.mdc` — `graphify query "…" --budget 10000` before exploring; `graphify update .` after code edits.
 - **Commit/push** only when the user asks. No force-push, no hook skip, do not commit secrets.
-- **Do not edit the plan file** unless asked (`allow_block_sliced_plan.md` status table may still say “ready to implement”; code is ahead of that table).
+- **Do not edit the plan file** unless asked (`allow_block_sliced_plan.md` status table may still say “ready to implement”; code is ahead of that table). Allow/block **product policy is reopenable** whenever asked.
 - Slices 9–12 **win** over `new_requirements.md`.
 - Caddy / Netbird / `spam.bytelord.net` is **out of scope** for these slices.
 - Filter talks IMAP `LOGIN` only. OAuth lives in **email-oauth2-proxy**, not this repo.
@@ -186,7 +182,7 @@ Gmail / live.com: still deferred (not client-credentials).
 2. **Bayes quality** — user reports an ~1125-item notebook still scores most spam low and flags some ham. They framed this as the upstream project, not our list work. Optional later: confirm Trained-* re-feed via `bootstrap_train.py` **without** `--move-to` (slice 9 follow-up; not done this session), threshold when leaving shadow, more ham/spam training. Stay in **shadow** until scores look sane; then `flag` then `move`.
 3. **Do not** implement generic IMAP user/password for `bytelord.net` unless asked (new auth path).
 4. More M365 mailboxes only with Exchange grant + proxy section + YAML.
-5. Dashboard: Domain/User lists and Score/Event sort are live after rebuild; no further list-slice work unless the user files bugs.
+5. Dashboard: Domain/User lists accept addresses and `@host`; Score/Event sort are live after rebuild. No further list-slice work unless the user files bugs.
 6. Deferred from older handoff: container lockdown, Redis LRU, GHA SHA pins, oversize MIME, Entra cert instead of client secret.
 
 ---
@@ -196,7 +192,7 @@ Gmail / live.com: still deferred (not client-credentials).
 | File | Why |
 |---|---|
 | `IMPLEMENTATION_STATUS.md` | This file |
-| `design-arch/allow_block_sliced_plan.md` | Locked list/Bayes product decisions |
+| `design-arch/allow_block_sliced_plan.md` | List/Bayes product decisions (reopenable) |
 | `design-arch/slice9_shared_bayes.md` … `slice12_dashboard_lists.md` | Implementation specs |
 | `design-arch/sliced_plan_code_review_fixes.md` | Slices 1–8 + deferred ops |
 | `filter/filter.py` | Lists, scan, IMAP drain, schema |

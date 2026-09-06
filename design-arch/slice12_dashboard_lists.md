@@ -153,7 +153,7 @@ Roster is **not** editable on the page.
 Server uses slice 10 `parse_list_text`:
 
 - Domain tab: `allow_domain=True`.
-- User tab: `allow_domain=False` (`@host` / bare host → error).
+- User tab: `allow_domain=True` (`@host` / bare host allowed).
 
 On first error: HTTP 400, **no writes**, re-render with the
 submitted text, message, and `data-error-line` (1-based). JS
@@ -212,7 +212,7 @@ Extend [`filter/test_dashboard.py`](../filter/test_dashboard.py):
    lists links (if the test client can log in as scoped user).
 3. POST without CSRF → 400; table unchanged.
 4. POST invalid line (internal space) → 400; no persist.
-5. POST person list `@x.com` → 400.
+5. POST person list `@x.com` → stored as `@x.com`.
 6. POST domain list `x.com` → stored as `@x.com`.
 7. POST allow `a@x.com` while block has `a@x.com` → block sibling
    gone.

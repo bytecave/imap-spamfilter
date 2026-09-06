@@ -448,7 +448,7 @@ override `defaults:` values; both override built-in defaults from `filter.py`.
 | `imap_host` | `imap.example.de` | hostname only, no scheme |
 | `user` | `you@example.de` | login username (usually the full address) |
 | `password` | `"..."` | quote to keep YAML happy with special chars |
-| `actual_name` | `Rich Eizenhoefer` | person-list key; same string on every mailbox that person owns |
+| `actual_name` | `Rich Eizenhoefer` | user-list key; same string on every mailbox that person owns. User lists may hold addresses and `@host`. |
 
 ### Domain roster (root key, not per-account)
 
@@ -636,7 +636,9 @@ A small Flask dashboard is available for at-a-glance stats:
 a health banner, filter KPIs, a 14-day scan trend, rspamd Bayes
 progress, recent scans/learns, and per-account activity. Admins can
 also edit domain and user allow/block lists from a textarea (one
-pattern per line). IMAP folder drags still apply immediately and do
+address or `@host` per line). User lists override roster-scoped
+domain lists. Matching uses From and Sender only (not Reply-To).
+IMAP folder drags still apply immediately (From address only) and do
 not wait for dashboard Save. Responsive, dark-mode aware. **Off by
 default.** Scan/learn/config pages stay read-only.
 

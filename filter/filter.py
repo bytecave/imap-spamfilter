@@ -2023,14 +2023,17 @@ def parse_envelope(raw: bytes) -> tuple[str | None, str, str]:
 
 
 def iter_list_header_addrs(raw: bytes) -> list[str]:
-    """From, Sender, Reply-To addresses, lowercased, unique, first-seen order."""
+    """From and Sender addresses, lowercased, unique, first-seen order.
+
+    Reply-To is ignored: it is too easy to spoof.
+    """
     out: list[str] = []
     seen: set[str] = set()
     try:
         msg = email.message_from_bytes(raw, policy=email.policy.compat32)
     except Exception:
         return out
-    for header in ("From", "Sender", "Reply-To"):
+    for header in ("From", "Sender"):
         try:
             pairs = getaddresses(msg.get_all(header, []))
         except Exception:
@@ -2047,7 +2050,16 @@ def iter_list_header_addrs(raw: bytes) -> list[str]:
 def classify_list_hit(
     acc: Account, db: Db, addrs: list[str]
 ) -> ListHit | None:
-    """Highest-specificity list match across all addrs. Allow wins ties."""
+    """Stop-on-first-hit list match. From+Sender addresses are pooled.
+
+    1. User-list exact address
+    2. User-list whole domain (@host)
+    3. Domain-list exact address (roster-scoped)
+    4. Domain-list whole domain
+
+    Address beats @host. User list beats domain list. Allow wins only
+    on a true tie at the winning step (audit-only list_conflict).
+    """
     if not addrs or not acc.actual_name:
         return None
     mbox_dom = mailbox_domain(acc.user)
@@ -2059,14 +2071,20 @@ def classify_list_hit(
     for r in rows:
         by_key.add((r["scope_type"], r["scope_key"], r["kind"], r["pattern"]))
 
-    hits: list[tuple[int, str, str, str]] = []  # rank, decision, pattern, scope
+    # rank, decision, pattern, scope
+    hits: list[tuple[int, str, str, str]] = []
     for addr in addrs:
         host = addr.rsplit("@", 1)[-1] if "@" in addr else ""
         domain_pat = f"@{host}" if host else None
         if ("person", acc.actual_name, "allow", addr) in by_key:
-            hits.append((3, "allow", addr, "person"))
+            hits.append((4, "allow", addr, "person"))
         if ("person", acc.actual_name, "block", addr) in by_key:
-            hits.append((3, "block", addr, "person"))
+            hits.append((4, "block", addr, "person"))
+        if domain_pat:
+            if ("person", acc.actual_name, "allow", domain_pat) in by_key:
+                hits.append((3, "allow", domain_pat, "person"))
+            if ("person", acc.actual_name, "block", domain_pat) in by_key:
+                hits.append((3, "block", domain_pat, "person"))
         if domain_key:
             if ("domain", domain_key, "allow", addr) in by_key:
                 hits.append((2, "allow", addr, "domain"))

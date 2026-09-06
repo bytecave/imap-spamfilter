@@ -31,7 +31,7 @@ no dashboard writes.
 2. Every account has a required `actual_name`. Person-scoped lists
    key on that exact string and apply to every account sharing it.
 3. Allow/block rows live in SQLite. Matching runs on Inbox scan
-   using From + Sender + Reply-To. Hits override flag/move only;
+   using From + Sender (not Reply-To). Hits override flag/move only;
    rspamd still scores; Bayes does not learn from a hit.
 4. Tests lock parser, loader, precedence, and scan routing without
    needing Outlook or the dashboard.
@@ -213,8 +213,9 @@ ParsedPattern | ParseError`.
 - **Domain** (only if `allow_domain`): `@host` or `host` with no `@`
   and host non-empty. Normalize to `pattern=@host`.
   `pattern_type=domain`.
-- Person lists call with `allow_domain=False` (`@x.com` is an
-  error, not an address).
+- Dashboard user and domain tabs call with `allow_domain=True`.
+  IMAP drag still uses `allow_domain=False` (From address only;
+  `@x.com` is an error, not an address).
 - No wildcards (`*`) in v1 — treat `*` as invalid.
 
 `parse_list_text(text, *, allow_domain)` walks lines, skips blanks,
@@ -234,9 +235,9 @@ only for learn/scan metadata.
 iter_list_header_addrs(raw) -> list[str]
 ```
 
-Parse `From`, `Sender`, `Reply-To` with `email.utils.parseaddr` /
+Parse `From` and `Sender` with `email.utils.parseaddr` /
 `getaddresses` as appropriate; drop empty; lowercase; **unique,
-preserve first-seen order**.
+preserve first-seen order**. Ignore Reply-To (spoofable).
 
 ```
 classify_list_hit(acc, roster, db, addrs) -> None | ListHit
@@ -245,18 +246,16 @@ classify_list_hit(acc, roster, db, addrs) -> None | ListHit
 `ListHit`: `decision` (`allow`|`block`), `pattern`, `scope`
 (`person`|`domain`), `conflict: bool`.
 
-Specificity rank:
+Stop-on-first-hit (pooled From+Sender addresses). Winner = first
+step with any hit. If both kinds exist at that step →
+`conflict=True` (still allow; `list_conflict` is audit-only).
 
 | Rank | Match |
 |---|---|
-| 3 | person + address (`scope_key=acc.actual_name`) |
+| 4 | person + address (`scope_key=acc.actual_name`) |
+| 3 | person + `@host` |
 | 2 | domain + address (`scope_key=mailbox domain`, roster member) |
 | 1 | domain + `@host` of that address |
-
-Collect **all** hits across **all** `addrs`. Winner = maximum rank
-present. If any hit at that rank is `allow` → `decision=allow`.
-Else `block`. If both kinds exist at that rank → `conflict=True`
-(still allow).
 
 If `addrs` is empty, no hit.
 
@@ -334,18 +333,21 @@ Use tmp `STATE_DIR` like other filter tests. Fake IMAP only where
 
 - Trim; blank lines skipped.
 - Internal space → error with line number.
-- Person: `@x.com` invalid; `a@x.com` valid.
+- Person: `@x.com` valid when `allow_domain=True` (dashboard);
+  IMAP drag still rejects `@x.com`.
 - Domain list: `x.com` and `@x.com` both → `@x.com`.
 - Duplicates `A@X.com` / `a@x.com` collapse.
 
 **Match matrix**
 
-- Person allow address vs domain block same address → allow (rank 3).
+- Person allow address vs domain block same address → allow (rank 4).
 - Domain `@host` block vs person allow address → allow.
 - Domain address block vs domain `@host` allow → block (rank 2).
-- Same rank allow+block → allow + `conflict`.
-- Reply-To-only address on person allow, From different → hit
-  (scan uses all three headers).
+- Person `@host` allow vs domain-list address block → allow (rank 3).
+- Person address block vs person `@host` allow → block (rank 4).
+- Same step allow+block → allow + `conflict`.
+- Reply-To-only address on person allow, From different → **no** hit.
+- Sender-only address on person allow → hit.
 - Mailbox user domain not on roster → domain list ignored.
 
 **Scan**

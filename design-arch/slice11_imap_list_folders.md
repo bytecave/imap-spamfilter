@@ -39,7 +39,7 @@ stay dashboard/YAML-roster (slice 12 / slice 10).
 - Dashboard UI (slice 12).
 - Writing `pattern_type=domain` from IMAP.
 - Matching Sender/Reply-To when **creating** the row (scan still
-  uses all three; the stored row is From).
+  uses From + Sender; the stored row is From).
 - SPECIAL-USE flags for list folders.
 - Localized folder names / YAML override in v1 (defaults only;
   optional override keys may be added if cheap and tested — default

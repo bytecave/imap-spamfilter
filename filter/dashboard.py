@@ -1415,7 +1415,7 @@ def _list_page(which: str, error: str | None = None, error_line: int | None = No
         options = [(n, n) for n in actual_names]
         scope_type = "person"
         default_key = options[0][0] if options else ""
-        allow_domain = False
+        allow_domain = True
         title = "User lists"
         active = "lists-users"
         action = "/lists/users"

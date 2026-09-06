@@ -124,7 +124,7 @@ def test_parse_list_line_and_text():
     assert f.parse_list_line("", allow_domain=False) is None
     with pytest.raises(ValueError, match="whitespace"):
         f.parse_list_line("a @x.com", allow_domain=False)
-    with pytest.raises(ValueError, match="person"):
+    with pytest.raises(ValueError, match="whole-domain"):
         f.parse_list_line("@x.com", allow_domain=False)
     assert f.parse_list_line("x.com", allow_domain=True) == f.ParsedPattern(
         "@x.com", "domain"
@@ -133,10 +133,10 @@ def test_parse_list_line_and_text():
         "@x.com", "domain"
     )
     items, err = f.parse_list_text(
-        "A@X.com\n\na@x.com\nb@y.com\n", allow_domain=False
+        "A@X.com\n\n@Vendor.com\nx.com\n", allow_domain=True
     )
     assert err is None
-    assert [p.pattern for p in items] == ["a@x.com", "b@y.com"]
+    assert [p.pattern for p in items] == ["a@x.com", "@vendor.com", "@x.com"]
     _items, err = f.parse_list_text("ok@x.com\nbad addr\n", allow_domain=False)
     assert err is not None
     assert err.line == 2
@@ -153,7 +153,7 @@ def test_match_person_allow_beats_domain_block(tmp_path):
     hit = f.classify_list_hit(acc, db, ["a@x.com"])
     assert hit is not None
     assert hit.decision == "allow"
-    assert hit.rank == 3
+    assert hit.rank == 4
     assert hit.conflict is False
 
 
@@ -167,7 +167,7 @@ def test_match_person_address_beats_domain_host_block(tmp_path):
     _seed(db, "domain", "example.com", "block", "@vendor.com", "domain")
     hit = f.classify_list_hit(acc, db, ["po@vendor.com"])
     assert hit.decision == "allow"
-    assert hit.rank == 3
+    assert hit.rank == 4
 
 
 def test_match_domain_address_beats_domain_host(tmp_path):
@@ -193,7 +193,7 @@ def test_match_same_rank_allow_wins_conflict(tmp_path):
     assert hit.conflict is True
 
 
-def test_match_reply_to_only(tmp_path):
+def test_match_reply_to_is_ignored(tmp_path):
     db = _mk_db(tmp_path)
     acc = _mk_account(actual_name="Rich")
     _seed(db, "person", "Rich", "allow", "safe@x.com")
@@ -205,10 +205,96 @@ def test_match_reply_to_only(tmp_path):
         b"\r\nbody\r\n"
     )
     addrs = f.iter_list_header_addrs(raw)
+    assert addrs == ["other@y.com"]
+    hit = f.classify_list_hit(acc, db, addrs)
+    assert hit is None
+
+
+def test_match_sender_only(tmp_path):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(actual_name="Rich")
+    _seed(db, "person", "Rich", "allow", "safe@x.com")
+    raw = (
+        b"From: other@y.com\r\n"
+        b"Sender: Safe@X.com\r\n"
+        b"Subject: hi\r\n"
+        b"Message-ID: <snd@example.com>\r\n"
+        b"\r\nbody\r\n"
+    )
+    addrs = f.iter_list_header_addrs(raw)
     assert addrs == ["other@y.com", "safe@x.com"]
     hit = f.classify_list_hit(acc, db, addrs)
     assert hit is not None
     assert hit.decision == "allow"
+    assert hit.rank == 4
+
+
+def test_match_person_host_allow_beats_domain_address_block(tmp_path):
+    db = _mk_db(tmp_path)
+    roster = f.ListRoster(entries=(("example.com", "company"),))
+    acc = _mk_account(
+        user="u@example.com", actual_name="Rich", list_roster=roster
+    )
+    _seed(db, "person", "Rich", "allow", "@vendor.com", "domain")
+    _seed(db, "domain", "example.com", "block", "spam@vendor.com")
+    hit = f.classify_list_hit(acc, db, ["spam@vendor.com"])
+    assert hit.decision == "allow"
+    assert hit.scope == "person"
+    assert hit.pattern == "@vendor.com"
+    assert hit.rank == 3
+    assert hit.conflict is False
+
+
+def test_match_person_host_block_beats_domain_host_allow(tmp_path):
+    db = _mk_db(tmp_path)
+    roster = f.ListRoster(entries=(("example.com", "company"),))
+    acc = _mk_account(
+        user="u@example.com", actual_name="Rich", list_roster=roster
+    )
+    _seed(db, "person", "Rich", "block", "@vendor.com", "domain")
+    _seed(db, "domain", "example.com", "allow", "@vendor.com", "domain")
+    hit = f.classify_list_hit(acc, db, ["po@vendor.com"])
+    assert hit.decision == "block"
+    assert hit.scope == "person"
+    assert hit.rank == 3
+    assert hit.conflict is False
+
+
+def test_match_person_address_allow_beats_person_host_block(tmp_path):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(actual_name="Rich")
+    _seed(db, "person", "Rich", "allow", "notspam@vendor.com")
+    _seed(db, "person", "Rich", "block", "@vendor.com", "domain")
+    hit = f.classify_list_hit(acc, db, ["notspam@vendor.com"])
+    assert hit.decision == "allow"
+    assert hit.rank == 4
+    assert hit.conflict is False
+
+
+def test_match_person_address_block_beats_person_host_allow(tmp_path):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(actual_name="Rich")
+    _seed(db, "person", "Rich", "allow", "@vendor.com", "domain")
+    _seed(db, "person", "Rich", "block", "spam@vendor.com")
+    hit = f.classify_list_hit(acc, db, ["spam@vendor.com"])
+    assert hit.decision == "block"
+    assert hit.rank == 4
+    assert hit.conflict is False
+
+
+def test_match_person_address_block_beats_domain_address_allow(tmp_path):
+    db = _mk_db(tmp_path)
+    roster = f.ListRoster(entries=(("example.com", "company"),))
+    acc = _mk_account(
+        user="u@example.com", actual_name="Rich", list_roster=roster
+    )
+    _seed(db, "person", "Rich", "block", "a@x.com")
+    _seed(db, "domain", "example.com", "allow", "a@x.com")
+    hit = f.classify_list_hit(acc, db, ["a@x.com"])
+    assert hit.decision == "block"
+    assert hit.scope == "person"
+    assert hit.rank == 4
+    assert hit.conflict is False
 
 
 def test_match_ignores_domain_list_when_not_on_roster(tmp_path):

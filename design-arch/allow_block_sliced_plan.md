@@ -3,7 +3,7 @@
 A sequenced set of four slices (9–12) that add server-side allow/block
 lists and put every ByteLord mailbox on one rspamd Bayes notebook.
 Each slice is independently mergeable with tests. Product decisions in
-this file are **locked**; do not reopen them during implementation.
+this file are the current policy; they are **reopenable** when asked.
 
 **Parent requirements (historical):** [`../new_requirements.md`](../new_requirements.md).
 This plan and slices 9–12 are **authoritative** for implementation.
@@ -41,10 +41,10 @@ economics). Slices 11 and 12 both depend on 10 and may overlap after
 
 ---
 
-## Locked product decisions
+## Product decisions
 
 Specs 9–12 must implement these. Do not invent a different policy
-“while we’re here.”
+“while we’re here.” Policy is **reopenable** when asked.
 
 **Override vs score vs Bayes**
 
@@ -56,27 +56,32 @@ Specs 9–12 must implement these. Do not invent a different policy
 
 **Headers**
 
-- **Scan/match:** From, Sender, and Reply-To (all three).
+- **Scan/match:** From and Sender only. Reply-To is ignored (spoofable).
 - **IMAP drag write:** From address only. Never a whole-domain pattern
   from a folder gesture.
 
 **Conflicts / precedence**
 
-Specificity, highest wins:
+Stop at the first step that matches any From/Sender address. Do not
+mix a later step into that decision.
 
-1. Person-list **address** (`actual_name` + `user@host`)
-2. Domain-list **address** (roster domain + `user@host`)
-3. Domain-list **whole domain** (`@host`)
+1. User-list **address** (`actual_name` + `user@host`)
+2. User-list **whole domain** (`actual_name` + `@host` / `host`)
+3. Domain-list **address** (roster domain + `user@host`)
+4. Domain-list **whole domain** (`@host`)
 
-Same specificity: **allow beats block**. When both kinds match at the
-winning specificity, still allow, and log `list_conflict`.
+User list overrides the roster domain list. Address beats `@host` on
+the same list. Allow wins **only** on a true tie at the winning step
+(same pattern on both allow and block); still allow, and log
+`list_conflict` (audit-only: events row, no extra IMAP/Bayes/safe-mode
+behavior).
 
 **Scopes**
 
-- **Person lists** keyed by required YAML `actual_name` (exact display
-  string, not lowercased). One person → one allow list and one block
-  list, shared across every account with that `actual_name`. Addresses
-  only.
+- **Person / user lists** keyed by required YAML `actual_name` (exact
+  display string, not lowercased). One person → one allow list and one
+  block list, shared across every account with that `actual_name`.
+  Addresses **and** `@domain` / `domain`.
 - **Domain lists** keyed by a YAML **roster** domain. One allow and one
   block per roster domain. Addresses and `@domain` / `domain`. The
   dashboard cannot add, rename, or delete roster domains.
