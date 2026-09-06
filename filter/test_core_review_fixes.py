@@ -199,7 +199,7 @@ def test_inbox_uses_fetched_flags_not_two_search_race(tmp_path, monkeypatch):
     db = _mk_db(tmp_path)
     with db.tx():
         db.set_scan_bookmark("INBOX", 1, 0)
-    monkeypatch.setattr(f, "rspamd_scan", lambda *a, **k: 1.0)
+    monkeypatch.setattr(f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(1.0, (), None))
     client = _ArrivalBetweenSearchesIMAP(
         existing=_all_existing(),
         uids=[1, 2],
@@ -234,9 +234,9 @@ def test_persisted_score_replays_failed_flag_action(tmp_path, monkeypatch):
 
     def scan(*args, **kwargs):
         scans["count"] += 1
-        return 9.0
+        return f.ScanResult(9.0, (), None)
 
-    monkeypatch.setattr(f, "rspamd_scan", scan)
+    monkeypatch.setattr(f, "rspamd_scan_detail", scan)
     client = _FailFlagOnceIMAP(
         existing=_all_existing(), uids=[1], bodies={1: _raw(1)}
     )
@@ -259,7 +259,7 @@ def test_persisted_score_replays_failed_move_intent(tmp_path, monkeypatch):
     db = _mk_db(tmp_path)
     with db.tx():
         db.set_scan_bookmark("INBOX", 1, 0)
-    monkeypatch.setattr(f, "rspamd_scan", lambda *a, **k: 9.0)
+    monkeypatch.setattr(f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(9.0, (), None))
     client = CapIMAP(
         existing=_all_existing(), uids=[1], bodies={1: _raw(1)}
     )

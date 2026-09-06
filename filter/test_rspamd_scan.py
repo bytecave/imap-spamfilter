@@ -12,24 +12,29 @@ import filter as f  # noqa: E402
 
 
 class _FakeResp:
-    def __init__(self, score=1.5):
+    def __init__(self, score=1.5, symbols=None, action="no action"):
         self._score = score
+        self._symbols = symbols
+        self._action = action
 
     def raise_for_status(self):
         return None
 
     def json(self):
-        return {"score": self._score}
+        out = {"score": self._score, "action": self._action}
+        if self._symbols is not None:
+            out["symbols"] = self._symbols
+        return out
 
 
-def _capture_post(monkeypatch):
+def _capture_post(monkeypatch, *, score=1.5, symbols=None, action="no action"):
     captured: dict = {}
 
     def post(url, data=None, headers=None, timeout=None):
         captured["url"] = url
         captured["headers"] = dict(headers or {})
         captured["data"] = data
-        return _FakeResp()
+        return _FakeResp(score=score, symbols=symbols, action=action)
 
     monkeypatch.setattr(f.requests, "post", post)
     return captured
@@ -77,6 +82,36 @@ def test_scan_rcpt_falls_back_to_recipient(monkeypatch):
     f.rspamd_scan(RAW_WITH_FROM, "u@example.com", 100.0)
     assert captured["headers"]["Rcpt"] == "u@example.com"
     assert captured["headers"]["From"] == "sender@example.com"
+
+
+def test_scan_detail_sorts_and_keeps_bayes_zero(monkeypatch):
+    symbols = {
+        "MIME_GOOD": {"score": -0.1, "description": "Known content-type"},
+        "BROKEN_HEADERS": {"score": 8.0, "description": "Headers structure is likely broken"},
+        "BAYES_HAM": {"score": 0.0, "description": "Message is probably ham"},
+        "NOISE_TINY": {"score": 0.01, "description": "ignore me"},
+        "BLACKLIST_DMARC": {"score": 6.0, "description": "DMARC failed"},
+    }
+    captured = _capture_post(
+        monkeypatch, score=24.9, symbols=symbols, action="reject"
+    )
+    result = f.rspamd_scan_detail(
+        RAW_WITH_FROM, "u@example.com", 100.0, bayes_user="bytelord"
+    )
+    assert result is not None
+    assert result.score == 24.9
+    assert result.action == "reject"
+    assert captured["headers"]["Rcpt"] == "bytelord"
+    names = [s.name for s in result.symbols]
+    assert names[0] == "BROKEN_HEADERS"
+    assert names[1] == "BLACKLIST_DMARC"
+    assert "BAYES_HAM" in names
+    assert "NOISE_TINY" not in names
+    assert f.rspamd_scan(RAW_WITH_FROM, "u@example.com", 100.0) == 24.9
+    detail = f.score_detail_json(result)
+    assert "BROKEN_HEADERS" in detail
+    assert len(detail.encode()) <= f.SCORE_DETAIL_MAX_BYTES
+    assert "BROKEN_HEADERS=+8.00" in f.format_top_symbols_line(result.symbols)
 
 
 def test_parse_envelope_decodes_rfc2047_subject():

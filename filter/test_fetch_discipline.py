@@ -131,7 +131,7 @@ def test_scan_inbox_skips_oversize_without_body_fetch(tmp_path, monkeypatch):
     acc = _mk_account(mode="shadow")
     with db.tx():
         db.set_scan_bookmark("INBOX", 1, 0)
-    monkeypatch.setattr(f, "rspamd_scan", lambda *a, **k: 9.0)
+    monkeypatch.setattr(f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(9.0, (), None))
     client = CapIMAP(
         existing=_all_existing(),
         uids=[1, 2],

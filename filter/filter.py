@@ -16,6 +16,7 @@ import email
 import email.policy
 import hashlib
 import ipaddress
+import json
 import logging
 import math
 import os
@@ -191,6 +192,99 @@ class ListHit:
     scope: str  # 'person' | 'domain'
     conflict: bool
     rank: int
+
+
+@dataclass(frozen=True)
+class ScanSymbol:
+    name: str
+    score: float
+    description: str
+
+
+@dataclass(frozen=True)
+class ScanResult:
+    score: float
+    symbols: tuple[ScanSymbol, ...]
+    action: str | None = None
+
+
+# Always keep these families even when score ≈ 0 (diagnostic / ops).
+_SCAN_SYMBOL_KEEP_PREFIXES = (
+    "BAYES_", "RBL_", "DMARC_", "SPF", "NEURAL_", "FUZZY_",
+    "DKIM_", "ARC_", "URIBL_", "R_SPF", "R_DKIM",
+)
+SCORE_DETAIL_TOP_N = 15
+SCORE_DETAIL_MAX_BYTES = 4096
+SCORE_EXPLAIN_LOG_MIN = 15.0
+
+
+def _keep_scan_symbol(name: str, score: float) -> bool:
+    if abs(score) >= 0.05:
+        return True
+    return any(name.startswith(p) for p in _SCAN_SYMBOL_KEEP_PREFIXES)
+
+
+def parse_scan_symbols(data: Mapping[str, Any]) -> tuple[ScanSymbol, ...]:
+    """Extract /checkv2 symbols sorted by |score| descending."""
+    raw_syms = data.get("symbols")
+    if not isinstance(raw_syms, Mapping):
+        return ()
+    out: list[ScanSymbol] = []
+    for name, meta in raw_syms.items():
+        if not isinstance(name, str) or not name:
+            continue
+        if isinstance(meta, Mapping):
+            sc = meta.get("score", 0)
+            desc = meta.get("description") or ""
+        else:
+            continue
+        try:
+            score = float(sc)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(score):
+            continue
+        if not _keep_scan_symbol(name, score):
+            continue
+        if not isinstance(desc, str):
+            desc = str(desc)
+        out.append(ScanSymbol(name=name, score=score, description=desc[:120]))
+    out.sort(key=lambda s: (-abs(s.score), s.name))
+    return tuple(out)
+
+
+def score_detail_json(result: ScanResult, *, top_n: int = SCORE_DETAIL_TOP_N) -> str:
+    """Compact JSON for messages.score_detail (top symbols, size-capped)."""
+    payload = {
+        "score": result.score,
+        "action": result.action,
+        "symbols": [
+            {"n": s.name, "s": round(s.score, 3), "d": s.description[:80]}
+            for s in result.symbols[:top_n]
+        ],
+    }
+    text = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    if len(text.encode("utf-8")) > SCORE_DETAIL_MAX_BYTES:
+        # Drop descriptions first, then trim symbol count.
+        payload["symbols"] = [
+            {"n": s.name, "s": round(s.score, 3)}
+            for s in result.symbols[:top_n]
+        ]
+        text = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        while (
+            len(text.encode("utf-8")) > SCORE_DETAIL_MAX_BYTES
+            and payload["symbols"]
+        ):
+            payload["symbols"].pop()
+            text = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    return text
+
+
+def format_top_symbols_line(
+    symbols: tuple[ScanSymbol, ...] | list[ScanSymbol], *, n: int = 5
+) -> str:
+    parts = [f"{s.name}={s.score:+.2f}" for s in list(symbols)[:n]]
+    return " ".join(parts) if parts else "(no symbols)"
 
 
 @dataclass
@@ -939,6 +1033,7 @@ CREATE TABLE IF NOT EXISTS messages (
     current_folder     TEXT NOT NULL,
     moved_to_junk_at   INTEGER,
     our_score          REAL,
+    score_detail       TEXT,
     our_action         TEXT,
     learned_as         TEXT,
     learned_at         INTEGER,
@@ -1124,6 +1219,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         )
     if "learn_retry_at" not in cols:
         conn.execute("ALTER TABLE messages ADD COLUMN learn_retry_at INTEGER")
+    if "score_detail" not in cols:
+        conn.execute("ALTER TABLE messages ADD COLUMN score_detail TEXT")
     pending_info = list(conn.execute("PRAGMA table_info(pending_move)"))
     pending_cols = {r[1] for r in pending_info}
     pending_pk = [
@@ -1485,7 +1582,8 @@ class Db:
     # SET clause from kwarg names; without this guard a typo or a
     # future caller could put an arbitrary identifier into the SQL.
     _UPDATABLE_MESSAGE_COLUMNS = frozenset({
-        "current_folder", "moved_to_junk_at", "our_score", "our_action",
+        "current_folder", "moved_to_junk_at", "our_score", "score_detail",
+        "our_action",
         "learned_as", "learned_at", "pending_learn", "pending_learn_at",
         "learn_retry_count", "learn_retry_at",
         "sender", "subject", "message_id", "body_sha256",
@@ -1730,10 +1828,10 @@ class Db:
 # ---------------------------------------------------------------------------
 
 
-def rspamd_scan(
+def rspamd_scan_detail(
     raw: bytes, recipient: str, max_score: float, bayes_user: str | None = None
-) -> float | None:
-    """POST to /checkv2. Return numeric score or None on any error.
+) -> ScanResult | None:
+    """POST to /checkv2. Return score + symbol breakdown, or None on error.
 
     `bayes_user`, if given, is used as the `Rcpt` header so rspamd's
     per-user classifier (with `users_enabled = true`) looks up Bayes data
@@ -1750,7 +1848,9 @@ def rspamd_scan(
         _msgid, _subject, sender = parse_envelope(raw)
         if sender:
             headers["From"] = sender
-        resp = requests.post(RSPAMD_SCAN_URL, data=raw, headers=headers, timeout=HTTP_TIMEOUT)
+        resp = requests.post(
+            RSPAMD_SCAN_URL, data=raw, headers=headers, timeout=HTTP_TIMEOUT
+        )
         resp.raise_for_status()
         data = resp.json()
         if not isinstance(data, Mapping):
@@ -1768,9 +1868,24 @@ def rspamd_scan(
         score = float(score)
         if score < -max_score or score > max_score:
             return None
-        return score
+        action = data.get("action")
+        if not isinstance(action, str):
+            action = None
+        return ScanResult(
+            score=score,
+            symbols=parse_scan_symbols(data),
+            action=action,
+        )
     except (requests.RequestException, TypeError, ValueError, OverflowError):
         return None
+
+
+def rspamd_scan(
+    raw: bytes, recipient: str, max_score: float, bayes_user: str | None = None
+) -> float | None:
+    """POST to /checkv2. Return numeric score or None on any error."""
+    result = rspamd_scan_detail(raw, recipient, max_score, bayes_user=bayes_user)
+    return None if result is None else result.score
 
 
 def rspamd_learn(raw: bytes, kind: str, user: str) -> str:
@@ -2694,11 +2809,11 @@ def scan_inbox(
                     continue
 
                 recipient = first_recipient(raw, acc.user)
-                score = rspamd_scan(
+                detail = rspamd_scan_detail(
                     raw, recipient, acc.reject_score_above,
                     bayes_user=acc.bayes_user or acc.user,
                 )
-                if score is None:
+                if detail is None:
                     log.warning("scan failed for %s (uid=%s) - keeping in inbox", msgid, uid)
                     db.log_event("scan_failed", msgid)
                     if state is not None:
@@ -2719,10 +2834,25 @@ def scan_inbox(
                     db.log_event("scan_recovered", detail=str(state.scan_fail_streak))
                     state.scan_fail_streak = 0
 
+                score = detail.score
+                detail_json = score_detail_json(detail)
                 with db.tx():
-                    db.update_imap_message(fmap["inbox"], uv, uid, our_score=score)
-                    db.log_event("scan", msgid, detail=f"score={score:.2f} mode={acc.mode}")
+                    db.update_imap_message(
+                        fmap["inbox"], uv, uid,
+                        our_score=score,
+                        score_detail=detail_json,
+                    )
+                    db.log_event(
+                        "scan", msgid,
+                        detail=f"score={score:.2f} mode={acc.mode}",
+                    )
                 log.debug("scored %s = %.2f", msgid, score)
+                explain_floor = max(float(acc.threshold), SCORE_EXPLAIN_LOG_MIN)
+                if score >= explain_floor:
+                    log.info(
+                        "score_explain %s score=%.2f top=%s",
+                        msgid, score, format_top_symbols_line(detail.symbols),
+                    )
 
             addrs = iter_list_header_addrs(raw)
             hit = classify_list_hit(acc, db, addrs)

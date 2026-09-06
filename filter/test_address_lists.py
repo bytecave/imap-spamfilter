@@ -319,7 +319,7 @@ def test_scan_allow_skips_flag_over_threshold(tmp_path, monkeypatch):
     _seed(db, "person", "Rich", "allow", "sender@example.com")
     with db.tx():
         db.set_scan_bookmark("INBOX", 1, 0)
-    monkeypatch.setattr(f, "rspamd_scan", lambda *a, **k: 9.0)
+    monkeypatch.setattr(f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(9.0, (), None))
     client = _scan_client()
     f.scan_inbox(client, db, LOG, acc, FMAP)
     assert client.flags_added == []
@@ -337,7 +337,7 @@ def test_scan_block_under_threshold_still_acts_flag(tmp_path, monkeypatch):
     _seed(db, "person", "Rich", "block", "sender@example.com")
     with db.tx():
         db.set_scan_bookmark("INBOX", 1, 0)
-    monkeypatch.setattr(f, "rspamd_scan", lambda *a, **k: 2.0)
+    monkeypatch.setattr(f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(2.0, (), None))
     client = _scan_client()
     f.scan_inbox(client, db, LOG, acc, FMAP)
     assert client.flags_added == [(1, [b"\\Flagged"])]
@@ -351,7 +351,7 @@ def test_scan_block_shadow_does_not_move(tmp_path, monkeypatch):
     _seed(db, "person", "Rich", "block", "sender@example.com")
     with db.tx():
         db.set_scan_bookmark("INBOX", 1, 0)
-    monkeypatch.setattr(f, "rspamd_scan", lambda *a, **k: 9.0)
+    monkeypatch.setattr(f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(9.0, (), None))
     client = _scan_client()
     f.scan_inbox(client, db, LOG, acc, FMAP)
     assert client.moved == []

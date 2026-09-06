@@ -36,24 +36,26 @@ def dashboard_db(tmp_path, monkeypatch):
         """
         INSERT INTO messages(
             account, folder, uidvalidity, uid, message_id, body_sha256,
-            first_seen, last_seen, current_folder, our_score, our_action,
+            first_seen, last_seen, current_folder, our_score, score_detail, our_action,
             learned_as, learned_at, sender, subject, received_at
-        ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             (
                 "acct-alpha", "INBOX", 10, "alpha@id", sha, now, now,
-                "INBOX", 9.0, "move", None, None, "alpha@sender",
+                "INBOX", 9.0,
+                '{"score":9.0,"symbols":[{"n":"BROKEN_HEADERS","s":8.0,"d":"broken"}]}',
+                "move", None, None, "alpha@sender",
                 "ALPHA SUBJECT", now,
             ),
             (
                 "acct-alpha", "Train-Ham", 11, "alpha-copy@id", sha,
-                now, now, "Train-Ham", None, None, "ham", now,
+                now, now, "Train-Ham", None, None, None, "ham", now,
                 "alpha@sender", "ALPHA TRAIN COPY", now,
             ),
             (
                 "acct-beta", "INBOX", 20, "beta@id", "beta-body",
-                now, now, "INBOX", 5.0, "tag", "spam", now,
+                now, now, "INBOX", 5.0, None, "tag", "spam", now,
                 "beta@sender", "BETA SUBJECT", now,
             ),
         ],
@@ -433,6 +435,7 @@ def test_messages_sort_by_score(dashboard_db, monkeypatch):
     resp = client.get("/messages")
     assert b'sort=score' in resp.data
     assert b'dir=desc' in resp.data
+    assert b"BROKEN_HEADERS=+8.0" in resp.data
     desc = client.get("/messages?sort=score&dir=desc")
     assert desc.status_code == 200
     html = desc.data.decode()

@@ -46,9 +46,9 @@ def test_duplicate_message_id_scores_independently(tmp_path, monkeypatch):
 
     def scan(raw, *a, **k):
         scores.append(raw)
-        return 4.0 if b"body-a" in raw else 7.0
+        return f.ScanResult(4.0 if b"body-a" in raw else 7.0, (), None)
 
-    monkeypatch.setattr(f, "rspamd_scan", scan)
+    monkeypatch.setattr(f, "rspamd_scan_detail", scan)
     client = CapIMAP(
         existing=_all_existing(),
         uids=[1, 2],
@@ -87,7 +87,7 @@ def test_duplicate_message_id_does_not_inherit_junk_history(tmp_path, monkeypatc
             learned_as="spam",
             our_score=9.0,
         )
-    monkeypatch.setattr(f, "rspamd_scan", lambda *a, **k: 1.0)
+    monkeypatch.setattr(f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(1.0, (), None))
     client = CapIMAP(
         existing=_all_existing(),
         uids=[1],

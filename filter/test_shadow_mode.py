@@ -272,7 +272,7 @@ def test_scan_inbox_shadow_logs_does_not_flag_or_enqueue(tmp_path, monkeypatch):
     acc = _mk_account(mode="shadow")
     with db.tx():
         db.set_scan_bookmark("INBOX", 1, 0)
-    monkeypatch.setattr(f, "rspamd_scan", lambda *a, **k: 9.0)
+    monkeypatch.setattr(f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(9.0, (), None))
     client = _scan_client()
 
     f.scan_inbox(client, db, LOG, acc, FMAP)
@@ -294,7 +294,7 @@ def test_scan_inbox_flag_stores_flagged(tmp_path, monkeypatch):
     acc = _mk_account(mode="flag")
     with db.tx():
         db.set_scan_bookmark("INBOX", 1, 0)
-    monkeypatch.setattr(f, "rspamd_scan", lambda *a, **k: 9.0)
+    monkeypatch.setattr(f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(9.0, (), None))
     client = _scan_client()
 
     f.scan_inbox(client, db, LOG, acc, FMAP)

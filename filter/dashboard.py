@@ -584,6 +584,35 @@ def _fmt_score(s):
     return f"{f:+.2f}"
 
 
+def _score_why(detail_json: str | None, *, n: int = 3) -> str:
+    """Muted one-line top symbols from messages.score_detail JSON."""
+    if not detail_json:
+        return ""
+    try:
+        import json
+        data = json.loads(detail_json)
+    except (TypeError, ValueError):
+        return ""
+    syms = data.get("symbols") if isinstance(data, dict) else None
+    if not isinstance(syms, list) or not syms:
+        return ""
+    parts = []
+    for item in syms[:n]:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("n")
+        sc = item.get("s")
+        if not isinstance(name, str) or name == "":
+            continue
+        try:
+            parts.append(f"{name}={float(sc):+.1f}")
+        except (TypeError, ValueError):
+            parts.append(name)
+    if not parts:
+        return ""
+    return '<div class="muted score-why">' + _h(" ".join(parts)) + "</div>"
+
+
 def _score_class(s):
     if s is None:
         return ""
@@ -805,6 +834,8 @@ th { font-size:0.74em; text-transform:uppercase; letter-spacing:0.03em;
 tbody tr:hover td { background:var(--surface-2); }
 td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; }
 .muted { color:var(--muted); }
+.score-why { font-size:0.75rem; font-weight:400; margin-top:0.15rem; max-width:18rem;
+  white-space:normal; text-align:right; line-height:1.25; }
 .subj { max-width:34em; overflow:hidden; text-overflow:ellipsis;
   white-space:nowrap; display:block; }
 code { font-size:0.92em; word-break:break-all; }
@@ -1252,7 +1283,7 @@ def messages():
         rows = c.execute(
             f"""
             SELECT m.account, m.message_id, m.last_seen, m.received_at, m.our_score,
-                   m.our_action, m.current_folder, m.sender, m.subject,
+                   m.score_detail, m.our_action, m.current_folder, m.sender, m.subject,
                    COALESCE(
                      NULLIF(m.learned_as, ''),
                      (SELECT s.learned_as FROM messages s
@@ -1272,7 +1303,8 @@ def messages():
         f'<tr><td>{_fmt_ts(r["received_at"] or r["last_seen"])}</td>'
         f'<td>{_h(r["account"])}</td>'
         f'<td class="num {_score_class(r["our_score"])}">'
-        f'{_fmt_score(r["our_score"])}</td>'
+        f'{_fmt_score(r["our_score"])}'
+        f'{_score_why(r["score_detail"])}</td>'
         f'<td>{_h(r["our_action"] or "-")}</td>'
         f'<td>{_h(r["current_folder"] or "-")}</td>'
         f'<td>{_h(r["learned_as"] or "-")}</td>'

@@ -839,7 +839,17 @@ Restore is the reverse: stop the four containers, extract the tar over
   alignment are degraded; they rely on `Received:` chains in the message
   plus Bayes/fuzzy/neural. HTTP `From` is the message From (not the IMAP
   recipient). `Rcpt` remains the Bayes identity (`bayes_user` or the
-  account user).
+  account user). After M365 delivery, symbols like `BROKEN_HEADERS`,
+  `BLACKLIST_DMARC`, `R_SPF_FAIL`, and `R_DKIM_REJECT` can dominate the
+  score even when Bayes is silent — Amazon transactional mail is a common
+  example. To dump the symbol table for one message:
+
+  ```bash
+  docker exec spamfilter python explain_score.py rich_bytecave --uid 234134
+  ```
+
+  New scans store top symbols in `messages.score_detail` (shown under Score
+  on the Messages page). Ham training cannot cancel those auth/header symbols.
 - **Dashboard writes are list-only.** Admins can edit allow/block
   lists; there are no controls to move, learn, or change accounts.yml.
   Inspect deeper via SQLite if needed.
@@ -870,7 +880,8 @@ Restore is the reverse: stop the four containers, extract the tar over
 │   ├── filter.py
 │   ├── dashboard.py
 │   ├── lists.js
-│   └── bootstrap_train.py
+│   ├── bootstrap_train.py
+│   └── explain_score.py
 ├── redis/                        # Redis server config template
 ├── rspamd/local.d/               # rspamd config templates + static configs
 └── unraid/                       # bootstrap.sh + Unraid Docker templates

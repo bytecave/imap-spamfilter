@@ -37,9 +37,9 @@ def test_bookmark_stops_at_rspamd_failure(tmp_path, monkeypatch):
     def scan(raw, *a, **k):
         if b"mid2@example.com" in raw:
             return None
-        return 1.0
+        return f.ScanResult(1.0, (), None)
 
-    monkeypatch.setattr(f, "rspamd_scan", scan)
+    monkeypatch.setattr(f, "rspamd_scan_detail", scan)
     client = CapIMAP(
         existing=_all_existing(),
         uids=[1, 2, 3],
@@ -65,9 +65,9 @@ def test_bookmark_advances_after_rspamd_recovers(tmp_path, monkeypatch):
     def down(raw, *a, **k):
         if b"mid2@example.com" in raw:
             return None
-        return 1.0
+        return f.ScanResult(1.0, (), None)
 
-    monkeypatch.setattr(f, "rspamd_scan", down)
+    monkeypatch.setattr(f, "rspamd_scan_detail", down)
     client = CapIMAP(
         existing=_all_existing(),
         uids=[1, 2, 3],
@@ -76,7 +76,7 @@ def test_bookmark_advances_after_rspamd_recovers(tmp_path, monkeypatch):
     f.scan_inbox(client, db, LOG, acc, FMAP)
     assert db.get_scan_bookmark("INBOX", 1) == 1
 
-    monkeypatch.setattr(f, "rspamd_scan", lambda *a, **k: 1.0)
+    monkeypatch.setattr(f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(1.0, (), None))
     f.scan_inbox(client, db, LOG, acc, FMAP)
 
     assert db.get_scan_bookmark("INBOX", 1) == 3
@@ -89,7 +89,7 @@ def test_oversize_is_terminal_for_bookmark(tmp_path, monkeypatch):
     acc = _mk_account(mode="shadow")
     with db.tx():
         db.set_scan_bookmark("INBOX", 1, 0)
-    monkeypatch.setattr(f, "rspamd_scan", lambda *a, **k: 1.0)
+    monkeypatch.setattr(f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(1.0, (), None))
     client = CapIMAP(
         existing=_all_existing(),
         uids=[1, 2],
@@ -108,7 +108,7 @@ def test_missing_body_does_not_advance_bookmark(tmp_path, monkeypatch):
     acc = _mk_account(mode="shadow")
     with db.tx():
         db.set_scan_bookmark("INBOX", 1, 0)
-    monkeypatch.setattr(f, "rspamd_scan", lambda *a, **k: 1.0)
+    monkeypatch.setattr(f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(1.0, (), None))
     client = CapIMAP(
         existing=_all_existing(),
         uids=[1, 2],
