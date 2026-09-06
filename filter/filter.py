@@ -1882,6 +1882,42 @@ def detect_special_folders(client: IMAPClient) -> dict[str, str]:
     return out
 
 
+def apply_special_use_remap(
+    acc: Account, client: IMAPClient, log: logging.Logger | None = None
+) -> None:
+    """Rewrite junk/trash and Train-/Trained-* paths from RFC 6154 flags.
+
+    Same remap the account loop uses so M365 `Junk Email/Trained-Spam`
+    is picked up without a YAML override.
+    """
+    if not acc.auto_special_folders:
+        return
+    detected = detect_special_folders(client)
+    old_junk = acc.junk
+    for key in ("junk", "trash"):
+        name = detected.get(key)
+        if not name:
+            continue
+        current = getattr(acc, key)
+        if name != current:
+            if log is not None:
+                log.info(
+                    "auto-detected %s folder via SPECIAL-USE: %s (was %s)",
+                    key, name, current,
+                )
+            setattr(acc, key, name)
+    if "junk" in detected and acc.junk != old_junk:
+        new_junk = acc.junk
+        prefix = old_junk + "/"
+        for key in ("spam_train", "trained_spam", "ham_train", "trained_ham"):
+            cur = getattr(acc, key)
+            if cur.startswith(prefix):
+                remapped = new_junk + cur[len(old_junk):]
+                if log is not None:
+                    log.info("remapped %s: %s -> %s", key, cur, remapped)
+                setattr(acc, key, remapped)
+
+
 def ensure_folders(client: IMAPClient, log: logging.Logger, fmap: dict[str, str]) -> None:
     # Don't trust LIST alone: some servers return placeholders (\Noselect /
     # \NonExistent) for parents whose children we created earlier, which
@@ -3415,31 +3451,7 @@ def _run_account(acc: Account, db: Db) -> None:
             client = connect_imap(acc)
             delim = detect_delimiter(client)
             acc.delimiter = delim
-            if acc.auto_special_folders:
-                detected = detect_special_folders(client)
-                old_junk = acc.junk
-                for key in ("junk", "trash"):
-                    name = detected.get(key)
-                    if not name:
-                        continue
-                    current = getattr(acc, key)
-                    if name != current:
-                        log.info("auto-detected %s folder via SPECIAL-USE: %s (was %s)",
-                                 key, name, current)
-                        setattr(acc, key, name)
-                # Keep spam_train/trained_spam under whatever the new junk
-                # is, regardless of what prefix the operator originally
-                # configured. Catches operators who don't use literal
-                # "Junk/..." (e.g. "Spam/...") when the server later remaps.
-                if "junk" in detected and acc.junk != old_junk:
-                    new_junk = acc.junk
-                    prefix = old_junk + "/"
-                    for key in ("spam_train", "trained_spam", "ham_train", "trained_ham"):
-                        cur = getattr(acc, key)
-                        if cur.startswith(prefix):
-                            remapped = new_junk + cur[len(old_junk):]
-                            log.info("remapped %s: %s -> %s", key, cur, remapped)
-                            setattr(acc, key, remapped)
+            apply_special_use_remap(acc, client, log)
             acc.folder_map = build_folder_map(acc, delim)
             ensure_folders(client, log, acc.folder_map)
             idle_cap = client.has_capability("IDLE")

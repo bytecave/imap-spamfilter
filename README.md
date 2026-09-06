@@ -291,6 +291,18 @@ docker exec -it spamfilter python bootstrap_train.py your_name Train-Spam spam -
 docker exec -it spamfilter python bootstrap_train.py your_name Train-Ham  ham  --move-to Trained-Ham
 ```
 
+To re-feed every mailbox's existing **Trained-Spam / Trained-Ham** into a
+shared `bayes_user` notebook (in place, no MOVE; SPECIAL-USE remaps
+`Junk Email/Trained-*` automatically):
+
+```bash
+docker exec spamfilter python bootstrap_train.py --all-trained --dry-run
+docker exec spamfilter python bootstrap_train.py --all-trained
+```
+
+Rspamd HTTP 208 (`already`) means that body is already in this notebook;
+it is not trained twice. `--kind spam` or `--kind ham` limits to one class.
+
 ### 5. Mode promotion
 
 After ~1 week in `shadow`:
@@ -587,12 +599,12 @@ again. The prior tokens stay in Redis under the old key but are no longer
 consulted. This project does not merge Redis keys.
 
 To re-feed an existing Trained-* corpus into the new notebook, after
-`bayes_user` is set, run `bootstrap_train.py` against each account's
-`Trained-Spam` / `Trained-Ham` IMAP folders and **omit `--move-to`** so
-messages stay put. Use the real IMAP names (SPECIAL-USE may be
-`Junk Email/Trained-Spam`). Do this while still in `shadow` so retention
-cannot MOVE Trained-* to Trash. Alternative: MOVE Trained-* → Train-* and
-let the running filter drain.
+`bayes_user` is set, run `bootstrap_train.py --all-trained` (optional
+`--dry-run`). That walks every account, remaps SPECIAL-USE junk parents,
+and learns **in place** from Trained-Spam / Trained-Ham (no `--move-to`).
+Do this while still in `shadow` so retention cannot MOVE Trained-* to
+Trash. Messages already in the shared notebook return HTTP 208 and are
+counted as `already`, not trained again.
 
 ---
 

@@ -1,6 +1,6 @@
 # Implementation status — imap-spamfilter (ByteLord)
 
-**Last updated:** 2026-09-05  
+**Last updated:** 2026-09-06  
 **Supersedes for current work:** [`SESSION_HANDOFF.md`](SESSION_HANDOFF.md) (that file is still useful for VPS layout and OAuth, but its “what’s next” and mailbox list are stale).
 
 **Repo:** `/opt/bytelord/projects/imap-spamfilter`  
@@ -13,7 +13,7 @@ Read this first in a new agent/chat session before exploring the tree.
 
 ## Snapshot in one paragraph
 
-Allow/block lists + one VPS Bayes notebook (design-arch slices 9–12) are **implemented and on `origin/main`**. User lists may include `@host` as well as addresses; matching is From + Sender only (Reply-To ignored). User-list hits override roster-scoped domain lists. All live mailboxes are M365 via `email-oauth2-proxy`, still in **shadow**. Dashboard list editors work (admin only). User is unhappy with Bayes score quality (upstream rspamd/project behavior, not a list-policy bug). **Do not** wire `bytelord.net` mailboxes through the OAuth proxy. Product policy for allow/block lists is **reopenable whenever asked**.
+Allow/block lists + one VPS Bayes notebook (design-arch slices 9–12) are **implemented and on `origin/main`**. User lists may include `@host` as well as addresses; matching is From + Sender only (Reply-To ignored). User-list hits override roster-scoped domain lists. All live mailboxes are M365 via `email-oauth2-proxy`, still in **shadow**. Dashboard list editors work (admin only). Shared Bayes re-feed from Trained-* is `bootstrap_train.py --all-trained` (in place; HTTP 208 skips already-learned bodies). **Do not** wire `bytelord.net` mailboxes through the OAuth proxy. Product policy for allow/block lists is **reopenable whenever asked**.
 
 ---
 
@@ -66,7 +66,7 @@ Architecture: `design-arch/allow_block_sliced_plan.md` + `slice9_shared_bayes.md
 - Learned: click **Event** to sort (SQL); first click A→Z, click again toggles
 - `script-src 'self'`; `filter/lists.js` served as `/lists.js`
 
-**Tests:** full `filter/` suite **184 passed** (Docker `python:3.12-slim`). Host has no pytest/`ensurepip`. Use:
+**Tests:** full `filter/` suite **188 passed** (Docker `python:3.12-slim`). Host has no pytest/`ensurepip`. Use:
 
 ```bash
 docker run --rm -v /opt/bytelord/projects/imap-spamfilter/filter:/app -w /app \
@@ -179,7 +179,7 @@ Gmail / live.com: still deferred (not client-credentials).
 ## What’s next (suggested)
 
 1. **User may want a commit/push** of the uncommitted implementation (slices 9–12 + dashboard UX). Ask first; use the repo’s commit-message style; do not include `accounts.yml`.
-2. **Bayes quality** — user reports an ~1125-item notebook still scores most spam low and flags some ham. They framed this as the upstream project, not our list work. Optional later: confirm Trained-* re-feed via `bootstrap_train.py` **without** `--move-to` (slice 9 follow-up; not done this session), threshold when leaving shadow, more ham/spam training. Stay in **shadow** until scores look sane; then `flag` then `move`.
+2. **Bayes quality / Trained-* re-feed** — `python bootstrap_train.py --all-trained` (dry-run first) after a filter image rebuild. Stay in **shadow** until scores look sane; then `flag` then `move`. Do not MOVE Trained-* back to Train-*.
 3. **Do not** implement generic IMAP user/password for `bytelord.net` unless asked (new auth path).
 4. More M365 mailboxes only with Exchange grant + proxy section + YAML.
 5. Dashboard: Domain/User lists accept addresses and `@host`; Score/Event sort are live after rebuild. No further list-slice work unless the user files bugs.
@@ -195,7 +195,7 @@ Gmail / live.com: still deferred (not client-credentials).
 | `design-arch/allow_block_sliced_plan.md` | List/Bayes product decisions (reopenable) |
 | `design-arch/slice9_shared_bayes.md` … `slice12_dashboard_lists.md` | Implementation specs |
 | `design-arch/sliced_plan_code_review_fixes.md` | Slices 1–8 + deferred ops |
-| `filter/filter.py` | Lists, scan, IMAP drain, schema |
+| `filter/bootstrap_train.py` | Trained-* re-feed (`--all-trained`) |
 | `filter/dashboard.py` + `filter/lists.js` | Dashboard + list editor + sort |
 | `filter/test_address_lists.py`, `test_list_folders.py`, `test_dashboard.py` | Slice 10–12 + UX tests |
 | `deploy/bytelord-compose.yaml` | Filter compose source of truth |

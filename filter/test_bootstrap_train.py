@@ -33,6 +33,9 @@ class FakeIMAP:
         self.moves: list[tuple[list[int], str]] = []
         self.logged_out = False
 
+    def list_folders(self):
+        return []
+
     def select_folder(self, folder, readonly=False):
         return {b"EXISTS": len(self.uids)}
 
@@ -186,3 +189,141 @@ def test_move_declined_requires_destination():
     with pytest.raises(SystemExit) as exc:
         bt.main(["acct", "Bootstrap-Spam", "spam", "--move-declined"])
     assert exc.value.code == 2
+
+
+def _trained_account(name: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        name=name,
+        user=f"{name}@example.com",
+        bayes_user="bytelord",
+        auto_special_folders=True,
+        inbox="INBOX",
+        junk="Junk",
+        trash="Trash",
+        spam_train="Junk/Train-Spam",
+        trained_spam="Junk/Trained-Spam",
+        ham_train="Junk/Train-Ham",
+        trained_ham="Junk/Trained-Ham",
+        allowlist="INBOX/Allowlist",
+        blocklist="INBOX/Blocklist",
+    )
+
+
+class FolderIMAP(FakeIMAP):
+    """IMAP stub that switches UID sets when selecting Trained-* folders."""
+
+    def __init__(self, folders: dict[str, list[int]], *, missing=()):
+        super().__init__([])
+        self.folder_uids = {k: list(v) for k, v in folders.items()}
+        self.missing = set(missing)
+        self.selects: list[tuple[str, bool]] = []
+        self.current = None
+
+    def select_folder(self, folder, readonly=False):
+        self.selects.append((folder, readonly))
+        if folder in self.missing or folder not in self.folder_uids:
+            from imapclient.exceptions import IMAPClientError
+            raise IMAPClientError(f"NO {folder}")
+        self.current = folder
+        self.uids = list(self.folder_uids[folder])
+        self.bodies = {uid: _raw(uid) for uid in self.uids}
+        self.sizes = {uid: len(self.bodies[uid]) for uid in self.uids}
+        return {b"EXISTS": len(self.uids)}
+
+
+def _run_all(monkeypatch, clients, outcomes, *extra_args):
+    accounts = [_trained_account("one"), _trained_account("two")]
+    by_name = dict(clients)
+    outcome_iter = iter(outcomes)
+    learned_users: list[str] = []
+
+    def fake_learn(_raw, kind, *, user):
+        learned_users.append(user)
+        return next(outcome_iter)
+
+    monkeypatch.setattr(bt, "RSPAMD_PASSWORD", "secret")
+    monkeypatch.setattr(bt, "load_accounts", lambda _path: accounts)
+    monkeypatch.setattr(bt, "connect_imap", lambda acc: by_name[acc.name])
+    monkeypatch.setattr(bt, "detect_delimiter", lambda _client: "/")
+    monkeypatch.setattr(bt, "rspamd_learn", fake_learn)
+    f.SHUTDOWN.clear()
+    rc = bt.main(["--all-trained", *extra_args])
+    return rc, learned_users
+
+
+def test_all_trained_walks_both_kinds_and_does_not_move(monkeypatch, capsys):
+    one = FolderIMAP({
+        "Junk/Trained-Spam": [1, 2],
+        "Junk/Trained-Ham": [3],
+    })
+    two = FolderIMAP({
+        "Junk/Trained-Spam": [10],
+        "Junk/Trained-Ham": [11],
+    })
+    rc, users = _run_all(
+        monkeypatch,
+        {"one": one, "two": two},
+        ["learned", "already", "learned", "already", "learned"],
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert one.moves == []
+    assert two.moves == []
+    assert all(readonly for _folder, readonly in one.selects)
+    assert all(readonly for _folder, readonly in two.selects)
+    assert users == ["bytelord"] * 5
+    assert "learned=3 already=2 declined=0 failed=0" in out
+    assert "skipped_folders=0" in out
+    assert "[one]" in out and "[two]" in out
+
+
+def test_all_trained_skips_missing_folder(monkeypatch, capsys):
+    one = FolderIMAP(
+        {"Junk/Trained-Spam": [1]},
+        missing={"Junk/Trained-Ham"},
+    )
+    two = FolderIMAP({
+        "Junk/Trained-Spam": [],
+        "Junk/Trained-Ham": [2],
+    })
+    rc, users = _run_all(
+        monkeypatch,
+        {"one": one, "two": two},
+        ["learned", "already"],
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "skip Junk/Trained-Ham" in out
+    assert "skipped_folders=1" in out
+    assert users == ["bytelord", "bytelord"]
+    assert "learned=1 already=1" in out
+    assert one.moves == []
+    assert two.moves == []
+
+
+def test_all_trained_rejects_move_to():
+    with pytest.raises(SystemExit) as exc:
+        bt.main(["--all-trained", "--move-to", "Trained-Spam"])
+    assert exc.value.code == 2
+
+
+def test_all_trained_kind_spam_only(monkeypatch, capsys):
+    one = FolderIMAP({
+        "Junk/Trained-Spam": [1],
+        "Junk/Trained-Ham": [2],
+    })
+    two = FolderIMAP({
+        "Junk/Trained-Spam": [3],
+        "Junk/Trained-Ham": [4],
+    })
+    rc, users = _run_all(
+        monkeypatch,
+        {"one": one, "two": two},
+        ["learned", "already"],
+        "--kind",
+        "spam",
+    )
+    assert rc == 0
+    assert users == ["bytelord", "bytelord"]
+    selected = [folder for folder, _ro in one.selects + two.selects]
+    assert selected == ["Junk/Trained-Spam", "Junk/Trained-Spam"]
