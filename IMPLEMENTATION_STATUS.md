@@ -13,7 +13,7 @@ Read this first in a new agent/chat session before exploring the tree.
 
 ## Snapshot in one paragraph
 
-Allow/block lists + one VPS Bayes notebook (design-arch slices 9–12) are **implemented and on `origin/main`**. User lists may include `@host` as well as addresses; matching is From + Sender only (Reply-To ignored). User-list hits override roster-scoped domain lists. **List hits skip `/checkv2`** (no score, no neural, no Bayes). All live mailboxes are M365 via `email-oauth2-proxy`, still in **shadow**. **2026-09-06 Phase 2:** wiped Redis Bayes/neural (old per-user notebooks + shared `bytelord`) and SQLite `messages` + `learn_*` events; re-fed Trained-* into `bytelord` (`learned=1570 already=29 declined=330 failed=5` oversize). Dashboard Messages/Events/Learned now show those bootstrap rows. **Do not** wire `bytelord.net` mailboxes through the OAuth proxy. Product policy for allow/block lists is **reopenable whenever asked**.
+Allow/block lists + one VPS Bayes notebook (design-arch slices 9–12) are **implemented and on `origin/main`**. User lists may include `@host`; matching is From + Sender only (Reply-To ignored). User-list hits override roster-scoped domain lists. **List hits skip `/checkv2`** (no score, no neural, no Bayes from Inbox override routing). `bootstrap_train.py --all-trained` writes Messages / Events / Learned rows. Dashboard Messages **all** band shows scored **or** learned-without-score rows. All live mailboxes are M365 via `email-oauth2-proxy`, still in **shadow**. **Phase 2 (ops, done 2026-09-06):** wiped Redis Bayes/neural (old per-user + shared `bytelord`) and SQLite `messages` + `learn_*` events (option A; lists/bookmarks kept); re-fed Trained-* into `bytelord` (`learned=1570 already=29 declined=330 failed=5` oversize). **Do not** wire `bytelord.net` mailboxes through the OAuth proxy. Product policy for allow/block lists is **reopenable whenever asked**.
 
 ---
 
@@ -21,9 +21,9 @@ Allow/block lists + one VPS Bayes notebook (design-arch slices 9–12) are **imp
 
 | Item | Value |
 |---|---|
-| Previous `origin/main` | `441b951` — “Implement allow/block lists, shared Bayes, and dashboard list UX.” |
+| Previous `origin/main` | `af0b928` — “Explain high rspamd scores with symbol detail and a CLI.” |
 | Tag | `before-allow-block-list` (annotated) at `a0b8897` |
-| This change | User-list `@host`, From+Sender-only match, user list overrides domain list (commit on `main`) |
+| This change | `cc1eb29` — list hits skip `/checkv2`; bootstrap writes dashboard learns; Messages shows learned-without-score rows |
 
 **Never commit:** live `accounts.yml` (gitignored), `/opt/bytelord/secrets/*`, token caches.
 
@@ -35,16 +35,18 @@ Allow/block lists + one VPS Bayes notebook (design-arch slices 9–12) are **imp
 
 Slices 1–8 (hybrid shadow, FETCH cap, inbox bookmark, `tls_mode`, IMAP UID identity, rspamd From/Rcpt, secrets/bootstrap, dashboard hardening). OAuth proxy PoC, then more M365 mailboxes. Parent plan: `design-arch/sliced_plan_code_review_fixes.md`.
 
-### This push of work (on `main`, plus follow-up matcher policy)
+Allow/block + shared Bayes (slices 9–12), user-list `@host` + From/Sender-only match (`c14eb2d`), Trained-* re-feed CLI (`037c856`), score symbol explain + `explain_score.py` (`af0b928`).
 
-Architecture: `design-arch/allow_block_sliced_plan.md` + `slice9_shared_bayes.md` … `slice12_dashboard_lists.md`. **`new_requirements.md` is historical; slices win on disagreement.** Product policy is **reopenable whenever asked** — do not treat the list below as frozen.
+### This push of work (`cc1eb29` on `main` + live Phase 2)
 
-| Slice | Spec | Status |
-|---|---|---|
-| 9 | One VPS Bayes (`defaults.bayes_user: bytelord`) | Done (live YAML + docs; did **not** change `BUILTIN_DEFAULTS["bayes_user"]` or `classifier-bayes.conf`) |
-| 10 | Roster, parser, `address_lists`, Inbox match | Done |
-| 11 | `INBOX/Allowlist` / `INBOX/Blocklist` drain | Done |
-| 12 | Admin Domain/User list editors | Done |
+Architecture / policy: [`design-arch/allow_block_sliced_plan.md`](design-arch/allow_block_sliced_plan.md) + [`design-arch/slice10_list_core.md`](design-arch/slice10_list_core.md). **`new_requirements.md` is historical; slices win on disagreement.** Product policy is **reopenable whenever asked**.
+
+| Item | Status |
+|---|---|
+| List-skip scan (classify before `/checkv2`; allow/block never feed neural) | Done |
+| Bootstrap → `spamfilter.db` (`learn_*` + Messages rows) | Done |
+| Messages tab: all-band includes `learned_as` ham/spam without score | Done |
+| Phase 2 corpus wipe + `--all-trained` re-feed (live ops) | Done (not a git commit; data-only) |
 
 **Current product policy (reopenable):**
 
@@ -57,16 +59,17 @@ Architecture: `design-arch/allow_block_sliced_plan.md` + `slice9_shared_bayes.md
 - Inbox scan only (not Junk poll). Caps: `max_list_per_run=100`, `max_list_entries=1000`.
 - Roster type (`company`/`personal`) is v1 metadata only.
 - IMAP drags persist immediately. Dashboard Save is the only batched editor.
+- **Train-* / Inbox↔Junk still learn** even if the sender is listed (explicit human gesture). That isolation is **not** implemented yet — see What’s next.
 
-**Dashboard UX after slice 12:**
+**Dashboard UX:**
 
 - Save: clear dirty on submit so the browser does not show “Leave site?”
 - Find-in-list: keep caret in the search box; highlight **all** matching textarea lines via overlay; clear highlights when query is empty or has no matches
-- Messages: click **Score** to sort (SQL); first click high→low, click again toggles
+- Messages: click **Score** to sort (SQL); first click high→low, click again toggles; **all** band shows scored **or** learned-without-score rows
 - Learned: click **Event** to sort (SQL); first click A→Z, click again toggles
 - `script-src 'self'`; `filter/lists.js` served as `/lists.js`
 
-**Tests:** full `filter/` suite **195 passed** (Docker `python:3.12-slim`). Host has no pytest/`ensurepip`. Use:
+**Tests:** full `filter/` suite green after list-skip + Messages fix (Docker `python:3.12-slim`). Host has no pytest/`ensurepip`. Use:
 
 ```bash
 docker run --rm -v /opt/bytelord/projects/imap-spamfilter/filter:/app -w /app \
@@ -76,11 +79,20 @@ docker run --rm -v /opt/bytelord/projects/imap-spamfilter/filter:/app -w /app \
 
 After code edits: `graphify update .` (graph in `graphify-out/`, gitignored).
 
+### What “Phase 1” and “Phase 2” meant (this workstream)
+
+| Phase | What | Status |
+|---|---|---|
+| **Phase 1** | Code + deploy: list-skip scan; bootstrap dashboard logging; Messages learned-without-score | Done (`cc1eb29`, live image rebuilt) |
+| **Phase 2** | **Ops only** (after greenlight): wipe polluted training, then re-bootstrap. Redis `FLUSHDB` (Bayes/fuzzy/neural for old per-user notebooks **and** shared `bytelord`); SQLite option A = `DELETE FROM messages` + delete all `learn_*` events (keep `address_lists`, bookmarks, safe_mode); then `docker exec spamfilter python bootstrap_train.py --all-trained` | Done 2026-09-06 |
+
+Phase 2 was **not** a product feature in git — it reset live corpus state so Proofpoint-era neural/Bayes pollution and stale dashboard learn history would not keep scoring future mail.
+
 ---
 
 ## Live VPS state
 
-**Filter image** is built from the local `filter/` tree (`compose` build context). Last rebuild: list-skip scan (no `/checkv2` on allow/block hits) + bootstrap dashboard learn rows.
+**Filter image** is built from the local `filter/` tree (`compose` build context). Last rebuild: list-skip scan + bootstrap dashboard learns + Messages all-band includes learned-without-score.
 
 **Compose / data (unchanged layout):**
 
@@ -178,11 +190,12 @@ Gmail / live.com: still deferred (not client-credentials).
 
 ## What’s next (suggested)
 
-1. **High-score remediation (unlisted mail)** — Amazon ~25 on the IMAP path was `BROKEN_HEADERS` + `BLACKLIST_DMARC` + SPF/DKIM fails, not Bayes. List-skip now prevents that from training neural when `@amazon.com` is allowlisted. Remaining: rspamd local.d weight overrides for *unlisted* mail; fix Spamhaus open-resolver / URIBL blocked.
-2. **Mode promotion** — Stay in **shadow** until scores look sane; then `flag` then `move`.
-3. **Do not** implement generic IMAP user/password for `bytelord.net` unless asked (new auth path).
-4. More M365 mailboxes only with Exchange grant + proxy section + YAML.
-5. Deferred from older handoff: container lockdown, Redis LRU, GHA SHA pins, oversize MIME, Entra cert instead of client secret.
+1. **Blocking Train-* learn when sender is listed** — Today Train-* / Inbox↔Junk still call `rspamd_learn` even if From/Sender matches allow or block. Product interest: listed senders should not train Bayes (or should be skipped / logged) so an allowlisted Amazon drag into Train-Spam cannot poison the notebook. Needs a short policy decision (skip both allow and block? allow-only? still learn block as spam?) then drain/bootstrap/`try_learn` gates + tests.
+2. **IMAP-path symbol weight remediation (unlisted mail)** — Amazon ~25 was `BROKEN_HEADERS` + `BLACKLIST_DMARC` + SPF/DKIM fails after Proofpoint/M365 rewrite, not Bayes. List-skip stops neural poison when listed; **unlisted** mail still gets those symbols. Next: rspamd `local.d` weight overrides / disable misleading IMAP auth symbols; use `explain_score.py` before/after. Also fix Spamhaus open-resolver / URIBL blocked when convenient.
+3. **Mode promotion** — Stay in **shadow** until scores look sane; then `flag` then `move`.
+4. **Do not** implement generic IMAP user/password for `bytelord.net` unless asked (new auth path).
+5. More M365 mailboxes only with Exchange grant + proxy section + YAML.
+6. Deferred from older handoff: container lockdown, Redis LRU, GHA SHA pins, oversize MIME, Entra cert instead of client secret.
 
 ---
 
@@ -194,10 +207,10 @@ Gmail / live.com: still deferred (not client-credentials).
 | `design-arch/allow_block_sliced_plan.md` | List/Bayes product decisions (reopenable) |
 | `design-arch/slice9_shared_bayes.md` … `slice12_dashboard_lists.md` | Implementation specs |
 | `design-arch/sliced_plan_code_review_fixes.md` | Slices 1–8 + deferred ops |
-| `filter/bootstrap_train.py` | Trained-* re-feed (`--all-trained`) |
+| `filter/bootstrap_train.py` | Trained-* re-feed (`--all-trained`) + dashboard learn rows |
 | `filter/explain_score.py` | Dump rspamd symbols for one IMAP UID |
 | `filter/dashboard.py` + `filter/lists.js` | Dashboard + list editor + sort |
-| `filter/test_address_lists.py`, `test_list_folders.py`, `test_dashboard.py` | Slice 10–12 + UX tests |
+| `filter/test_address_lists.py`, `test_list_folders.py`, `test_dashboard.py`, `test_bootstrap_train.py` | Slice 10–12 + list-skip + bootstrap dash tests |
 | `deploy/bytelord-compose.yaml` | Filter compose source of truth |
 | `accounts.yml` / `accounts.yml.example` | Runtime vs template |
 | `.cursor/rules/graphify.mdc` | Explore-via-graphify |
