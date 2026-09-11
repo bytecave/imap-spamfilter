@@ -42,6 +42,15 @@ import yaml
 from imapclient import IMAPClient
 from imapclient.exceptions import IMAPClientError
 
+
+class ConfigError(Exception):
+    """Invalid accounts.yml or related configuration.
+
+    Library callers (dashboard, tests) catch this as a normal exception.
+    CLI entry points map it to a process exit.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -50,6 +59,12 @@ CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/accounts.yml"))
 STATE_DIR = Path(os.environ.get("STATE_DIR", "/state"))
 DB_PATH = STATE_DIR / "spamfilter.db"
 HEARTBEAT_PATH = STATE_DIR / "heartbeat"
+STATE_DIR_MODE = 0o700
+STATE_FILE_MODE = 0o600
+FINGERPRINT_MAX_AGE_DAYS = 400
+FINGERPRINT_MAX_PER_ACCOUNT = 20_000
+SCORE_DETAIL_ACTION_MAX = 64
+ACCOUNT_HEARTBEAT_STALE_S = 20 * 60
 
 RSPAMD_SCAN_URL = os.environ.get("RSPAMD_SCAN_URL", "http://spamfilter-rspamd:11333/checkv2")
 RSPAMD_LEARN_URL = os.environ.get("RSPAMD_LEARN_URL", "http://spamfilter-rspamd:11334")
@@ -254,22 +269,36 @@ def parse_scan_symbols(data: Mapping[str, Any]) -> tuple[ScanSymbol, ...]:
     return tuple(out)
 
 
+def _clip_detail_text(value: Any, limit: int) -> str | None:
+    if value is None:
+        return None
+    text = value if isinstance(value, str) else str(value)
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return text
+    return encoded[:limit].decode("utf-8", errors="ignore")
+
+
 def score_detail_json(result: ScanResult, *, top_n: int = SCORE_DETAIL_TOP_N) -> str:
     """Compact JSON for messages.score_detail (top symbols, size-capped)."""
-    payload = {
+    action = _clip_detail_text(result.action, SCORE_DETAIL_ACTION_MAX)
+    symbols = [
+        {
+            "n": _clip_detail_text(s.name, 80) or "",
+            "s": round(s.score, 3),
+            "d": (_clip_detail_text(s.description, 80) or ""),
+        }
+        for s in result.symbols[:top_n]
+    ]
+    payload: dict[str, Any] = {
         "score": result.score,
-        "action": result.action,
-        "symbols": [
-            {"n": s.name, "s": round(s.score, 3), "d": s.description[:80]}
-            for s in result.symbols[:top_n]
-        ],
+        "action": action,
+        "symbols": symbols,
     }
     text = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
     if len(text.encode("utf-8")) > SCORE_DETAIL_MAX_BYTES:
-        # Drop descriptions first, then trim symbol count.
         payload["symbols"] = [
-            {"n": s.name, "s": round(s.score, 3)}
-            for s in result.symbols[:top_n]
+            {"n": item["n"], "s": item["s"]} for item in symbols
         ]
         text = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
         while (
@@ -278,6 +307,9 @@ def score_detail_json(result: ScanResult, *, top_n: int = SCORE_DETAIL_TOP_N) ->
         ):
             payload["symbols"].pop()
             text = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    if len(text.encode("utf-8")) > SCORE_DETAIL_MAX_BYTES:
+        payload = {"score": result.score, "action": None, "symbols": []}
+        text = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
     return text
 
 
@@ -460,7 +492,31 @@ def _apply_env_overrides(
         try:
             out[cfg_key] = int(val)
         except ValueError:
-            raise SystemExit(f"env {env_key}={val!r}: not an integer")
+            raise ConfigError(f"env {env_key}={val!r}: not an integer")
+    return out
+
+
+def _require_text(
+    value: Any,
+    *,
+    key: str,
+    account: str,
+    trim: bool = True,
+    allow_blank: bool = False,
+) -> str:
+    """Fail-fast string validation for YAML account fields."""
+    if not isinstance(value, str):
+        raise ConfigError(
+            f"account {account!r}: {key} must be a string "
+            f"(got {type(value).__name__})"
+        )
+    out = value.strip() if trim else value
+    if not allow_blank and not out.strip():
+        raise ConfigError(f"account {account!r}: {key} is empty")
+    if "\r" in out or "\n" in out:
+        raise ConfigError(
+            f"account {account!r}: {key} must not contain CR or LF"
+        )
     return out
 
 
@@ -468,26 +524,14 @@ def _clean_bayes_user(raw: Any, account_name: str) -> str | None:
     """Validate the bayes_user override. Rejects CR/LF so the value cannot
     be smuggled as an extra header line via the `Delivered-To:` prefix we
     prepend to /learn{spam,ham} bodies."""
-    if not raw:
+    if raw is None or raw == "":
         return None
-    s = str(raw)
-    if "\r" in s or "\n" in s:
-        raise SystemExit(
-            f"account {account_name!r}: bayes_user must not contain CR or LF"
-        )
-    return s
+    return _require_text(raw, key="bayes_user", account=account_name, trim=True)
 
 
 def _clean_actual_name(raw: Any, account_name: str) -> str:
     """Required person-list key. Preserve case; reject empty/CR/LF."""
-    s = "" if raw is None else str(raw).strip()
-    if not s:
-        raise SystemExit(f"account {account_name!r}: actual_name is required")
-    if "\r" in s or "\n" in s:
-        raise SystemExit(
-            f"account {account_name!r}: actual_name must not contain CR or LF"
-        )
-    return s
+    return _require_text(raw, key="actual_name", account=account_name, trim=True)
 
 
 def mailbox_domain(user: str) -> str | None:
@@ -503,24 +547,30 @@ def parse_list_domains(raw: Any, *, where: str) -> ListRoster:
     if raw is None:
         return ListRoster()
     if not isinstance(raw, list):
-        raise SystemExit(f"{where}: list_domains must be a list")
+        raise ConfigError(f"{where}: list_domains must be a list")
     entries: list[tuple[str, str]] = []
     seen: set[str] = set()
     for i, item in enumerate(raw):
         loc = f"{where}: list_domains[{i}]"
         if not isinstance(item, dict):
-            raise SystemExit(f"{loc} must be a mapping")
+            raise ConfigError(f"{loc} must be a mapping")
         _reject_unknown_keys(item, LIST_DOMAIN_ENTRY_KEYS, where=loc)
-        domain = str(item.get("domain") or "").strip().lower()
-        typ = str(item.get("type") or "").strip().lower()
+        raw_domain = item.get("domain")
+        raw_type = item.get("type")
+        if not isinstance(raw_domain, str) or not raw_domain.strip():
+            raise ConfigError(f"{loc}: domain must be a non-empty string")
+        if not isinstance(raw_type, str) or not raw_type.strip():
+            raise ConfigError(f"{loc}: type must be a non-empty string")
+        domain = raw_domain.strip().lower()
+        typ = raw_type.strip().lower()
         if not domain:
-            raise SystemExit(f"{loc}: domain is required")
+            raise ConfigError(f"{loc}: domain is required")
         if typ not in VALID_LIST_DOMAIN_TYPES:
-            raise SystemExit(
+            raise ConfigError(
                 f"{loc}: type must be 'company' or 'personal' (got {typ!r})"
             )
         if domain in seen:
-            raise SystemExit(f"{loc}: duplicate domain {domain!r}")
+            raise ConfigError(f"{loc}: duplicate domain {domain!r}")
         seen.add(domain)
         entries.append((domain, typ))
     return ListRoster(entries=tuple(entries))
@@ -628,7 +678,7 @@ def _reject_unknown_keys(
         rendered.append(
             f"{key!r} (did you mean {close[0]!r}?)" if close else repr(key)
         )
-    raise SystemExit(f"{where}: unknown key(s): {', '.join(rendered)}")
+    raise ConfigError(f"{where}: unknown key(s): {', '.join(rendered)}")
 
 
 def _host_is_loopback(host: str) -> bool:
@@ -661,7 +711,12 @@ def _resolve_tls_mode(
     else:
         src = {"tls_mode": BUILTIN_DEFAULTS["tls_mode"]}
     if "tls_mode" in src:
-        mode = str(src["tls_mode"]).strip().lower()
+        raw_mode = src["tls_mode"]
+        if not isinstance(raw_mode, str):
+            raise ValueError(
+                f"tls_mode must be a string, got {type(raw_mode).__name__}"
+            )
+        mode = raw_mode.strip().lower()
         if mode not in VALID_TLS_MODES:
             raise ValueError(f"invalid tls_mode {src['tls_mode']!r}")
         if "ssl" in src:
@@ -755,16 +810,16 @@ def wait_between_scans(
 def load_accounts(path: Path) -> list[Account]:
     raw = yaml.safe_load(path.read_text())
     if not isinstance(raw, dict) or "accounts" not in raw:
-        raise SystemExit(f"{path}: missing 'accounts' key")
+        raise ConfigError(f"{path}: missing 'accounts' key")
     _reject_unknown_keys(raw, ROOT_CONFIG_KEYS, where=str(path))
     user_defaults = raw.get("defaults") or {}
     if not isinstance(user_defaults, dict):
-        raise SystemExit(f"{path}: 'defaults' must be a mapping")
+        raise ConfigError(f"{path}: 'defaults' must be a mapping")
     _reject_unknown_keys(
         user_defaults, ACCOUNT_CONFIG_KEYS, where=f"{path}: defaults"
     )
     if not isinstance(raw["accounts"], list):
-        raise SystemExit(f"{path}: 'accounts' must be a list")
+        raise ConfigError(f"{path}: 'accounts' must be a list")
     roster = parse_list_domains(raw.get("list_domains"), where=str(path))
     # Built-ins, then YAML defaults, then env only for keys YAML omitted.
     defaults = _apply_env_overrides(
@@ -775,7 +830,7 @@ def load_accounts(path: Path) -> list[Account]:
     seen: set[str] = set()
     for entry in raw["accounts"]:
         if not isinstance(entry, dict):
-            raise SystemExit(f"{path}: each account must be a mapping")
+            raise ConfigError(f"{path}: each account must be a mapping")
         _reject_unknown_keys(
             entry, ACCOUNT_CONFIG_KEYS,
             where=f"{path}: account {entry.get('name', '?')!r}",
@@ -783,150 +838,193 @@ def load_accounts(path: Path) -> list[Account]:
         merged = _deep_merge(defaults, entry)
         missing = [k for k in REQUIRED_PER_ACCOUNT if not merged.get(k)]
         if missing:
-            raise SystemExit(
+            raise ConfigError(
                 f"{path}: account {entry.get('name', '?')!r} missing required key(s): "
                 f"{', '.join(missing)}"
             )
+        raw_name = merged.get("name", entry.get("name", "?"))
+        acct_label = raw_name if isinstance(raw_name, str) else "?"
         try:
+            name = _require_text(merged["name"], key="name", account=acct_label)
+            user = _require_text(merged["user"], key="user", account=name)
+            password = _require_text(
+                merged["password"], key="password", account=name, trim=False
+            )
+            imap_host = _require_text(
+                merged["imap_host"], key="imap_host", account=name
+            )
+            folder_fields = {
+                key: _require_text(merged[key], key=key, account=name)
+                for key in (
+                    "inbox", "junk", "trash",
+                    "spam_train", "trained_spam",
+                    "ham_train", "trained_ham",
+                    "allowlist", "blocklist",
+                )
+            }
+            mode = _require_text(merged["mode"], key="mode", account=name)
             tls_mode = _resolve_tls_mode(
                 entry=entry,
                 user_defaults=user_defaults,
-                account_name=str(merged["name"]),
+                account_name=name,
             )
             acc = Account(
-                name=merged["name"],
-                user=merged["user"],
-                password=merged["password"],
-                imap_host=merged["imap_host"],
+                name=name,
+                user=user,
+                password=password,
+                imap_host=imap_host,
                 imap_port=_parse_int(
-                    merged["imap_port"], key="imap_port", account=str(merged["name"])
+                    merged["imap_port"], key="imap_port", account=name
                 ),
                 tls_mode=tls_mode,
                 allow_insecure_tls=_parse_bool(
                     merged.get("allow_insecure_tls", False),
                     key="allow_insecure_tls",
-                    account=str(merged["name"]),
+                    account=name,
                 ),
-                inbox=merged["inbox"],
-                junk=merged["junk"],
-                trash=merged["trash"],
-                spam_train=merged["spam_train"],
-                trained_spam=merged["trained_spam"],
-                ham_train=merged["ham_train"],
-                trained_ham=merged["trained_ham"],
-                allowlist=merged["allowlist"],
-                blocklist=merged["blocklist"],
-                mode=str(merged["mode"]),
+                inbox=folder_fields["inbox"],
+                junk=folder_fields["junk"],
+                trash=folder_fields["trash"],
+                spam_train=folder_fields["spam_train"],
+                trained_spam=folder_fields["trained_spam"],
+                ham_train=folder_fields["ham_train"],
+                trained_ham=folder_fields["trained_ham"],
+                allowlist=folder_fields["allowlist"],
+                blocklist=folder_fields["blocklist"],
+                mode=mode,
                 threshold=_parse_finite_float(
-                    merged["threshold"], key="threshold", account=str(merged["name"])
+                    merged["threshold"], key="threshold", account=name
                 ),
                 min_threshold_allowed=_parse_finite_float(
                     merged["min_threshold_allowed"], key="min_threshold_allowed",
-                    account=str(merged["name"]),
+                    account=name,
                 ),
                 reject_score_above=_parse_finite_float(
                     merged["reject_score_above"], key="reject_score_above",
-                    account=str(merged["name"]),
+                    account=name,
                 ),
                 move_grace_seconds=_parse_int(
                     merged["move_grace_seconds"], key="move_grace_seconds",
-                    account=str(merged["name"]),
+                    account=name,
                 ),
                 learn_grace_seconds=_parse_int(
                     merged["learn_grace_seconds"], key="learn_grace_seconds",
-                    account=str(merged["name"]),
+                    account=name,
                 ),
                 idle_timeout=_parse_int(
                     merged["idle_timeout"], key="idle_timeout",
-                    account=str(merged["name"]),
+                    account=name,
                 ),
                 poll_interval=_parse_int(
                     merged["poll_interval"], key="poll_interval",
-                    account=str(merged["name"]),
+                    account=name,
                 ),
                 junk_poll_interval=_parse_int(
                     merged["junk_poll_interval"], key="junk_poll_interval",
-                    account=str(merged["name"]),
+                    account=name,
                 ),
                 retention_check_interval=_parse_int(
                     merged["retention_check_interval"], key="retention_check_interval",
-                    account=str(merged["name"]),
+                    account=name,
                 ),
                 max_moves_per_hour=_parse_int(
                     merged["max_moves_per_hour"], key="max_moves_per_hour",
-                    account=str(merged["name"]),
+                    account=name,
                 ),
                 max_learns_per_hour=_parse_int(
                     merged["max_learns_per_hour"], key="max_learns_per_hour",
-                    account=str(merged["name"]),
+                    account=name,
                 ),
                 max_train_per_run=_parse_int(
                     merged["max_train_per_run"], key="max_train_per_run",
-                    account=str(merged["name"]),
+                    account=name,
                 ),
                 flip_flop_cooldown_seconds=_parse_int(
                     merged["flip_flop_cooldown_seconds"],
-                    key="flip_flop_cooldown_seconds", account=str(merged["name"]),
+                    key="flip_flop_cooldown_seconds", account=name,
                 ),
                 safe_mode_unseen_cap=_parse_int(
                     merged["safe_mode_unseen_cap"], key="safe_mode_unseen_cap",
-                    account=str(merged["name"]),
+                    account=name,
                 ),
                 junk_retention_days=_parse_int(
                     merged["junk_retention_days"], key="junk_retention_days",
-                    account=str(merged["name"]),
+                    account=name,
                 ),
                 trained_retention_days=_parse_int(
                     merged["trained_retention_days"], key="trained_retention_days",
-                    account=str(merged["name"]),
+                    account=name,
                 ),
                 learn_from_moves=_parse_bool(
                     merged["learn_from_moves"],
                     key="learn_from_moves",
-                    account=str(merged["name"]),
+                    account=name,
                 ),
                 auto_special_folders=_parse_bool(
                     merged["auto_special_folders"],
                     key="auto_special_folders",
-                    account=str(merged["name"]),
+                    account=name,
                 ),
                 actual_name=_clean_actual_name(
-                    merged.get("actual_name"), str(merged["name"])
+                    merged.get("actual_name"), name
                 ),
                 max_list_per_run=_parse_int(
                     merged["max_list_per_run"], key="max_list_per_run",
-                    account=str(merged["name"]),
+                    account=name,
                 ),
                 max_list_entries=_parse_int(
                     merged["max_list_entries"], key="max_list_entries",
-                    account=str(merged["name"]),
+                    account=name,
                 ),
-                bayes_user=_clean_bayes_user(merged.get("bayes_user"), merged.get("name", "?")),
+                bayes_user=_clean_bayes_user(merged.get("bayes_user"), name),
                 list_roster=roster,
             )
-        except (KeyError, ValueError, TypeError) as ex:
-            raise SystemExit(f"account {entry.get('name')!r}: {ex}") from ex
+        except (KeyError, ValueError, TypeError, ConfigError) as ex:
+            if isinstance(ex, ConfigError):
+                raise
+            raise ConfigError(f"account {entry.get('name')!r}: {ex}") from ex
         if acc.name in seen:
-            raise SystemExit(f"duplicate account name: {acc.name}")
+            raise ConfigError(f"duplicate account name: {acc.name}")
         seen.add(acc.name)
         validate_account(acc)
         out.append(acc)
     if not out:
-        raise SystemExit("no accounts configured")
+        raise ConfigError("no accounts configured")
     return out
+
+
+def yaml_max_list_entries(path: Path) -> int:
+    """Unmerged YAML ``defaults.max_list_entries``, else the built-in cap.
+
+    Dashboard list saves are global, so a per-account override on whichever
+    account happens to be first must not change the editor cap.
+    """
+    raw = yaml.safe_load(path.read_text())
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{path}: missing 'accounts' key")
+    defaults = raw.get("defaults") or {}
+    if defaults and not isinstance(defaults, dict):
+        raise ConfigError(f"{path}: 'defaults' must be a mapping")
+    value = defaults.get(
+        "max_list_entries", BUILTIN_DEFAULTS["max_list_entries"]
+    )
+    parsed = _parse_int(value, key="max_list_entries", account="defaults")
+    if not 1 <= parsed <= 10000:
+        raise ConfigError("defaults: max_list_entries out of range")
+    return parsed
 
 
 def validate_account(acc: Account) -> None:
     if acc.mode not in VALID_MODES:
-        raise SystemExit(f"{acc.name}: invalid mode {acc.mode!r}")
+        raise ConfigError(f"{acc.name}: invalid mode {acc.mode!r}")
     if acc.tls_mode not in VALID_TLS_MODES:
-        raise SystemExit(f"{acc.name}: invalid tls_mode {acc.tls_mode!r}")
+        raise ConfigError(f"{acc.name}: invalid tls_mode {acc.tls_mode!r}")
     if (
         acc.tls_mode == "none"
         and not acc.allow_insecure_tls
         and not _host_is_loopback(acc.imap_host)
     ):
-        raise SystemExit(
+        raise ConfigError(
             f"{acc.name}: tls_mode: none is only allowed for loopback hosts "
             f"or with allow_insecure_tls: true (got imap_host={acc.imap_host!r})"
         )
@@ -938,29 +1036,29 @@ def validate_account(acc: Account) -> None:
     for field_name in ("user", "name", "actual_name"):
         val = str(getattr(acc, field_name))
         if "\r" in val or "\n" in val:
-            raise SystemExit(
+            raise ConfigError(
                 f"{acc.name}: account {field_name} must not contain CR or LF"
             )
         if field_name == "actual_name" and not val.strip():
-            raise SystemExit(f"{acc.name}: actual_name is required")
+            raise ConfigError(f"{acc.name}: actual_name is required")
     if not 1 <= acc.imap_port <= 65535:
-        raise SystemExit(f"{acc.name}: imap_port out of range ({acc.imap_port})")
+        raise ConfigError(f"{acc.name}: imap_port out of range ({acc.imap_port})")
     for key in ("threshold", "min_threshold_allowed", "reject_score_above"):
         value = getattr(acc, key)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-            raise SystemExit(f"{acc.name}: {key} must be a finite non-boolean number")
+            raise ConfigError(f"{acc.name}: {key} must be a finite non-boolean number")
     if acc.min_threshold_allowed <= 0:
-        raise SystemExit(
+        raise ConfigError(
             f"{acc.name}: min_threshold_allowed must be positive "
             f"({acc.min_threshold_allowed})"
         )
     if acc.threshold < acc.min_threshold_allowed:
-        raise SystemExit(
+        raise ConfigError(
             f"{acc.name}: threshold {acc.threshold} below min_threshold_allowed "
             f"{acc.min_threshold_allowed}"
         )
     if acc.reject_score_above < acc.threshold:
-        raise SystemExit(
+        raise ConfigError(
             f"{acc.name}: reject_score_above {acc.reject_score_above} must be "
             f">= threshold {acc.threshold} (otherwise every legit score is "
             f"discarded as out-of-range)"
@@ -972,27 +1070,27 @@ def validate_account(acc: Account) -> None:
         acc.allowlist, acc.blocklist,
     }
     if len(folder_set) != 9:
-        raise SystemExit(
+        raise ConfigError(
             f"{acc.name}: inbox/junk/trash/spam_train/trained_spam/"
             f"ham_train/trained_ham/allowlist/blocklist must all be distinct"
         )
     if not 1 <= acc.max_moves_per_hour <= 1000:
-        raise SystemExit(f"{acc.name}: max_moves_per_hour out of range")
+        raise ConfigError(f"{acc.name}: max_moves_per_hour out of range")
     if not 1 <= acc.max_learns_per_hour <= 1000:
-        raise SystemExit(f"{acc.name}: max_learns_per_hour out of range")
+        raise ConfigError(f"{acc.name}: max_learns_per_hour out of range")
     if not 1 <= acc.max_train_per_run <= 5000:
-        raise SystemExit(f"{acc.name}: max_train_per_run out of range")
+        raise ConfigError(f"{acc.name}: max_train_per_run out of range")
     if not 1 <= acc.max_list_per_run <= 5000:
-        raise SystemExit(f"{acc.name}: max_list_per_run out of range")
+        raise ConfigError(f"{acc.name}: max_list_per_run out of range")
     if not 1 <= acc.max_list_entries <= 10000:
-        raise SystemExit(f"{acc.name}: max_list_entries out of range")
+        raise ConfigError(f"{acc.name}: max_list_entries out of range")
     if not 0 <= acc.flip_flop_cooldown_seconds <= 86400:
-        raise SystemExit(
+        raise ConfigError(
             f"{acc.name}: flip_flop_cooldown_seconds out of range "
             f"(0 disables, max 86400)"
         )
     if acc.safe_mode_unseen_cap < 1:
-        raise SystemExit(
+        raise ConfigError(
             f"{acc.name}: safe_mode_unseen_cap must be >= 1 ({acc.safe_mode_unseen_cap})"
         )
     interval_bounds = {
@@ -1004,17 +1102,17 @@ def validate_account(acc: Account) -> None:
     for key, (minimum, maximum) in interval_bounds.items():
         value = getattr(acc, key)
         if not minimum <= value <= maximum:
-            raise SystemExit(
+            raise ConfigError(
                 f"{acc.name}: {key} out of range ({minimum}..{maximum})"
             )
     for key in ("learn_grace_seconds", "move_grace_seconds"):
         value = getattr(acc, key)
         if not 0 <= value <= 604800:
-            raise SystemExit(f"{acc.name}: {key} out of range (0..604800)")
+            raise ConfigError(f"{acc.name}: {key} out of range (0..604800)")
     for key in ("junk_retention_days", "trained_retention_days"):
         value = getattr(acc, key)
         if not 0 <= value <= 3650:
-            raise SystemExit(f"{acc.name}: {key} out of range (0..3650)")
+            raise ConfigError(f"{acc.name}: {key} out of range (0..3650)")
 
 
 # ---------------------------------------------------------------------------
@@ -1085,7 +1183,8 @@ CREATE TABLE IF NOT EXISTS events (
     ts          INTEGER NOT NULL,
     message_id  TEXT,
     event       TEXT NOT NULL,
-    detail      TEXT
+    detail      TEXT,
+    subject     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS rate_limit (
@@ -1116,6 +1215,28 @@ CREATE TABLE IF NOT EXISTS address_lists (
     updated_at        INTEGER NOT NULL,
     UNIQUE(scope_type, scope_key, kind, pattern)
 );
+
+-- Compact Inbox fingerprints retained after prune_messages so a later
+-- user Inbox→Junk move can still correlate by body SHA beyond the
+-- operational message-row horizon. Bounded by age and per-account cap.
+CREATE TABLE IF NOT EXISTS message_fingerprints (
+    account     TEXT NOT NULL,
+    body_sha256 TEXT NOT NULL,
+    folder      TEXT NOT NULL,
+    uidvalidity INTEGER NOT NULL,
+    uid         INTEGER NOT NULL,
+    first_seen  INTEGER NOT NULL,
+    last_seen   INTEGER NOT NULL,
+    learned_as  TEXT,
+    PRIMARY KEY (account, body_sha256)
+);
+
+CREATE TABLE IF NOT EXISTS account_heartbeat (
+    account          TEXT PRIMARY KEY,
+    last_ok          INTEGER,
+    last_error       INTEGER,
+    last_error_event TEXT
+);
 """
 
 SCHEMA_INDEXES = """
@@ -1127,6 +1248,8 @@ CREATE INDEX IF NOT EXISTS idx_pending_move_folder
     ON pending_move(account, folder, uidvalidity, uid);
 CREATE INDEX IF NOT EXISTS idx_address_lists_lookup
     ON address_lists(scope_type, scope_key, kind, pattern);
+CREATE INDEX IF NOT EXISTS idx_fingerprints_seen
+    ON message_fingerprints(account, last_seen);
 """
 
 # Kept for tests and external one-shot initializers. Real startup deliberately
@@ -1134,13 +1257,32 @@ CREATE INDEX IF NOT EXISTS idx_address_lists_lookup
 SCHEMA = SCHEMA_TABLES + SCHEMA_INDEXES
 
 
-def init_db() -> None:
+def _chmod_path(path: Path, mode: int) -> None:
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        pass
+
+
+def _ensure_private_state() -> None:
+    """Create STATE_DIR 0700 and chmod SQLite + WAL/SHM sidecars 0600."""
+    os.umask(0o077)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
+    _chmod_path(STATE_DIR, STATE_DIR_MODE)
+    for suffix in ("", "-wal", "-shm"):
+        path = Path(f"{DB_PATH}{suffix}") if suffix else DB_PATH
+        if path.exists() and path.is_file():
+            _chmod_path(path, STATE_FILE_MODE)
+
+
+def init_db() -> None:
+    _ensure_private_state()
     with sqlite3.connect(DB_PATH) as conn:
         conn.executescript("PRAGMA journal_mode=WAL;")
         conn.executescript(SCHEMA_TABLES)
         _migrate(conn)
         conn.executescript(SCHEMA_INDEXES)
+    _ensure_private_state()
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -1289,6 +1431,30 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_messages_sha ON messages(account, body_sha256)"
     )
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS message_fingerprints (
+            account     TEXT NOT NULL,
+            body_sha256 TEXT NOT NULL,
+            folder      TEXT NOT NULL,
+            uidvalidity INTEGER NOT NULL,
+            uid         INTEGER NOT NULL,
+            first_seen  INTEGER NOT NULL,
+            last_seen   INTEGER NOT NULL,
+            learned_as  TEXT,
+            PRIMARY KEY (account, body_sha256)
+        );
+        CREATE TABLE IF NOT EXISTS account_heartbeat (
+            account          TEXT PRIMARY KEY,
+            last_ok          INTEGER,
+            last_error       INTEGER,
+            last_error_event TEXT
+        );
+        """
+    )
+    event_cols = {r[1] for r in conn.execute("PRAGMA table_info(events)")}
+    if event_cols and "subject" not in event_cols:
+        conn.execute("ALTER TABLE events ADD COLUMN subject TEXT")
 
 
 class Db:
@@ -1301,6 +1467,7 @@ class Db:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.execute("PRAGMA busy_timeout=30000")
+        _ensure_private_state()
 
     def close(self) -> None:
         self.conn.close()
@@ -1317,13 +1484,55 @@ class Db:
 
     # ----- events -----------------------------------------------------------
 
-    def log_event(self, event: str, message_id: str | None = None, detail: str | None = None) -> None:
+    def log_event(
+        self,
+        event: str,
+        message_id: str | None = None,
+        detail: str | None = None,
+        *,
+        subject: str | None = None,
+        folder: str | None = None,
+        uidvalidity: int | None = None,
+        uid: int | None = None,
+    ) -> None:
+        if subject is None and folder is not None and uidvalidity is not None and uid is not None:
+            row = self.get_imap_message(folder, uidvalidity, uid)
+            if row is not None and row["subject"]:
+                subject = row["subject"]
+        elif subject is None and message_id:
+            rows = self.find_by_message_id(message_id)
+            subjects = {r["subject"] for r in rows if r["subject"]}
+            if len(subjects) == 1:
+                subject = next(iter(subjects))
         self.conn.execute(
-            "INSERT INTO events(account, ts, message_id, event, detail) VALUES(?,?,?,?,?)",
-            (self.account, int(time.time()), message_id, event, detail),
+            """
+            INSERT INTO events(account, ts, message_id, event, detail, subject)
+            VALUES(?,?,?,?,?,?)
+            """,
+            (self.account, int(time.time()), message_id, event, detail, subject),
         )
 
     # ----- address lists ----------------------------------------------------
+
+    def _validate_list_write(
+        self,
+        scope_type: str,
+        scope_key: str,
+        kind: str,
+        *,
+        source: str | None = None,
+        pattern_type: str | None = None,
+    ) -> None:
+        if scope_type not in VALID_LIST_SCOPE_TYPES:
+            raise ValueError(f"invalid list scope_type {scope_type!r}")
+        if not isinstance(scope_key, str) or not scope_key.strip():
+            raise ValueError("invalid list scope_key")
+        if kind not in VALID_LIST_KINDS:
+            raise ValueError(f"invalid list kind {kind!r}")
+        if source is not None and source not in VALID_LIST_SOURCES:
+            raise ValueError(f"invalid list source {source!r}")
+        if pattern_type is not None and pattern_type not in VALID_LIST_PATTERN_TYPES:
+            raise ValueError(f"invalid list pattern_type {pattern_type!r}")
 
     def list_get(self, scope_type: str, scope_key: str, kind: str) -> list[str]:
         cur = self.conn.execute(
@@ -1408,6 +1617,10 @@ class Db:
         max_entries: int,
     ) -> str:
         """Insert or bump updated_at. Returns inserted|exists|capped."""
+        self._validate_list_write(
+            scope_type, scope_key, kind,
+            source=source, pattern_type=parsed.pattern_type,
+        )
         if self.list_has(scope_type, scope_key, kind, parsed.pattern):
             now = int(time.time())
             self.conn.execute(
@@ -1452,6 +1665,10 @@ class Db:
         max_entries: int,
     ) -> str:
         """Move pattern to `kind`, deleting the sibling. May return capped."""
+        self._validate_list_write(
+            scope_type, scope_key, kind,
+            source=source, pattern_type=parsed.pattern_type,
+        )
         other = "block" if kind == "allow" else "allow"
         sibling = self.list_has(scope_type, scope_key, other, parsed.pattern)
         outcome = self.list_upsert_address(
@@ -1476,6 +1693,12 @@ class Db:
         actor: str | None,
         max_entries: int,
     ) -> None:
+        self._validate_list_write(scope_type, scope_key, kind, source=source)
+        for parsed in items:
+            self._validate_list_write(
+                scope_type, scope_key, kind,
+                source=source, pattern_type=parsed.pattern_type,
+            )
         if len(items) > max_entries:
             raise ValueError("list exceeds max_list_entries")
         now = int(time.time())
@@ -1726,13 +1949,42 @@ class Db:
         )
         return cur.rowcount
 
-    def prune_messages(self, older_than_s: int) -> int:
-        """Drop fully-resolved message rows older than the cutoff. A row
-        is fully resolved when there is no pending_learn (we are not
-        waiting on a grace timer) and either it has been moved out of
-        Inbox or it was scored long enough ago that we will not revisit
-        the decision."""
+    def prune_messages(self, older_than_s: int, *, inbox: str | None = None) -> int:
+        """Drop fully-resolved message rows older than the cutoff.
+
+        Inbox rows that still have a body SHA are first copied into
+        ``message_fingerprints`` so a later user Inbox→Junk move can
+        correlate after the operational row is gone. Fingerprints are
+        age- and count-bounded separately.
+        """
         cutoff = int(time.time()) - older_than_s
+        if inbox:
+            self.conn.execute(
+                """
+                INSERT INTO message_fingerprints(
+                    account, body_sha256, folder, uidvalidity, uid,
+                    first_seen, last_seen, learned_as
+                )
+                SELECT account, body_sha256, folder, uidvalidity, uid,
+                       first_seen, last_seen, learned_as
+                  FROM messages
+                 WHERE account=?
+                   AND last_seen<?
+                   AND pending_learn IS NULL
+                   AND body_sha256 IS NOT NULL AND body_sha256 != ''
+                   AND (folder=? OR current_folder=?)
+                   AND IFNULL(our_action, '') NOT IN ('pending_move', 'moved_to_junk')
+                ON CONFLICT(account, body_sha256) DO UPDATE SET
+                    last_seen=MAX(message_fingerprints.last_seen, excluded.last_seen),
+                    folder=excluded.folder,
+                    uidvalidity=excluded.uidvalidity,
+                    uid=excluded.uid,
+                    learned_as=COALESCE(
+                        excluded.learned_as, message_fingerprints.learned_as
+                    )
+                """,
+                (self.account, cutoff, inbox, inbox),
+            )
         cur = self.conn.execute(
             """
             DELETE FROM messages
@@ -1742,7 +1994,88 @@ class Db:
             """,
             (self.account, cutoff),
         )
+        self.prune_fingerprints()
         return cur.rowcount
+
+    def prune_fingerprints(
+        self,
+        *,
+        max_age_days: int = FINGERPRINT_MAX_AGE_DAYS,
+        max_rows: int = FINGERPRINT_MAX_PER_ACCOUNT,
+    ) -> int:
+        cutoff = int(time.time()) - max_age_days * 86400
+        cur = self.conn.execute(
+            """
+            DELETE FROM message_fingerprints
+             WHERE account=? AND last_seen<?
+            """,
+            (self.account, cutoff),
+        )
+        deleted = int(cur.rowcount)
+        extra = self.conn.execute(
+            """
+            SELECT body_sha256 FROM message_fingerprints
+             WHERE account=?
+             ORDER BY last_seen ASC
+            """,
+            (self.account,),
+        ).fetchall()
+        overflow = len(extra) - max_rows
+        if overflow > 0:
+            doomed = [r[0] for r in extra[:overflow]]
+            self.conn.executemany(
+                "DELETE FROM message_fingerprints WHERE account=? AND body_sha256=?",
+                [(self.account, sha) for sha in doomed],
+            )
+            deleted += overflow
+        return deleted
+
+    def get_inbox_fingerprint(self, sha: str, inbox: str) -> sqlite3.Row | None:
+        if not sha:
+            return None
+        cur = self.conn.execute(
+            """
+            SELECT account, body_sha256, folder, folder AS current_folder,
+                   uidvalidity, uid, first_seen, last_seen, learned_as,
+                   NULL AS our_action
+              FROM message_fingerprints
+             WHERE account=? AND body_sha256=? AND folder=?
+            """,
+            (self.account, sha, inbox),
+        )
+        return cur.fetchone()
+
+    def drop_fingerprint(self, sha: str | None) -> None:
+        if not sha:
+            return
+        self.conn.execute(
+            "DELETE FROM message_fingerprints WHERE account=? AND body_sha256=?",
+            (self.account, sha),
+        )
+
+    def touch_heartbeat_ok(self) -> None:
+        now = int(time.time())
+        self.conn.execute(
+            """
+            INSERT INTO account_heartbeat(account, last_ok)
+            VALUES(?,?)
+            ON CONFLICT(account) DO UPDATE SET last_ok=excluded.last_ok
+            """,
+            (self.account, now),
+        )
+
+    def touch_heartbeat_error(self, event: str) -> None:
+        now = int(time.time())
+        self.conn.execute(
+            """
+            INSERT INTO account_heartbeat(account, last_error, last_error_event)
+            VALUES(?,?,?)
+            ON CONFLICT(account) DO UPDATE SET
+                last_error=excluded.last_error,
+                last_error_event=excluded.last_error_event
+            """,
+            (self.account, now, event),
+        )
 
     def prune_stale_pending_learn(self, older_than_s: int) -> int:
         """Clear pending_learn flags that have been sitting past their
@@ -2642,6 +2975,7 @@ def try_learn(
         )
         db.record_rate("learn")
         db.log_event(f"learn_{kind}", msgid, detail=reason)
+        db.drop_fingerprint(body_sha256(raw))
     log.info("learned %s as %s (%s)", label, kind, reason)
     return True
 
@@ -2874,10 +3208,14 @@ def scan_inbox(
                 _log_list_hit(log, acc, hit, msgid, subject, hit_detail)
                 if hit.decision == "allow":
                     with db.tx():
+                        db.drop_pending_move(fmap["inbox"], uv, uid)
                         db.update_imap_message(
                             fmap["inbox"], uv, uid, our_action="allowlisted"
                         )
                         db.log_event("allowlisted", msgid, detail=hit_detail)
+                        db.log_event(
+                            "pending_move_canceled", msgid, detail=hit_detail
+                        )
                         if hit.conflict:
                             db.log_event("list_conflict", msgid, detail=hit_detail)
                     last_terminal = uid
@@ -3041,14 +3379,40 @@ def execute_due_moves(client: IMAPClient, db: Db, log: logging.Logger, acc: Acco
         return
 
     uids = [r["uid"] for r in rows]
-    fetched = client.fetch(uids, [b"FLAGS"])
     to_move: list[int] = []
-    for r in rows:
-        uid = r["uid"]
-        if uid not in fetched:
+    by_uid = {r["uid"]: r for r in rows}
+    for uid, data, oversize in fetch_under_cap(client, uids):
+        r = by_uid[uid]
+        flags = data.get(b"FLAGS")
+        missing = flags is None and not _body_bytes(data) and _rfc822_size(data) is None
+        if missing:
             with db.tx():
                 db.drop_pending_move(fmap["inbox"], uv, uid)
                 db.log_event("move_skipped_missing", r["message_id"])
+            continue
+        raw = _body_bytes(data)
+        if oversize or not raw:
+            log.info(
+                "move skipped (cannot revalidate) uid=%s oversize=%s",
+                uid, oversize,
+            )
+            db.log_event(
+                "move_skipped_unvalidated", r["message_id"],
+                detail=f"uid={uid} oversize={oversize}",
+            )
+            continue
+        hit = classify_list_hit(acc, db, iter_list_header_addrs(raw))
+        if hit is not None and hit.decision == "allow":
+            hit_detail = _list_hit_event_detail(hit, None)
+            with db.tx():
+                db.drop_pending_move(fmap["inbox"], uv, uid)
+                db.update_imap_message(
+                    fmap["inbox"], uv, uid, our_action="allowlisted"
+                )
+                db.log_event("allowlisted", r["message_id"], detail=hit_detail)
+                db.log_event(
+                    "pending_move_canceled", r["message_id"], detail=hit_detail
+                )
             continue
         to_move.append(uid)
 
@@ -3174,6 +3538,10 @@ def poll_junk(client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fma
                     )
                     and r["our_action"] not in ("pending_move", "moved_to_junk")
                 ]
+                if not inbox_sibs:
+                    fp = db.get_inbox_fingerprint(sha, fmap["inbox"])
+                    if fp is not None:
+                        inbox_sibs = [fp]
                 if inbox_sibs:
                     if JUNK_KEYWORD in flags:
                         learned = try_learn(
@@ -3708,7 +4076,7 @@ def _run_account(acc: Account, db: Db) -> None:
                     with db.tx():
                         cleared = db.prune_stale_pending_learn(stale_pending_window)
                         ev = db.prune_events()
-                        ms = db.prune_messages(msg_window)
+                        ms = db.prune_messages(msg_window, inbox=acc.inbox)
                     if cleared or ev or ms:
                         log.info(
                             "pruned events=%d messages=%d stale_pending=%d",
@@ -3722,11 +4090,15 @@ def _run_account(acc: Account, db: Db) -> None:
                 # does not leave the account thread blocked for up to
                 # idle_timeout (~25 min). Also keeps the IDLE chunk well under
                 # any server-side IDLE cap (RFC 2177 mentions 29 min).
+                with db.tx():
+                    db.touch_heartbeat_ok()
                 wait_between_scans(client, acc, idle_cap=idle_cap, log=log)
         except (IMAPClientError, OSError) as ex:
             detail = redact_log(str(ex), acc.password)
             log.warning("connection error: %s (backoff %ds)", detail, backoff)
-            db.log_event("conn_error", detail=detail)
+            with db.tx():
+                db.log_event("conn_error", detail=detail)
+                db.touch_heartbeat_error("conn_error")
         except Exception as ex:  # noqa: BLE001 - last-resort guard
             # redact_log strips LOGIN echoes / passwords; do not use
             # log.exception() (traceback can include LOGIN arguments).
@@ -3735,7 +4107,9 @@ def _run_account(acc: Account, db: Db) -> None:
                 "unhandled error in account loop (%s): %s",
                 type(ex).__name__, detail,
             )
-            db.log_event("unhandled_error", detail=detail)
+            with db.tx():
+                db.log_event("unhandled_error", detail=detail)
+                db.touch_heartbeat_error("unhandled_error")
         finally:
             if client is not None:
                 try:
@@ -3774,6 +4148,7 @@ def install_signal_handlers() -> None:
 
 def main() -> int:
     configure_logging()
+    os.umask(0o077)
     log = logging.getLogger("main")
     if not RSPAMD_PASSWORD:
         log.error("RSPAMD_PASSWORD is unset")
@@ -3803,7 +4178,11 @@ def main() -> int:
         except Exception as ex:  # noqa: BLE001
             log.error("failed to start dashboard: %s", redact_log(str(ex)))
 
-    accounts = load_accounts(CONFIG_PATH)
+    try:
+        accounts = load_accounts(CONFIG_PATH)
+    except ConfigError as ex:
+        log.error("%s", ex)
+        return 2
     log.info("loaded %d account(s): %s", len(accounts), ", ".join(a.name for a in accounts))
     heartbeat()
 

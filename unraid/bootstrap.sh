@@ -60,12 +60,13 @@ fi
 #   images' internal uids (redis 999, rspamd _rspamd 11333) and kept
 #   private (750) rather than world-writable (777), so a stray host
 #   process cannot tamper with the Bayes corpus or rspamd's state.
-# - state/ stays 755 (only the filter writes, runs as 99:100).
+# - state/ stays 700 (mail metadata; only the filter UID writes).
 REDIS_UID=999      # uid of the redis user in redis:*-alpine
 RSPAMD_UID=11333   # uid of _rspamd in rspamd/rspamd
 mkdir -p "$APP"/{redis,state,rspamd/data,rspamd/local.d}
 chown "$APP_UID:$APP_GID" "$APP" "$APP/state" "$APP/rspamd" "$APP/rspamd/local.d"
-chmod 755 "$APP" "$APP/state" "$APP/rspamd" "$APP/rspamd/local.d"
+chmod 755 "$APP" "$APP/rspamd" "$APP/rspamd/local.d"
+chmod 700 "$APP/state"
 if [[ "$SPAMFILTER_SECRETS" == "$APP/"* ]]; then
   mkdir -p "$(dirname "$SPAMFILTER_SECRETS")"
   chown "$APP_UID:$APP_GID" "$(dirname "$SPAMFILTER_SECRETS")"

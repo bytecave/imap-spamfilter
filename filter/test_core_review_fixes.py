@@ -548,13 +548,13 @@ def test_rspamd_scan_rejects_malformed_or_nonfinite_score(monkeypatch, payload):
 @pytest.mark.parametrize("value", [".nan", ".inf", "true"])
 def test_config_rejects_nonfinite_or_boolean_threshold(tmp_path, value):
     path = _write_accounts(tmp_path, f"    threshold: {value}\n")
-    with pytest.raises(SystemExit, match="threshold"):
+    with pytest.raises(f.ConfigError, match="threshold"):
         f.load_accounts(path)
 
 
 def test_config_rejects_boolean_integer(tmp_path):
     path = _write_accounts(tmp_path, "    idle_timeout: true\n")
-    with pytest.raises(SystemExit, match="idle_timeout"):
+    with pytest.raises(f.ConfigError, match="idle_timeout"):
         f.load_accounts(path)
 
 
@@ -581,7 +581,7 @@ def test_unknown_config_keys_are_rejected(tmp_path, location, text, match):
         path = _write_accounts(tmp_path, "", defaults=text)
     else:
         path = _write_accounts(tmp_path, text)
-    with pytest.raises(SystemExit, match=match):
+    with pytest.raises(f.ConfigError, match=match):
         f.load_accounts(path)
 
 
@@ -597,5 +597,5 @@ def test_unknown_config_keys_are_rejected(tmp_path, location, text, match):
 )
 def test_loop_timing_bounds_are_enforced(tmp_path, line):
     path = _write_accounts(tmp_path, line)
-    with pytest.raises(SystemExit, match="out of range"):
+    with pytest.raises(f.ConfigError, match="out of range"):
         f.load_accounts(path)

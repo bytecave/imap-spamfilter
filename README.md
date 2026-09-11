@@ -529,9 +529,9 @@ user's mailbox.
 
 | Key | Default | Notes |
 | --- | --- | --- |
-| `max_moves_per_hour` | `30` | breach triggers safe-mode for the account |
-| `max_learns_per_hour` | `50` | breach triggers learning-only safe-mode |
-| `max_train_per_run` | `100` | cap per `drain_train_spam` batch |
+| `max_moves_per_hour` | `30` | rolling-hour soft refusal of Inbox→Junk moves; does **not** enter safe-mode |
+| `max_learns_per_hour` | `50` | rolling-hour soft refusal of Bayes learns; does **not** enter safe-mode |
+| `max_train_per_run` | `100` | cap per `drain_train_spam` / `drain_train_ham` run (not per hour) |
 | `max_list_per_run` | `100` | cap per IMAP allow/block folder drain (slice 11) |
 | `max_list_entries` | `1000` | cap per `(scope, kind)` list |
 | `flip_flop_cooldown_seconds` | `600` | block opposite-class relearn on the same IMAP UID; `0` disables |
@@ -551,6 +551,14 @@ is absent from YAML `defaults:`**. An explicit
 `defaults.junk_retention_days: 30` wins over a template field of `10`.
 Per-account keys still win via the usual merge. The Unraid form fills
 the gap when YAML omits the key.
+
+Operational `messages` rows older than
+`max(junk_retention_days, trained_retention_days, 14) + 7` days are
+pruned. Compact Inbox body-SHA fingerprints are kept up to 400 days
+(capped at 20 000 per account) so a later user Inbox→Junk move can
+still train spam after the full row is gone. Fingerprints are removed
+after a successful learn. Host `state/` is created mode `0700`; the
+SQLite DB and WAL/SHM sidecars are `0600`.
 
 ### Bayes identity (sharing or isolating training across accounts)
 
@@ -733,7 +741,9 @@ marked Secure.
 
 Pages:
 
-- `/`         health banner + filter KPIs (24h / 7d, spam-catch rate)
+- `/`         health banner (conjunction of every configured account)
+              + filter KPIs (24h / 7d scans, routing catch rate =
+              moves / (scans + list decisions), learns last 30 days)
               + 14-day scan-per-day trend + rspamd lifetime totals
               (scanned, spam/ham counts, fuzzy hashes, connections,
               action breakdown) + Bayes learn progress bars with
@@ -786,11 +796,11 @@ Two distinct mechanisms protect the account from runaway behaviour:
 
 ### Rate limits (soft refusal, self-recovering)
 
-`max_moves_per_hour`, `max_learns_per_hour`, and `max_train_per_run`
-cap the number of mailbox-modifying actions per hour. When a limit is
-hit the filter logs a warning **once per minute**, refuses that action
-for the rest of the rolling-hour window, then resumes automatically as
-old entries roll out of the window. No DB state, no manual recovery.
+`max_moves_per_hour` and `max_learns_per_hour` cap mailbox-modifying
+actions in a rolling hour. `max_train_per_run` caps one Train-folder
+drain pass. When a limit is hit the filter logs a warning **once per
+minute**, refuses that action for the rest of the window (or the rest
+of that run), then resumes automatically. No DB state, no manual recovery.
 
 ### Safe-mode (sticky-ish, scoped)
 

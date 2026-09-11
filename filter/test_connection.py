@@ -40,7 +40,7 @@ def test_quoted_ssl_false_is_starttls_not_implicit(tmp_path):
 
 def test_tls_mode_none_remote_refused(tmp_path):
     path = _write_accounts(tmp_path, "    tls_mode: none\n")
-    with pytest.raises(SystemExit, match="tls_mode: none"):
+    with pytest.raises(f.ConfigError, match="tls_mode: none"):
         f.load_accounts(path)
 
 
@@ -84,7 +84,7 @@ def test_quoted_learn_from_moves_false(tmp_path):
 
 def test_invalid_bool_exits(tmp_path):
     path = _write_accounts(tmp_path, '    learn_from_moves: "maybe"\n')
-    with pytest.raises(SystemExit, match="learn_from_moves"):
+    with pytest.raises(f.ConfigError, match="learn_from_moves"):
         f.load_accounts(path)
 
 
@@ -100,7 +100,7 @@ def test_flip_flop_cooldown_yaml_and_builtin(tmp_path):
 
 def test_flip_flop_cooldown_out_of_range(tmp_path):
     path = _write_accounts(tmp_path, "    flip_flop_cooldown_seconds: -1\n")
-    with pytest.raises(SystemExit, match="flip_flop_cooldown_seconds"):
+    with pytest.raises(f.ConfigError, match="flip_flop_cooldown_seconds"):
         f.load_accounts(path)
 
 

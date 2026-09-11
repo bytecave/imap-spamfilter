@@ -37,7 +37,7 @@ def test_load_accounts_requires_actual_name(tmp_path):
         "    user: u@example.com\n"
         "    password: \"x\"\n"
     )
-    with pytest.raises(SystemExit, match="actual_name"):
+    with pytest.raises(f.ConfigError, match="actual_name"):
         f.load_accounts(path)
 
 
@@ -81,7 +81,7 @@ def test_list_domains_rejects_bad_type_and_duplicate(tmp_path):
         "    password: x\n"
         "    actual_name: A\n"
     )
-    with pytest.raises(SystemExit, match="company"):
+    with pytest.raises(f.ConfigError, match="company"):
         f.load_accounts(path)
 
     path.write_text(
@@ -97,7 +97,7 @@ def test_list_domains_rejects_bad_type_and_duplicate(tmp_path):
         "    password: x\n"
         "    actual_name: A\n"
     )
-    with pytest.raises(SystemExit, match="duplicate"):
+    with pytest.raises(f.ConfigError, match="duplicate"):
         f.load_accounts(path)
 
 
@@ -115,7 +115,7 @@ def test_unknown_list_domain_key_rejected(tmp_path):
         "    password: x\n"
         "    actual_name: A\n"
     )
-    with pytest.raises(SystemExit, match="unknown key"):
+    with pytest.raises(f.ConfigError, match="unknown key"):
         f.load_accounts(path)
 
 
