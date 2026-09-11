@@ -822,3 +822,188 @@ def test_non_admin_list_post_403(dashboard_db, tmp_path, monkeypatch):
         data={"scope": "rjmetalfab.com", "kind": "allow", "body": "a@x.com\n"},
     )
     assert resp.status_code == 403
+
+
+def _admin_client(monkeypatch, tmp_path, yaml_text=None):
+    path = tmp_path / "accounts.yml"
+    path.write_text(yaml_text or _list_yaml(tmp_path).read_text())
+    monkeypatch.setattr(d, "CONFIG_PATH", path)
+    user = d._User("admin", "plain:stable", True, frozenset())
+    return _authenticated_client(monkeypatch, user), path
+
+
+def test_list_cap_uses_yaml_defaults_not_first_account(dashboard_db, tmp_path, monkeypatch):
+    yaml_text = (
+        "defaults:\n"
+        "  max_list_entries: 2\n"
+        "list_domains:\n"
+        "  - domain: rjmetalfab.com\n"
+        "    type: company\n"
+        "accounts:\n"
+        "  - name: first\n"
+        "    imap_host: h\n"
+        "    user: u@rjmetalfab.com\n"
+        "    password: x\n"
+        "    actual_name: First User\n"
+        "    max_list_entries: 1\n"
+        "  - name: second\n"
+        "    imap_host: h\n"
+        "    user: v@rjmetalfab.com\n"
+        "    password: x\n"
+        "    actual_name: Second User\n"
+        "    max_list_entries: 1000\n"
+    )
+    client, _path = _admin_client(monkeypatch, tmp_path, yaml_text)
+    client.get("/lists/domains")
+    with client.session_transaction() as sess:
+        token = sess["csrf"]
+    ok = client.post(
+        "/lists/domains",
+        data={
+            "csrf_token": token,
+            "scope": "rjmetalfab.com",
+            "kind": "allow",
+            "body": "a@x.com\nb@x.com\n",
+        },
+        follow_redirects=False,
+    )
+    assert ok.status_code == 302
+    denied = client.post(
+        "/lists/domains",
+        data={
+            "csrf_token": token,
+            "scope": "rjmetalfab.com",
+            "kind": "allow",
+            "body": "a@x.com\nb@x.com\nc@x.com\n",
+        },
+        follow_redirects=False,
+    )
+    assert denied.status_code == 400
+    assert b"max_list_entries" in denied.data
+
+
+def test_list_redirect_encodes_reserved_actual_name(dashboard_db, tmp_path, monkeypatch):
+    yaml_text = (
+        "accounts:\n"
+        "  - name: a\n"
+        "    imap_host: h\n"
+        "    user: u@example.com\n"
+        "    password: x\n"
+        "    actual_name: \"Ann & Bob=Ok?\"\n"
+    )
+    client, _path = _admin_client(monkeypatch, tmp_path, yaml_text)
+    client.get("/lists/users")
+    with client.session_transaction() as sess:
+        token = sess["csrf"]
+    resp = client.post(
+        "/lists/users",
+        data={
+            "csrf_token": token,
+            "scope": "Ann & Bob=Ok?",
+            "kind": "allow",
+            "body": "a@x.com\n",
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    loc = resp.headers["Location"]
+    assert "Ann" in loc
+    assert "scope=" in loc
+    assert "kind=allow" in loc
+    assert "& Bob" not in loc  # must be encoded, not a raw query splitter
+
+
+def test_invalid_accounts_yml_is_error_card_not_500(dashboard_db, tmp_path, monkeypatch):
+    client, path = _admin_client(monkeypatch, tmp_path)
+    path.write_text("accounts:\n  - name: a\n    extra: 1\n")
+    get_resp = client.get("/lists/domains")
+    assert get_resp.status_code == 503
+    assert b"Could not read accounts.yml" in get_resp.data
+    post_resp = client.post("/lists/domains", data={"kind": "allow", "body": "a@x.com\n"})
+    assert post_resp.status_code == 503
+    # A later valid config on the same app still works.
+    path.write_text(_list_yaml(tmp_path).read_text())
+    assert client.get("/lists/domains").status_code == 200
+
+
+def test_catch_rate_bounded_with_list_moves(dashboard_db, monkeypatch):
+    import sqlite3
+    now = int(time.time())
+    conn = sqlite3.connect(d.DB_PATH)
+    conn.execute(
+        "INSERT INTO events(account, ts, message_id, event, detail) VALUES (?,?,?,?,?)",
+        ("acct-alpha", now, "x", "blocklisted", "list"),
+    )
+    conn.execute(
+        "INSERT INTO events(account, ts, message_id, event, detail) VALUES (?,?,?,?,?)",
+        ("acct-alpha", now, "x", "moved_to_junk", "list"),
+    )
+    conn.commit()
+    conn.close()
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert b"of routing decisions" in resp.data
+    assert b"1000%" not in resp.data
+    assert b"Spam learns 30d" in resp.data
+
+
+@pytest.mark.parametrize("payload", [
+    ["not", "a", "map"],
+    "string",
+    None,
+    {"uptime": "nope", "actions": []},
+    {"uptime": None, "statfiles": {"x": 1}},
+    {"actions": {"reject": "x"}, "statfiles": [None, "bad", {"symbol": "BAYES_SPAM"}]},
+    {"uptime": 10 ** 30},
+])
+def test_malformed_rspamd_stats_do_not_500(dashboard_db, monkeypatch, payload):
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    monkeypatch.setattr(d, "_rspamd_stats", lambda: d._normalize_rspamd_stats(payload))
+    resp = client.get("/")
+    assert resp.status_code == 200
+
+
+def test_event_subject_not_stolen_by_reused_message_id(dashboard_db, monkeypatch):
+    import sqlite3
+    now = int(time.time())
+    conn = sqlite3.connect(d.DB_PATH)
+    conn.execute(
+        """
+        INSERT INTO events(account, ts, message_id, event, detail, subject)
+        VALUES (?,?,?,?,?,?)
+        """,
+        ("acct-alpha", now, "dup@id", "scan", "old", "ORIGINAL SUBJECT"),
+    )
+    conn.execute(
+        """
+        INSERT INTO messages(
+            account, folder, uidvalidity, uid, message_id, body_sha256,
+            first_seen, last_seen, current_folder, sender, subject
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        ("acct-alpha", "INBOX", 1, 99, "dup@id", "other", now, now, "INBOX",
+         "n@x.com", "HIJACKED SUBJECT"),
+    )
+    conn.commit()
+    conn.close()
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    resp = client.get("/events")
+    assert resp.status_code == 200
+    assert b"ORIGINAL SUBJECT" in resp.data
+    assert b"HIJACKED SUBJECT" not in resp.data
+
+
+def test_authenticated_responses_send_vary_cookie(dashboard_db, monkeypatch):
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "Cookie" in resp.headers.get("Vary", "")
+    login = d.app.test_client().get("/login")
+    assert login.status_code == 200
+    assert login.headers["Cache-Control"] == "no-store"
+

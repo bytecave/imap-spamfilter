@@ -55,7 +55,12 @@ from flask import (
 from markupsafe import escape
 from waitress import serve
 
-from filter import decode_rfc2047
+from filter import (
+    ACCOUNT_HEARTBEAT_STALE_S,
+    decode_rfc2047,
+    load_accounts,
+    yaml_max_list_entries,
+)
 
 STATE_DIR = Path(os.environ.get("STATE_DIR", "/state"))
 DB_PATH = STATE_DIR / "spamfilter.db"
@@ -346,6 +351,7 @@ def _security_headers(resp: Response) -> Response:
     resp.headers["X-Frame-Options"] = "DENY"
     resp.headers["Referrer-Policy"] = "no-referrer"
     resp.headers["Cache-Control"] = "no-store"
+    resp.headers["Vary"] = "Cookie"
     return resp
 
 
@@ -538,10 +544,13 @@ def _h(value) -> str:
 # newest messages.subject for that account+Message-Id.
 _EVENTS_WITH_SUBJECT = (
     "SELECT e.ts, e.account, e.event, e.detail, e.message_id, "
-    "(SELECT m.subject FROM messages m "
-    " WHERE m.account = e.account AND e.message_id IS NOT NULL "
-    "   AND m.message_id = e.message_id AND IFNULL(m.subject,'') != '' "
-    " ORDER BY m.last_seen DESC LIMIT 1) AS subject "
+    "COALESCE("
+    "  NULLIF(e.subject, ''), "
+    "  (SELECT m.subject FROM messages m "
+    "    WHERE m.account = e.account AND e.message_id IS NOT NULL "
+    "      AND m.message_id = e.message_id AND IFNULL(m.subject,'') != '' "
+    "    GROUP BY m.message_id HAVING COUNT(*) = 1)"
+    ") AS subject "
     "FROM events e "
 )
 
@@ -702,6 +711,60 @@ def _sparkline(values: list[int], width: int = 168, height: int = 38) -> str:
     )
 
 
+def _finite_stat_number(value, *, default=None, maximum=10**18):
+    if isinstance(value, bool) or value is None:
+        return default
+    if isinstance(value, (int, float)):
+        if not isinstance(value, bool) and abs(value) <= maximum:
+            return int(value) if float(value).is_integer() else float(value)
+        return default
+    if isinstance(value, str):
+        try:
+            parsed = float(value.strip())
+        except ValueError:
+            return default
+        if abs(parsed) <= maximum:
+            return int(parsed) if parsed.is_integer() else parsed
+    return default
+
+
+def _normalize_rspamd_stats(raw) -> dict | None:
+    """Accept only the small /stat shape the summary page renders."""
+    if not isinstance(raw, dict):
+        return None
+    actions_in = raw.get("actions")
+    actions = {}
+    if isinstance(actions_in, dict):
+        for key, val in actions_in.items():
+            if not isinstance(key, str):
+                continue
+            num = _finite_stat_number(val, default=0)
+            actions[key] = 0 if num is None else num
+    elif actions_in not in (None,):
+        return None
+    statfiles_in = raw.get("statfiles")
+    statfiles = []
+    if isinstance(statfiles_in, list):
+        for entry in statfiles_in:
+            if not isinstance(entry, dict):
+                continue
+            statfiles.append(entry)
+    elif statfiles_in not in (None,):
+        return None
+    uptime = _finite_stat_number(raw.get("uptime"), default=0)
+    if uptime is None or uptime < 0:
+        uptime = 0
+    out = dict(raw)
+    out["actions"] = actions
+    out["statfiles"] = statfiles
+    out["uptime"] = int(uptime)
+    for key in ("scanned", "spam_count", "ham_count", "total_learns", "connections"):
+        num = _finite_stat_number(raw.get(key), default=None)
+        if num is not None:
+            out[key] = num
+    return out
+
+
 def _rspamd_stats() -> dict | None:
     try:
         from filter import _load_rspamd_password
@@ -716,9 +779,42 @@ def _rspamd_stats() -> dict | None:
         )
         if r.status_code != 200:
             return None
-        return r.json()
-    except requests.RequestException:
+        return _normalize_rspamd_stats(r.json())
+    except (requests.RequestException, ValueError, TypeError):
         return None
+
+
+def _configured_account_names() -> list[str] | None:
+    """Validated accounts.yml roster, or None if unreadable."""
+    try:
+        return [a.name for a in load_accounts(CONFIG_PATH)]
+    except Exception as ex:  # noqa: BLE001 — ConfigError is Exception
+        log.warning("account roster load failed: %s", ex)
+        return None
+
+
+def _account_health_problems(
+    *,
+    configured: list[str] | None,
+    heartbeats: dict,
+    now: int,
+    allowed: frozenset | None,
+) -> list[str]:
+    if not configured:
+        return []
+    names = configured if allowed is None else [n for n in configured if n in allowed]
+    problems = []
+    for name in names:
+        hb = heartbeats.get(name)
+        last_ok = hb["last_ok"] if hb is not None else None
+        last_err = hb["last_error"] if hb is not None else None
+        last_err_ev = hb["last_error_event"] if hb is not None else None
+        if last_err and (not last_ok or int(last_err) >= int(last_ok)):
+            problems.append(f"{name} {last_err_ev or 'error'}")
+            continue
+        if not last_ok or (now - int(last_ok)) > ACCOUNT_HEARTBEAT_STALE_S:
+            problems.append(f"{name} quiet/stale")
+    return problems
 
 
 def _kpi(label: str, value, sub: str = "", cls: str = "") -> str:
@@ -1082,12 +1178,30 @@ def summary():
             "SELECT COUNT(*) FROM events WHERE event='learn_ham' AND ts>=?",
             (now - day,))
         learn_spam_total = one(
-            "SELECT COUNT(*) FROM events WHERE event='learn_spam'")
+            "SELECT COUNT(*) FROM events WHERE event='learn_spam' AND ts>=?",
+            (now - 30 * day,))
         learn_ham_total = one(
-            "SELECT COUNT(*) FROM events WHERE event='learn_ham'")
+            "SELECT COUNT(*) FROM events WHERE event='learn_ham' AND ts>=?",
+            (now - 30 * day,))
+        allow_24h = one(
+            "SELECT COUNT(*) FROM events WHERE event='allowlisted' AND ts>=?",
+            (now - day,))
+        block_24h = one(
+            "SELECT COUNT(*) FROM events WHERE event='blocklisted' AND ts>=?",
+            (now - day,))
+        conn_err_24h = one(
+            "SELECT COUNT(*) FROM events WHERE event='conn_error' AND ts>=?",
+            (now - day,))
         safe_modes = c.execute(
             "SELECT account, scope, reason FROM safe_mode" + scw,
             scwp).fetchall()
+        try:
+            heartbeats = {
+                r["account"]: r
+                for r in c.execute("SELECT * FROM account_heartbeat").fetchall()
+            }
+        except sqlite3.Error:
+            heartbeats = {}
         last_learns = c.execute(
             _EVENTS_WITH_SUBJECT
             + "WHERE e.event IN ('learn_spam','learn_ham')" + sc_e
@@ -1104,32 +1218,48 @@ def summary():
         problems.append(f"{scan_fail_24h} scan failure(s)")
     if learn_fail_24h:
         problems.append(f"{learn_fail_24h} learn failure(s)")
+    if conn_err_24h:
+        problems.append(f"{conn_err_24h} connection error(s)")
     if safe_modes:
         problems.append(f"{len(safe_modes)} account(s) in safe-mode")
+    allowed = None if admin else _accts
+    problems.extend(
+        _account_health_problems(
+            configured=_configured_account_names(),
+            heartbeats=heartbeats,
+            now=now,
+            allowed=allowed,
+        )
+    )
     if problems:
         banner = (f'<div class="banner warn">Attention: '
-                  f'{_h(", ".join(problems))} in the last 24h.</div>')
+                  f'{_h(", ".join(problems))}.</div>')
     else:
-        banner = ('<div class="banner ok">All healthy - '
-                  'no scan or learn failures, no safe-mode.</div>')
+        banner = ('<div class="banner ok">All configured accounts healthy - '
+                  'no scan, learn, or connection failures, no safe-mode.</div>')
 
     # 14-day scan sparkline --------------------------------------------
     series = []
     for i in range(13, -1, -1):
         d = time.strftime("%Y-%m-%d", time.localtime(now - i * day))
         series.append(int(scan_by_day.get(d, 0)))
-    catch_rate = f"{moved_24h / scanned_24h * 100:.0f}%" if scanned_24h else "-"
+    routed_24h = scanned_24h + allow_24h + block_24h
+    if routed_24h:
+        pct = min(100.0, max(0.0, moved_24h / routed_24h * 100.0))
+        catch_rate = f"{pct:.0f}%"
+    else:
+        catch_rate = "-"
 
     kpis = "".join([
         _kpi("Scanned 24h", scanned_24h),
         _kpi("Scanned 7d", scanned_7d),
-        _kpi("Moved 24h", moved_24h, sub=f"{catch_rate} of scanned"),
+        _kpi("Moved 24h", moved_24h, sub=f"{catch_rate} of routing decisions"),
         _kpi("Scan fails 24h", scan_fail_24h,
              cls="bad" if scan_fail_24h else ""),
         _kpi("Spam learns 24h", learn_spam_24h),
         _kpi("Ham learns 24h", learn_ham_24h),
-        _kpi("Spam learns total", learn_spam_total),
-        _kpi("Ham learns total", learn_ham_total),
+        _kpi("Spam learns 30d", learn_spam_total),
+        _kpi("Ham learns 30d", learn_ham_total),
     ])
 
     trend = (
@@ -1414,16 +1544,16 @@ def events():
 
 
 def _list_config():
-    """Roster + actual_names from accounts.yml. None if unreadable."""
+    """Roster + actual_names + YAML-default list cap. None if unreadable."""
     try:
-        from filter import load_accounts
         accs = load_accounts(CONFIG_PATH)
-    except Exception as ex:  # noqa: BLE001
+        cap = yaml_max_list_entries(CONFIG_PATH)
+    except Exception as ex:  # noqa: BLE001 — ConfigError is Exception
         log.warning("list config load failed: %s", ex)
         return None
     roster = accs[0].list_roster if accs else None
     names = sorted({a.actual_name for a in accs if a.actual_name})
-    return roster, names
+    return roster, names, cap
 
 
 def _list_page(which: str, error: str | None = None, error_line: int | None = None,
@@ -1437,8 +1567,8 @@ def _list_page(which: str, error: str | None = None, error_line: int | None = No
         return render(
             "Lists", f"lists-{which}",
             '<div class="card list-err">Could not read accounts.yml.</div>',
-        )
-    roster, actual_names = cfg
+        ), 503
+    roster, actual_names, cap = cfg
     kind = (request.values.get("kind") or "allow").strip().lower()
     if kind not in ("allow", "block"):
         abort(400)
@@ -1483,16 +1613,6 @@ def _list_page(which: str, error: str | None = None, error_line: int | None = No
                 title, active, action, options, scope_key, kind,
                 raw_text, perr.message, perr.line, allow_domain,
             ), 400
-        import filter as fmod
-        cap = int(fmod.BUILTIN_DEFAULTS["max_list_entries"])
-        # Prefer YAML defaults if any account loaded them
-        cfg_accs = _list_config()
-        if cfg_accs and cfg_accs[0]:
-            # max from first account (defaults merge)
-            from filter import load_accounts
-            accs = load_accounts(CONFIG_PATH)
-            if accs:
-                cap = accs[0].max_list_entries
         try:
             db = Db("_dashboard")
             try:
@@ -1509,7 +1629,8 @@ def _list_page(which: str, error: str | None = None, error_line: int | None = No
                 title, active, action, options, scope_key, kind,
                 raw_text, str(ex), 1, allow_domain,
             ), 400
-        return redirect(f"{action}?scope={scope_key}&kind={kind}")
+        endpoint = "lists_domains" if which == "domains" else "lists_users"
+        return redirect(url_for(endpoint, scope=scope_key, kind=kind))
 
     db = Db("_dashboard")
     try:
@@ -1602,19 +1723,23 @@ def accounts_view():
             "AND ts>=? GROUP BY account", (now - day,))
         spam_total = grouped(
             "SELECT account, COUNT(*) FROM events WHERE event='learn_spam' "
-            "GROUP BY account")
+            "AND ts>=? GROUP BY account", (now - 30 * day,))
         ham_total = grouped(
             "SELECT account, COUNT(*) FROM events WHERE event='learn_ham' "
-            "GROUP BY account")
+            "AND ts>=? GROUP BY account", (now - 30 * day,))
         fails = grouped(
             "SELECT account, COUNT(*) FROM events WHERE event='scan_failed' "
+            "AND ts>=? GROUP BY account", (now - day,))
+        conn_err = grouped(
+            "SELECT account, COUNT(*) FROM events WHERE event='conn_error' "
             "AND ts>=? GROUP BY account", (now - day,))
         safe: dict[str, list[str]] = {}
         for r in c.execute("SELECT account, scope FROM safe_mode"):
             safe.setdefault(r[0], []).append(r[1])
 
     admin, accts = _current_scope()
-    names = sorted(set(last) | set(safe))
+    configured = _configured_account_names() or []
+    names = sorted(set(last) | set(safe) | set(configured))
     if not admin:
         names = [n for n in names if n in accts]
     body_rows = "".join(
@@ -1625,17 +1750,17 @@ def accounts_view():
         f'<td class="num">{learns.get(n, 0)}</td>'
         f'<td class="num">{spam_total.get(n, 0)}</td>'
         f'<td class="num">{ham_total.get(n, 0)}</td>'
-        f'<td class="num">{_fail_cell(fails.get(n, 0))}</td>'
+        f'<td class="num">{_fail_cell(fails.get(n, 0) + conn_err.get(n, 0))}</td>'
         f'<td>{_h(",".join(safe.get(n, [])) or "-")}</td></tr>'
         for n in names)
     body = (
         '<div class="card"><div class="tw"><table>'
         "<tr><th>Account</th><th>Last activity</th><th>Age</th>"
         "<th class=num>Scans 24h</th><th class=num>Learns 24h</th>"
-        "<th class=num>Spam total</th><th class=num>Ham total</th>"
-        "<th class=num>Scan fails 24h</th><th>Safe-mode</th></tr>"
+        "<th class=num>Spam 30d</th><th class=num>Ham 30d</th>"
+        "<th class=num>Fails 24h</th><th>Safe-mode</th></tr>"
         + (body_rows
-           or '<tr><td colspan=9 class=muted>(no accounts seen yet)</td></tr>')
+           or '<tr><td colspan=9 class=muted>(no accounts configured yet)</td></tr>')
         + "</table></div></div>")
     return render("Accounts", "accounts", body)
 
