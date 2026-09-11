@@ -1,0 +1,247 @@
+<!--
+  ARCHIVE METADATA (prepended for chronological review; not in original source)
+  Created:        2026-09-04 04:10:29 -0700
+  Last modified:  2026-09-06 03:30:13 -0700
+  Created source: git first-commit author date
+  Git first add:  2026-09-04T04:10:29-07:00
+  Git last edit:  2026-09-06T03:30:13-07:00
+  Category:       related-docs
+  Original name:  IMPLEMENTATION_STATUS.md
+  Archive name:   22__2026-09-04_041029__IMPLEMENTATION_STATUS.md
+  Source path:    /opt/bytelord/projects/imap-spamfilter/IMPLEMENTATION_STATUS.md
+  Notes:          Related project doc (status / requirements / handoff).
+-->
+
+> **Created:** 2026-09-04 04:10:29 -0700  
+> **Last modified:** 2026-09-06 03:30:13 -0700  
+> **Original filename:** `IMPLEMENTATION_STATUS.md`  
+> **Source:** `/opt/bytelord/projects/imap-spamfilter/IMPLEMENTATION_STATUS.md`
+
+---
+# Implementation status — imap-spamfilter (ByteLord)
+
+**Last updated:** 2026-09-06  
+**Supersedes for current work:** [`SESSION_HANDOFF.md`](SESSION_HANDOFF.md) (that file is still useful for VPS layout and OAuth, but its “what’s next” and mailbox list are stale).
+
+**Repo:** `/opt/bytelord/projects/imap-spamfilter`  
+**Remote:** `github.com:bytecave/imap-spamfilter.git` (branch `main`)  
+**Upstream fork of:** marcelverdult/imap-spamfilter  
+
+Read this first in a new agent/chat session before exploring the tree.
+
+---
+
+## Snapshot in one paragraph
+
+Allow/block lists + one VPS Bayes notebook (design-arch slices 9–12) are **implemented and on `origin/main`**. User lists may include `@host`; matching is From + Sender only (Reply-To ignored). User-list hits override roster-scoped domain lists. **List hits skip `/checkv2`** (no score, no neural, no Bayes from Inbox override routing). **Contradictory Train-* / Inbox↔Junk / bootstrap learns skip** `rspamd_learn` (allow + spam, block + ham); aligned learns still run. `bootstrap_train.py --all-trained` writes Messages / Events / Learned rows (including `learn_skipped_list`). Dashboard Messages **all** band shows scored **or** learned-without-score rows. All live mailboxes are M365 via `email-oauth2-proxy`, still in **shadow**. **Phase 2 (ops, done 2026-09-06):** wiped Redis Bayes/neural (old per-user + shared `bytelord`) and SQLite `messages` + `learn_*` events (option A; lists/bookmarks kept); re-fed Trained-* into `bytelord` (`learned=1570 already=29 declined=330 failed=5` oversize). **Do not** wire `bytelord.net` mailboxes through the OAuth proxy. Product policy for allow/block lists is **reopenable whenever asked**.
+
+---
+
+## Git
+
+| Item | Value |
+|---|---|
+| Previous `origin/main` | `a4a0b7d` — “Refresh implementation status for list-skip scan and Phase 2 wipe.” |
+| Tag | `before-allow-block-list` (annotated) at `a0b8897` |
+| Previous list-skip | `cc1eb29` — list hits skip `/checkv2`; bootstrap writes dashboard learns; Messages shows learned-without-score rows |
+| This change | `b991f71` — skip contradictory Train-* / Junk / bootstrap learns (`learn_skipped_list`) |
+
+**Never commit:** live `accounts.yml` (gitignored), `/opt/bytelord/secrets/*`, token caches.
+
+---
+
+## What we accomplished
+
+### Earlier (already on `main`)
+
+Slices 1–8 (hybrid shadow, FETCH cap, inbox bookmark, `tls_mode`, IMAP UID identity, rspamd From/Rcpt, secrets/bootstrap, dashboard hardening). OAuth proxy PoC, then more M365 mailboxes. Parent plan: `design-arch/sliced_plan_code_review_fixes.md`.
+
+Allow/block + shared Bayes (slices 9–12), user-list `@host` + From/Sender-only match (`c14eb2d`), Trained-* re-feed CLI (`037c856`), score symbol explain + `explain_score.py` (`af0b928`).
+
+### This push of work (contradict-learn skip + prior `cc1eb29` / Phase 2)
+
+Architecture / policy: [`design-arch/allow_block_sliced_plan.md`](design-arch/allow_block_sliced_plan.md) + [`design-arch/slice10_list_core.md`](design-arch/slice10_list_core.md). **`new_requirements.md` is historical; slices win on disagreement.** Product policy is **reopenable whenever asked**.
+
+| Item | Status |
+|---|---|
+| List-skip scan (classify before `/checkv2`; allow/block never feed neural) | Done (`cc1eb29`) |
+| Bootstrap → `spamfilter.db` (`learn_*` + Messages rows) | Done (`cc1eb29`) |
+| Messages tab: all-band includes `learned_as` ham/spam without score | Done (`cc1eb29`) |
+| Contradictory Train-* / Inbox↔Junk / bootstrap learn skip (`list_blocks_learn`) | Done (this change; live image rebuilt) |
+| Phase 2 corpus wipe + `--all-trained` re-feed (live ops) | Done 2026-09-06 (not a git commit; data-only) |
+
+**Current product policy (reopenable):**
+
+- Lists override **routing** and **skip rspamd scan** on hit. **Never Bayes-learn** from list hits; neural never sees them either.
+- Scan **From + Sender** only. Reply-To is ignored (spoofable). IMAP drag writes **From only**, never `@host`.
+- **User lists** (`actual_name`): addresses **and** `@host` / bare host. **Domain lists** (YAML roster): addresses and `@host`.
+- Match stop-on-first-hit: (1) user address (2) user `@host` (3) domain-list address (4) domain-list `@host`. User list overrides the roster domain list. Address beats whole-domain on the same list.
+- Allow wins **only** on a true tie at the winning step; `list_conflict` is **audit-only** (events row; routing still allow).
+- After IMAP drag: upsert/flip then **MOVE mail back to Inbox**.
+- Inbox scan only (not Junk poll). Caps: `max_list_per_run=100`, `max_list_entries=1000`.
+- Roster type (`company`/`personal`) is v1 metadata only.
+- IMAP drags persist immediately. Dashboard Save is the only batched editor.
+- **Train-* / Inbox↔Junk / bootstrap skip on contradiction only:** allow + learn spam, block + learn ham. Allow + ham and block + spam still learn. Terminal skip (`learn_skipped_list`): Train-* still MOVE to Trained-*; `learned_as` is left unset so a later list removal can train. Do **not** auto-unlearn mail already in Bayes. Escape hatch: remove or flip the list entry, then Train-* / Junk-move again.
+
+**Dashboard UX:**
+
+- Save: clear dirty on submit so the browser does not show “Leave site?”
+- Find-in-list: keep caret in the search box; highlight **all** matching textarea lines via overlay; clear highlights when query is empty or has no matches
+- Messages: click **Score** to sort (SQL); first click high→low, click again toggles; **all** band shows scored **or** learned-without-score rows
+- Learned: click **Event** to sort (SQL); first click A→Z, click again toggles; includes `learn_skipped_list` (list-skip pill)
+- `script-src 'self'`; `filter/lists.js` served as `/lists.js`
+
+**Tests:** full `filter/` suite green after list-contradict learn skip (Docker `python:3.12-slim`). Host has no pytest/`ensurepip`. Use:
+
+```bash
+docker run --rm -v /opt/bytelord/projects/imap-spamfilter/filter:/app -w /app \
+  python:3.12-slim bash -c \
+  "pip install -q -r requirements.txt pytest==8.4.2 && python -m pytest -q --tb=short"
+```
+
+After code edits: `graphify update .` (graph in `graphify-out/`, gitignored).
+
+### What “Phase 1” and “Phase 2” meant (this workstream)
+
+| Phase | What | Status |
+|---|---|---|
+| **Phase 1** | Code + deploy: list-skip scan; bootstrap dashboard logging; Messages learned-without-score | Done (`cc1eb29`, live image rebuilt) |
+| **Phase 2** | **Ops only** (after greenlight): wipe polluted training, then re-bootstrap. Redis `FLUSHDB` (Bayes/fuzzy/neural for old per-user notebooks **and** shared `bytelord`); SQLite option A = `DELETE FROM messages` + delete all `learn_*` events (keep `address_lists`, bookmarks, safe_mode); then `docker exec spamfilter python bootstrap_train.py --all-trained` | Done 2026-09-06 |
+
+Phase 2 was **not** a product feature in git — it reset live corpus state so Proofpoint-era neural/Bayes pollution and stale dashboard learn history would not keep scoring future mail.
+
+---
+
+## Live VPS state
+
+**Filter image** is built from the local `filter/` tree (`compose` build context). Last rebuild: contradictory Train-* / Junk / bootstrap learn skip (`learn_skipped_list`). No Redis/SQLite wipe.
+
+**Compose / data (unchanged layout):**
+
+| Path | Role |
+|---|---|
+| `/opt/bytelord/projects/imap-spamfilter/` | Git checkout + gitignored `accounts.yml` |
+| `/opt/bytelord/projects/email-oauth2-proxy/` | Proxy clone + local Docker overlay |
+| `/opt/bytelord/secrets/imap-spamfilter.env` | `RSPAMD_PASSWORD`, `REDIS_PASSWORD` |
+| `/opt/bytelord/secrets/email-oauth2-proxy.config` | Proxy INI (mode 600) |
+| `/opt/bytelord/data/imap-spamfilter/` | redis, rspamd, SQLite **state** |
+| `/opt/bytelord/data/email-oauth2-proxy/cache/` | token store + proxy logs |
+| `/opt/bytelord/compose/imap-spamfilter/compose.yaml` | Live filter stack |
+| `/opt/bytelord/compose/email-oauth2-proxy/compose.yaml` | Live proxy |
+
+Dashboard: `127.0.0.1:8080` only. From Windows PowerShell:
+
+```powershell
+ssh -L 8080:127.0.0.1:8080 bytecave@bytelord
+```
+
+Then http://127.0.0.1:8080/ — hard-refresh after JS/CSS deploys (`Ctrl+F5`).
+
+Rebuild/restart filter (as user `bytecave`, uid/gid 1001):
+
+```bash
+export SPAMFILTER_UID=1001 SPAMFILTER_GID=1001
+docker compose -f /opt/bytelord/compose/imap-spamfilter/compose.yaml up -d --build spamfilter
+```
+
+Proxy:
+
+```bash
+docker compose -f /opt/bytelord/compose/email-oauth2-proxy/compose.yaml up -d --force-recreate
+```
+
+Python **3.12** in the filter image (imapclient 3.1.0 + 3.14 breaks `tls_mode: none`).
+
+Do **not** use YAML aliases like `*secrets-file:/path:ro` in Compose (go-yaml rejects alias+suffix).
+
+---
+
+## Live accounts (`accounts.yml`, gitignored)
+
+All `mode: shadow`. Proxy LOGIN with `password: "Dummy"`, `imap_host: email-oauth2-proxy`, port `1993`, `tls_mode: none`, `allow_insecure_tls: true`.
+
+`defaults.bayes_user: bytelord` (one notebook). Roster domains: `bytecave.net`, `eizenhoefer.net`, `rjmetalfab.com`, `bytelord.net`.
+
+| `name` | mailbox | `actual_name` |
+|---|---|---|
+| `rich_bytecave` | rich@bytecave.net | Rich Eizenhoefer |
+| `rich_rjmetalfab` | rich@rjmetalfab.com | Rich Eizenhoefer |
+| `steve_rjmetalfab` | steve@rjmetalfab.com | Steve Jones |
+| `bobbi_rjmetalfab` | bobbi@rjmetalfab.com | Bobbi Naugle |
+| `marilyn_rjmetalfab` | marilyn@rjmetalfab.com | Marilyn Arnold |
+| `rich_eizenhoefer` | rich@eizenhoefer.net | Rich Eizenhoefer |
+| `shon_bytecave` | shon@bytecave.net | Shon Eizenhoefer |
+| `nac_bytecave` | nac@bytecave.net | Shon Eizenhoefer |
+| `shon_eizenhoefer` | shon@eizenhoefer.net | Shon Eizenhoefer |
+| `sam_bytecave` | sam@bytecave.net | Sam Anderson |
+
+**10 accounts.** Allowlist/Blocklist folders were auto-created on connect.
+
+### bytelord.net is not M365
+
+`bytelord.net` is **ordinary IMAP** (user/password to a normal server), not Exchange / OAuth2. It stays on the **domain roster** for allow/block lists only.
+
+We briefly added `rich@bytelord.net` and `kyle@bytelord.net` via the OAuth proxy; Exchange returned `User is authenticated but not connected.` User confirmed they are not M365. **Backed out** of `accounts.yml`, proxy config, and `tokenstore.config`. Do not add them again until a real IMAP/password path exists.
+
+Proxy currently has **no** `[rich@bytelord.net]` / `[kyle@bytelord.net]` sections. If the proxy crash-loops with `No section: 'rich@bytelord.net'`, leftover rows in `/opt/bytelord/data/email-oauth2-proxy/cache/tokenstore.config` are the usual cause — remove those sections and recreate the proxy container.
+
+### Adding another M365 mailbox
+
+1. Exchange: `Add-MailboxPermission` for the spamfilter app (same as existing mailboxes).
+2. Copy a CCG `[user@domain]` block in `/opt/bytelord/secrets/email-oauth2-proxy.config` (same tenant/client/secret as `rich@bytecave.net`).
+3. Matching `accounts.yml` entry (`actual_name` required, `mode: shadow` first).
+4. Restart **proxy then** `spamfilter`.
+
+Gmail / live.com: still deferred (not client-credentials).
+
+---
+
+## Standing rules (agent + product)
+
+- **graphify first:** `.cursor/rules/graphify.mdc` — `graphify query "…" --budget 10000` before exploring; `graphify update .` after code edits.
+- **Commit/push** only when the user asks. No force-push, no hook skip, do not commit secrets.
+- **Do not edit the plan file** unless asked (`allow_block_sliced_plan.md` status table may still say “ready to implement”; code is ahead of that table). Allow/block **product policy is reopenable** whenever asked.
+- Slices 9–12 **win** over `new_requirements.md`.
+- Caddy / Netbird / `spam.bytelord.net` is **out of scope** for these slices.
+- Filter talks IMAP `LOGIN` only. OAuth lives in **email-oauth2-proxy**, not this repo.
+- Live `accounts.yml` is gitignored; `accounts.yml.example` is the tracked template.
+- Dashboard list POST is admin-only + CSRF; login body limit stays 16 KiB; list POST 256 KiB.
+- Shadow: no Inbox/Junk/Trash auto-junk; Train-* and Allowlist/Blocklist drain + MOVE-back-to-Inbox are allowed.
+
+---
+
+## What’s next (suggested)
+
+1. **IMAP-path symbol weight remediation (unlisted mail)** — Amazon ~25 was `BROKEN_HEADERS` + `BLACKLIST_DMARC` + SPF/DKIM fails after Proofpoint/M365 rewrite, not Bayes. List-skip stops neural poison when listed; **unlisted** mail still gets those symbols. Next: rspamd `local.d` weight overrides / disable misleading IMAP auth symbols; use `explain_score.py` before/after. Also fix Spamhaus open-resolver / URIBL blocked when convenient.
+2. **Mode promotion** — Stay in **shadow** until scores look sane; then `flag` then `move`.
+3. **Do not** implement generic IMAP user/password for `bytelord.net` unless asked (new auth path).
+4. More M365 mailboxes only with Exchange grant + proxy section + YAML.
+5. Deferred from older handoff: container lockdown, Redis LRU, GHA SHA pins, oversize MIME, Entra cert instead of client secret.
+
+---
+
+## Key files for a new agent
+
+| File | Why |
+|---|---|
+| `IMPLEMENTATION_STATUS.md` | This file |
+| `design-arch/allow_block_sliced_plan.md` | List/Bayes product decisions (reopenable) |
+| `design-arch/slice9_shared_bayes.md` … `slice12_dashboard_lists.md` | Implementation specs |
+| `design-arch/sliced_plan_code_review_fixes.md` | Slices 1–8 + deferred ops |
+| `filter/bootstrap_train.py` | Trained-* re-feed (`--all-trained`) + dashboard learn rows |
+| `filter/explain_score.py` | Dump rspamd symbols for one IMAP UID |
+| `filter/dashboard.py` + `filter/lists.js` | Dashboard + list editor + sort |
+| `filter/test_address_lists.py`, `test_list_folders.py`, `test_dashboard.py`, `test_bootstrap_train.py`, `test_learn.py` | Slice 10–12 + list-skip + contradict-learn + bootstrap dash tests |
+| `deploy/bytelord-compose.yaml` | Filter compose source of truth |
+| `accounts.yml` / `accounts.yml.example` | Runtime vs template |
+| `.cursor/rules/graphify.mdc` | Explore-via-graphify |
+
+---
+
+## Graphify
+
+```bash
+cd /opt/bytelord/projects/imap-spamfilter
+graphify query "<architecture question>" --budget 10000
+graphify update .
+```

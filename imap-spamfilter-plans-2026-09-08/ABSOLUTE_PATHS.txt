@@ -1,0 +1,114 @@
+# Absolute paths
+
+Zip: /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08.zip
+Unpacked: /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08
+
+## Archive files in chronological order
+
+01. /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08/design-arch/01__2026-08-23_232217__spamfilter_discussion_and_code_review.md
+    created=2026-08-23 23:22:17 -0700  modified=2026-08-23 23:22:17 -0700
+    source=/opt/bytelord/projects/imap-spamfilter/design-arch/spamfilter_discussion_and_code_review.md
+
+02. /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08/design-arch/02__2026-08-24_002541__slice1_hybrid_shadow_mode.md
+    created=2026-08-24 00:25:41 -0700  modified=2026-08-24 00:25:41 -0700
+    source=/opt/bytelord/projects/imap-spamfilter/design-arch/slice1_hybrid_shadow_mode.md
+
+03. /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08/design-arch/03__2026-08-24_003107__sliced_plan_code_review_fixes.md
+    created=2026-08-24 00:31:07 -0700  modified=2026-08-28 02:39:43 -0700
+    source=/opt/bytelord/projects/imap-spamfilter/design-arch/sliced_plan_code_review_fixes.md
+
+04. /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08/design-arch/04__2026-08-26_191859__slice2_imap_fetch_discipline.md
+    created=2026-08-26 19:18:59 -0700  modified=2026-08-26 19:18:59 -0700
+    source=/opt/bytelord/projects/imap-spamfilter/design-arch/slice2_imap_fetch_discipline.md
+
+05. /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08/design-arch/05__2026-08-26_204014__slice3_inbox_bookmark.md
+    created=2026-08-26 20:40:14 -0700  modified=2026-08-26 20:40:14 -0700
+    source=/opt/bytelord/projects/imap-spamfilter/design-arch/slice3_inbox_bookmark.md
+
+06. /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08/design-arch/06__2026-08-26_204157__slice4_connection_config.md
+    created=2026-08-26 20:41:57 -0700  modified=2026-08-26 20:41:57 -0700
+    source=/opt/bytelord/projects/imap-spamfilter/design-arch/slice4_connection_config.md
+
+07. /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08/design-arch/07__2026-08-26_204222__slice5_message_identity.md
+    created=2026-08-26 20:42:22 -0700  modified=2026-08-26 20:42:22 -0700
+    source=/opt/bytelord/projects/imap-spamfilter/design-arch/slice5_message_identity.md
+
+08. /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08/design-arch/08__2026-08-26_213156__slice6_rspamd_scan_metadata.md
+    created=2026-08-26 21:31:56 -0700  modified=2026-08-26 21:31:56 -0700
+    source=/opt/bytelord/projects/imap-spamfilter/design-arch/slice6_rspamd_scan_metadata.md
+
+09. /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08/design-arch/09__2026-08-26_213225__slice7_ops_secrets_supply_chain.md
+    created=2026-08-26 21:32:25 -0700  modified=2026-08-28 02:39:43 -0700
+    source=/opt/bytelord/projects/imap-spamfilter/design-arch/slice7_ops_secrets_supply_chain.md
+
+10. /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08/design-arch/10__2026-08-26_214913__slice8_dashboard_hardening.md
+    created=2026-08-26 21:49:13 -0700  modified=2026-08-28 02:39:43 -0700
+    source=/opt/bytelord/projects/imap-spamfilter/design-arch/slice8_dashboard_hardening.md
+
+11. /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08/related-docs/11__2026-08-26_224336__SESSION_HANDOFF.md
+    created=2026-08-26 22:43:36 -0700  modified=2026-08-28 02:39:43 -0700
+    source=/opt/bytelord/projects/imap-spamfilter/SESSION_HANDOFF.md
+
+12. /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08/cursor-plans/12__2026-08-27_082808__oauth_proxy_poc_4d76b018.plan.md
+    created=2026-08-27 08:28:08 -0700  modified=2026-08-27 10:19:42 -0700
+    source=/home/bytecave/.cursor/plans/oauth_proxy_poc_4d76b018.plan.md
+
+13. /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08/cursor-plans/13__2026-08-27_110330__shadow_review_web_133f1d8c.plan.md
+    created=2026-08-27 11:03:30 -0700  modified=2026-08-27 11:03:31 -0700
+    source=/home/bytecave/.cursor/plans/shadow_review_web_133f1d8c.plan.md
+
+14. /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08/cursor-plans/14__2026-08-28_213427__fix_cursor_apparmor_sandbox_64b89744.plan.md
+    created=2026-08-28 21:34:27 -0700  modified=2026-08-28 21:52:11 -0700
+    source=/home/bytecave/.cursor/plans/fix_cursor_apparmor_sandbox_64b89744.plan.md
+
+15. /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08/related-docs/15__2026-08-29_012728__new_requirements.md
+    created=2026-08-29 01:27:28 -0700  modified=2026-09-04 02:14:39 -0700
+    source=/opt/bytelord/projects/imap-spamfilter/new_requirements.md
+
+16. /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08/cursor-plans/16__2026-09-04_015729__allow_block_arch_2b8d82b8.plan.md
+    created=2026-09-04 01:57:29 -0700  modified=2026-09-04 02:05:29 -0700
+    source=/home/bytecave/.cursor/plans/allow_block_arch_2b8d82b8.plan.md
+
+17. /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08/design-arch/17__2026-09-04_021439__allow_block_sliced_plan.md
+    created=2026-09-04 02:14:39 -0700  modified=2026-09-06 03:30:13 -0700
+    source=/opt/bytelord/projects/imap-spamfilter/design-arch/allow_block_sliced_plan.md
+
+18. /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08/design-arch/18__2026-09-04_021439__slice10_list_core.md
+    created=2026-09-04 02:14:39 -0700  modified=2026-09-06 03:30:13 -0700
+    source=/opt/bytelord/projects/imap-spamfilter/design-arch/slice10_list_core.md
+
+19. /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08/design-arch/19__2026-09-04_021439__slice11_imap_list_folders.md
+    created=2026-09-04 02:14:39 -0700  modified=2026-09-05 23:35:19 -0700
+    source=/opt/bytelord/projects/imap-spamfilter/design-arch/slice11_imap_list_folders.md
+
+20. /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08/design-arch/20__2026-09-04_021439__slice12_dashboard_lists.md
+    created=2026-09-04 02:14:39 -0700  modified=2026-09-05 23:35:19 -0700
+    source=/opt/bytelord/projects/imap-spamfilter/design-arch/slice12_dashboard_lists.md
+
+21. /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08/design-arch/21__2026-09-04_021439__slice9_shared_bayes.md
+    created=2026-09-04 02:14:39 -0700  modified=2026-09-04 02:14:39 -0700
+    source=/opt/bytelord/projects/imap-spamfilter/design-arch/slice9_shared_bayes.md
+
+22. /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08/related-docs/22__2026-09-04_041029__IMPLEMENTATION_STATUS.md
+    created=2026-09-04 04:10:29 -0700  modified=2026-09-06 03:30:13 -0700
+    source=/opt/bytelord/projects/imap-spamfilter/IMPLEMENTATION_STATUS.md
+
+23. /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08/cursor-plans/23__2026-09-05_225810__user_list_overrides_8a393526.plan.md
+    created=2026-09-05 22:58:10 -0700  modified=2026-09-05 23:41:03 -0700
+    source=/home/bytecave/.cursor/plans/user_list_overrides_8a393526.plan.md
+
+24. /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08/cursor-plans/24__2026-09-06_000117__vps_bayes_retrain_a8f5ef3a.plan.md
+    created=2026-09-06 00:01:17 -0700  modified=2026-09-06 00:24:38 -0700
+    source=/home/bytecave/.cursor/plans/vps_bayes_retrain_a8f5ef3a.plan.md
+
+25. /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08/cursor-plans/25__2026-09-06_003813__explain_high_scores_f295a03f.plan.md
+    created=2026-09-06 00:38:13 -0700  modified=2026-09-06 00:48:04 -0700
+    source=/home/bytecave/.cursor/plans/explain_high_scores_f295a03f.plan.md
+
+26. /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08/cursor-plans/26__2026-09-06_012000__list_hits_vs_training_89b59683.plan.md
+    created=2026-09-06 01:20:00 -0700  modified=2026-09-06 02:48:02 -0700
+    source=/home/bytecave/.cursor/plans/list_hits_vs_training_89b59683.plan.md
+
+27. /opt/bytelord/projects/imap-spamfilter/imap-spamfilter-plans-2026-09-08/cursor-plans/27__2026-09-06_031446__list-contradict_learn_skip_17f4c624.plan.md
+    created=2026-09-06 03:14:46 -0700  modified=2026-09-06 03:24:23 -0700
+    source=/home/bytecave/.cursor/plans/list-contradict_learn_skip_17f4c624.plan.md
