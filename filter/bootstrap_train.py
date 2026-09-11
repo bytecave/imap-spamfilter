@@ -32,6 +32,7 @@ from imapclient.exceptions import IMAPClientError
 from filter import (
     CONFIG_PATH,
     RSPAMD_PASSWORD,
+    ConfigError,
     Db,
     apply_special_use_remap,
     body_sha256,
@@ -82,9 +83,16 @@ def _format_counts(counts: dict[str, int], *, seconds: float | None = None) -> s
 
 def _uidvalidity(info: Any) -> int:
     try:
-        return int(info[b"UIDVALIDITY"])
-    except (KeyError, TypeError, ValueError):
-        return 1
+        raw = info[b"UIDVALIDITY"]
+    except (KeyError, TypeError):
+        raise ValueError("SELECT response missing UIDVALIDITY") from None
+    try:
+        uv = int(raw)
+    except (TypeError, ValueError) as ex:
+        raise ValueError(f"invalid UIDVALIDITY {raw!r}") from ex
+    if uv <= 0:
+        raise ValueError(f"UIDVALIDITY must be a positive integer (got {uv})")
+    return uv
 
 
 def _record_bootstrap_learn(
@@ -145,7 +153,12 @@ def train_folder(
         print(f"  skip {src}: {ex}")
         return counts, True
     exists = info.get(b"EXISTS", "?")
-    uv = _uidvalidity(info)
+    try:
+        uv = _uidvalidity(info)
+    except ValueError as ex:
+        print(f"  fail {src}: {ex}")
+        counts["failed"] += 1
+        return counts, False
     print(f"selected {src} ({exists} messages)")
     uids = list(client.search(["ALL"]) or [])
     uids = uids[:limit]
@@ -232,6 +245,16 @@ def train_folder(
         try:
             client.move(move_uids, move_to)
             print(f"moved {len(move_uids)} -> {move_to}")
+            if db is not None:
+                with db.tx():
+                    for uid in move_uids:
+                        db.update_imap_message(
+                            src, uv, uid, current_folder=move_to
+                        )
+                        db.log_event(
+                            "bootstrap_moved",
+                            detail=f"{src} -> {move_to} uv={uv} uid={uid}",
+                        )
         except IMAPClientError as ex:
             print(f"move failed: {ex}", file=sys.stderr)
             counts["failed"] += 1
@@ -366,7 +389,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     init_db()
-    accounts = load_accounts(Path(args.config))
+    try:
+        accounts = load_accounts(Path(args.config))
+    except ConfigError as ex:
+        print(str(ex), file=sys.stderr)
+        return 2
     if args.all_trained:
         return _run_all_trained(args, accounts)
 

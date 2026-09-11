@@ -10,6 +10,7 @@ os.environ.setdefault("STATE_DIR", tempfile.mkdtemp(prefix="sf_test_"))
 
 import bootstrap_train as bt  # noqa: E402
 import filter as f  # noqa: E402
+from imapclient.exceptions import IMAPClientError  # noqa: E402
 
 
 def _raw(uid: int) -> bytes:
@@ -424,4 +425,103 @@ def test_train_folder_skips_allowlisted_spam(tmp_path, monkeypatch):
     assert row["learned_as"] is None
     evs = [r["event"] for r in db.conn.execute("SELECT event FROM events")]
     assert evs == ["learn_skipped_list"]
+    db.close()
+
+
+@pytest.mark.parametrize("info,label", [
+    ({b"EXISTS": 1}, "missing"),
+    ({b"EXISTS": 1, b"UIDVALIDITY": None}, "null"),
+    ({b"EXISTS": 1, b"UIDVALIDITY": b"nope"}, "nonnumeric"),
+    ({b"EXISTS": 1, b"UIDVALIDITY": 0}, "zero"),
+    ({b"EXISTS": 1, b"UIDVALIDITY": -3}, "negative"),
+])
+def test_uidvalidity_fail_closed_skips_learn_and_move(tmp_path, monkeypatch, info, label):
+    db = _mk_learn_db(tmp_path)
+    acc = SimpleNamespace(name="acct", user="user@example.com", bayes_user=None)
+    client = FakeIMAP([1])
+    client.select_folder = lambda *a, **k: info
+    learned = {"n": 0}
+    monkeypatch.setattr(
+        bt, "rspamd_learn",
+        lambda *a, **k: learned.__setitem__("n", learned["n"] + 1) or "learned",
+    )
+    f.SHUTDOWN.clear()
+    counts, skipped = bt.train_folder(
+        client, acc,
+        src="Train", kind="spam",
+        dry_run=False, limit=10, move_to="Trained", db=db,
+    )
+    assert skipped is False
+    assert counts["failed"] == 1
+    assert learned["n"] == 0
+    assert client.moves == []
+    assert db.get_imap_message("Train", 1, 1) is None
+    db.close()
+
+
+@pytest.mark.parametrize("uv", [1, b"7", "12"])
+def test_uidvalidity_accepts_positive_intish(tmp_path, monkeypatch, uv):
+    db = _mk_learn_db(tmp_path)
+    acc = SimpleNamespace(name="acct", user="user@example.com", bayes_user=None)
+    client = FakeIMAP([1])
+    orig = client.select_folder
+
+    def select(folder, readonly=False):
+        info = orig(folder, readonly=readonly)
+        info[b"UIDVALIDITY"] = uv
+        return info
+
+    client.select_folder = select
+    monkeypatch.setattr(bt, "rspamd_learn", lambda *a, **k: "learned")
+    f.SHUTDOWN.clear()
+    counts, skipped = bt.train_folder(
+        client, acc, src="Train", kind="spam", dry_run=False, limit=10, db=db,
+    )
+    assert skipped is False
+    assert counts["learned"] == 1
+    row = db.get_imap_message("Train", int(uv), 1)
+    assert row is not None
+    db.close()
+
+
+def test_move_to_updates_current_folder(tmp_path, monkeypatch):
+    db = _mk_learn_db(tmp_path)
+    acc = SimpleNamespace(name="acct", user="user@example.com", bayes_user=None)
+    client = FakeIMAP([1])
+    monkeypatch.setattr(bt, "rspamd_learn", lambda *a, **k: "learned")
+    f.SHUTDOWN.clear()
+    counts, skipped = bt.train_folder(
+        client, acc,
+        src="Train", kind="spam",
+        dry_run=False, limit=10, move_to="Trained-Spam", db=db,
+    )
+    assert skipped is False
+    assert counts["learned"] == 1
+    assert client.moves == [([1], "Trained-Spam")]
+    row = db.get_imap_message("Train", 1, 1)
+    assert row["current_folder"] == "Trained-Spam"
+    evs = [r["event"] for r in db.conn.execute("SELECT event FROM events")]
+    assert "bootstrap_moved" in evs
+    db.close()
+
+
+def test_move_failure_leaves_source_folder(tmp_path, monkeypatch):
+    db = _mk_learn_db(tmp_path)
+    acc = SimpleNamespace(name="acct", user="user@example.com", bayes_user=None)
+    client = FakeIMAP([1])
+
+    def boom(*a, **k):
+        raise IMAPClientError("nope")
+
+    client.move = boom
+    monkeypatch.setattr(bt, "rspamd_learn", lambda *a, **k: "learned")
+    f.SHUTDOWN.clear()
+    counts, _skipped = bt.train_folder(
+        client, acc,
+        src="Train", kind="spam",
+        dry_run=False, limit=10, move_to="Trained-Spam", db=db,
+    )
+    assert counts["failed"] == 1
+    row = db.get_imap_message("Train", 1, 1)
+    assert row["current_folder"] == "Train"
     db.close()

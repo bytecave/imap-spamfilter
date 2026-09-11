@@ -19,11 +19,13 @@ from imapclient.exceptions import IMAPClientError
 
 from filter import (
     CONFIG_PATH,
+    ConfigError,
     Db,
     apply_special_use_remap,
     build_folder_map,
     connect_imap,
     detect_delimiter,
+    fetch_under_cap,
     first_recipient,
     format_top_symbols_line,
     init_db,
@@ -40,9 +42,18 @@ def _fetch_body(client, folder: str, uid: int) -> bytes | None:
     except IMAPClientError as ex:
         print(f"select {folder!r} failed: {ex}", file=sys.stderr)
         return None
-    data = client.fetch([uid], [b"BODY.PEEK[]", b"RFC822.SIZE"])
-    row = data.get(uid) or {}
-    raw = row.get(b"BODY[]") or row.get(b"BODY.PEEK[]")
+    rows = list(fetch_under_cap(client, [uid]))
+    if not rows:
+        return None
+    _got_uid, data, oversize = rows[0]
+    if oversize:
+        size = data.get(b"RFC822.SIZE")
+        print(
+            f"uid {uid} in {folder!r} exceeds the 5 MiB fetch cap (size={size})",
+            file=sys.stderr,
+        )
+        return None
+    raw = data.get(b"BODY[]") or data.get(b"BODY.PEEK[]")
     return raw if raw else None
 
 
@@ -58,14 +69,19 @@ def _lookup_uid_by_msgid(account: str, msgid: str) -> tuple[str, int] | None:
         )
         if not rows:
             return None
-        rows = sorted(
-            rows,
-            key=lambda r: (
-                0 if (r["our_score"] is not None) else 1,
-                0 if str(r["folder"]).upper().startswith("INBOX") else 1,
-                -(r["last_seen"] or 0),
-            ),
-        )
+        if len(rows) > 1:
+            print(
+                f"message-id {msgid!r} is ambiguous; pass --folder and --uid:",
+                file=sys.stderr,
+            )
+            for r in rows:
+                print(
+                    f"  account={account} folder={r['folder']!r} "
+                    f"uidvalidity={r['uidvalidity']} uid={r['uid']} "
+                    f"current_folder={r['current_folder']!r}",
+                    file=sys.stderr,
+                )
+            return None
         r = rows[0]
         return str(r["folder"]), int(r["uid"])
     finally:
@@ -91,7 +107,11 @@ def main(argv: list[str] | None = None) -> int:
     if (args.uid is None) == (args.message_id is None):
         p.error("pass exactly one of --uid or --message-id")
 
-    accounts = load_accounts(Path(args.config))
+    try:
+        accounts = load_accounts(Path(args.config))
+    except ConfigError as ex:
+        print(str(ex), file=sys.stderr)
+        return 2
     try:
         acc = next(a for a in accounts if a.name == args.account)
     except StopIteration:
