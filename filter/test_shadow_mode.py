@@ -99,15 +99,21 @@ def _mk_account(**over):
 class RecordingIMAP:
     """IMAPClient stand-in that records mutating calls."""
 
-    def __init__(self, existing=None, search_uids=None, fetch_by_uid=None):
+    def __init__(
+        self, existing=None, search_uids=None, fetch_by_uid=None,
+        move_leaves_copies=False,
+    ):
         self.existing = set(existing or [])
         self.created: list[str] = []
         self.subscribed: list[str] = []
         self.moved: list[tuple[list[int], str]] = []
         self.flags_added: list[tuple] = []
+        self.expunged: list[list[int]] = []
         self.selects: list[tuple[str, bool]] = []
         self.search_uids = list(search_uids or [])
         self.fetch_by_uid = dict(fetch_by_uid or {})
+        self.move_leaves_copies = move_leaves_copies
+        self.inbox_message_ids: set[str] = set()
 
     def select_folder(self, folder, readonly=False, **kw):
         self.selects.append((folder, bool(readonly)))
@@ -124,14 +130,34 @@ class RecordingIMAP:
 
     def move(self, uids, dest):
         self.moved.append((list(uids), dest))
+        if not self.move_leaves_copies:
+            gone = set(uids)
+            self.search_uids = [u for u in self.search_uids if u not in gone]
 
-    def add_flags(self, uid, flags):
+    def add_flags(self, uid, flags, silent=False):
         self.flags_added.append((uid, flags))
+
+    def uid_expunge(self, messages):
+        gone = set(messages)
+        self.expunged.append(list(gone))
+        self.search_uids = [u for u in self.search_uids if u not in gone]
+
+    def expunge(self, messages=None):
+        if messages is None:
+            messages = list(self.search_uids)
+        self.uid_expunge(messages)
 
     def list_folders(self):
         return []
 
     def search(self, criteria):
+        crit = criteria if isinstance(criteria, (list, tuple)) else [criteria]
+        tokens = [
+            t.decode() if isinstance(t, bytes) else str(t) for t in crit
+        ]
+        if any(t.upper() == "HEADER" for t in tokens):
+            needle = tokens[-1].strip("<>") if tokens else ""
+            return [1] if needle in self.inbox_message_ids else []
         return list(self.search_uids)
 
     def fetch(self, uids, parts):

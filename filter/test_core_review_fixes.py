@@ -214,6 +214,53 @@ def test_inbox_uses_fetched_flags_not_two_search_race(tmp_path, monkeypatch):
     assert db.get_scan_bookmark("INBOX", 1) == 2
 
 
+def test_inbox_scores_already_seen_new_mail(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    with db.tx():
+        db.set_scan_bookmark("INBOX", 1, 0)
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(1.5, (), None)
+    )
+    client = CapIMAP(
+        existing=_all_existing(),
+        uids=[1],
+        bodies={1: _raw(1)},
+        flags={1: (b"\\Seen",)},
+    )
+
+    f.scan_inbox(client, db, LOG, _mk_account(), FMAP)
+
+    assert db.get_imap_message("INBOX", 1, 1)["our_score"] == 1.5
+    assert db.get_scan_bookmark("INBOX", 1) == 1
+
+
+def test_inbox_catchup_scores_unscored_row_below_bookmark(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    with db.tx():
+        db.set_scan_bookmark("INBOX", 1, 10)
+        db.upsert_imap_message(
+            "INBOX", 1, 5,
+            message_id="mid5@example.com",
+            sender="sender@example.com",
+            subject="msg 5",
+            body_sha256="catchup-body",
+        )
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(2.25, (), None)
+    )
+    client = CapIMAP(
+        existing=_all_existing(),
+        uids=[5],
+        bodies={5: _raw(5)},
+        flags={5: (b"\\Seen",)},
+    )
+
+    f.scan_inbox(client, db, LOG, _mk_account(), FMAP)
+
+    assert db.get_scan_bookmark("INBOX", 1) == 10
+    assert db.get_imap_message("INBOX", 1, 5)["our_score"] == 2.25
+
+
 class _FailFlagOnceIMAP(CapIMAP):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -349,10 +396,13 @@ def test_failed_immediate_keyword_learn_is_queued(tmp_path, monkeypatch):
     assert row["learned_as"] is None
 
 
-def test_junk_missing_body_retries_terminal_prefix(tmp_path):
+def test_junk_missing_body_retries_terminal_prefix(tmp_path, monkeypatch):
     db = _mk_db(tmp_path)
     with db.tx():
         db.set_scan_bookmark("Junk", 1, 3)
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(9.0, (), None),
+    )
     client = CapIMAP(
         existing=_all_existing(), uids=[4, 5],
         bodies={4: _raw(4)}, sizes={4: len(_raw(4)), 5: 100},
@@ -599,3 +649,112 @@ def test_loop_timing_bounds_are_enforced(tmp_path, line):
     path = _write_accounts(tmp_path, line)
     with pytest.raises(f.ConfigError, match="out of range"):
         f.load_accounts(path)
+
+
+def test_provider_junk_low_score_rescues_in_move_mode(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="move", move_grace_seconds=0, threshold=8.0)
+    with db.tx():
+        db.set_scan_bookmark("Junk", 1, 3)
+    learned = []
+    monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: learned.append(1) or "learned")
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(1.5, (), None),
+    )
+    client = CapIMAP(
+        existing=_all_existing(), uids=[4], bodies={4: _raw(4)},
+    )
+    f.poll_junk(client, db, LOG, acc, FMAP)
+    assert client.moved == [([4], "INBOX")]
+    row = db.get_imap_message("Junk", 1, 4)
+    assert row["our_score"] == 1.5
+    assert row["our_action"] == "rescued_to_inbox"
+    assert row["current_folder"] == "INBOX"
+    assert row["learned_as"] is None
+    assert learned == []
+    evs = [r["event"] for r in db.conn.execute("SELECT event FROM events")]
+    assert "rescued_to_inbox" in evs
+
+
+def test_provider_junk_high_score_stays(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="move", move_grace_seconds=0, threshold=8.0)
+    with db.tx():
+        db.set_scan_bookmark("Junk", 1, 3)
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(9.0, (), None),
+    )
+    client = CapIMAP(
+        existing=_all_existing(), uids=[4], bodies={4: _raw(4)},
+    )
+    f.poll_junk(client, db, LOG, acc, FMAP)
+    assert client.moved == []
+    row = db.get_imap_message("Junk", 1, 4)
+    assert row["our_score"] == 9.0
+    assert row["our_action"] is None
+
+
+def test_provider_junk_allowlist_rescues_even_if_high_score(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(
+        mode="move", move_grace_seconds=0, threshold=8.0, actual_name="Rich",
+    )
+    parsed = f.ParsedPattern("sender@example.com", "address")
+    with db.tx():
+        db.set_scan_bookmark("Junk", 1, 3)
+        db.list_upsert_address(
+            "person", "Rich", "allow", parsed, source="imap", max_entries=1000,
+        )
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(20.0, (), None),
+    )
+    client = CapIMAP(
+        existing=_all_existing(), uids=[4], bodies={4: _raw(4)},
+    )
+    f.poll_junk(client, db, LOG, acc, FMAP)
+    assert client.moved == [([4], "INBOX")]
+    row = db.get_imap_message("Junk", 1, 4)
+    assert row["our_action"] == "rescued_to_inbox"
+    assert row["learned_as"] is None
+
+
+def test_provider_junk_blocklist_never_rescues(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(
+        mode="move", move_grace_seconds=0, threshold=8.0, actual_name="Rich",
+    )
+    parsed = f.ParsedPattern("sender@example.com", "address")
+    with db.tx():
+        db.set_scan_bookmark("Junk", 1, 3)
+        db.list_upsert_address(
+            "person", "Rich", "block", parsed, source="imap", max_entries=1000,
+        )
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(0.5, (), None),
+    )
+    client = CapIMAP(
+        existing=_all_existing(), uids=[4], bodies={4: _raw(4)},
+    )
+    f.poll_junk(client, db, LOG, acc, FMAP)
+    assert client.moved == []
+    row = db.get_imap_message("Junk", 1, 4)
+    assert row["our_score"] == 0.5
+    assert row["our_action"] == "blocklisted"
+
+
+def test_provider_junk_shadow_does_not_rescue(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="shadow", move_grace_seconds=0, threshold=8.0)
+    with db.tx():
+        db.set_scan_bookmark("Junk", 1, 3)
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(1.5, (), None),
+    )
+    client = CapIMAP(
+        existing=_all_existing(), uids=[4], bodies={4: _raw(4)},
+    )
+    f.poll_junk(client, db, LOG, acc, FMAP)
+    assert client.moved == []
+    evs = [r["event"] for r in db.conn.execute("SELECT event FROM events")]
+    assert "would_rescue" in evs
+    assert "rescued_to_inbox" not in evs

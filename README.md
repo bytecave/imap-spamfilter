@@ -21,11 +21,14 @@ Per-account operating modes (set in `accounts.yml`, promoted manually):
 - **shadow**  - scan + log only. No writes to Inbox, Junk, or Trash.
   Train-* folders may still be created and drained so Bayes can be
   bootstrapped during evaluation. `INBOX/Allowlist` and `INBOX/Blocklist`
-  may also be created and drained (person-list the From address, then
-  MOVE the message back to Inbox). Inbox/Junk/Trash are not auto-junked
-  in shadow.
+  may also be created and drained (person-list the From address; Allowlist
+  MOVEs to Inbox, Blocklist MOVEs to Junk). Inbox/Junk/Trash are not
+  auto-junked or auto-rescued in shadow.
 - **flag**    - shadow + sets `\Flagged` on suspect Inbox mail; retention on
-- **move**    - flag + after `move_grace_seconds`, MOVEs Inbox → Junk
+- **move**    - flag + after `move_grace_seconds`, MOVEs Inbox → Junk.
+  Provider-delivered Junk (never seen in Inbox) is scored; under-threshold
+  or allowlisted mail is MOVEd back to Inbox after the same grace.
+  Blocklisted provider-Junk stays. Auto-rescue never Bayes-learns.
 
 Move-based training (no special folders needed in daily use):
 - Inbox -> Junk = learn as spam (after `learn_grace_seconds`, default 300s)
@@ -38,12 +41,16 @@ Folder-based training (bootstrap and bulk corrections):
   moves to `Junk/Trained-Ham`. The copy is destroyed by retention; the
   original in your sorted folder stays untouched. **Moving** ham here means
   the only copy will eventually end up in Trash.
+- Drag to `INBOX/Allowlist` -> person-allow From, ham-learn, MOVE to Inbox
+- Drag to `INBOX/Blocklist` -> person-block From, spam-learn, MOVE to Junk
 - Both `Junk/Trained-*` folders are swept to Trash after `trained_retention_days` (default 7)
 
 Hard rules:
 - **Never deletes.** Only IMAP MOVE. Trash retention is the mail provider's job.
 - **Fails closed.** rspamd unreachable / parse error / folder missing => message stays put.
-- **No autolearn.** Bayes only learns from explicit user moves or the Train-Spam / Train-Ham folders.
+- **No autolearn.** Bayes only learns from explicit user moves, Train-* folders,
+  or Allowlist/Blocklist drags. Scoring under threshold, list routing, and
+  provider-Junk rescue do not train.
 
 ---
 
@@ -366,7 +373,7 @@ The filter reads secrets in this order: `RSPAMD_PASSWORD` env var (from
 Compose `env_file`), then the mounted secrets file (`SECRETS_FILE`). The
 ByteLord paths and loopback-only dashboard publication remain unchanged.
 
-Dashboard is on `127.0.0.1:8080` only. Add users with
+Dashboard is on `127.0.0.1:8099` only. Add users with
 `docker exec -it spamfilter python dashboard.py`; restart `spamfilter` after
 creating the first user so the listener starts.
 
@@ -491,8 +498,8 @@ override `defaults:` values; both override built-in defaults from `filter.py`.
 | `trained_spam` | `Junk/Trained-Spam` | post-learn archive (auto-trashed by retention) |
 | `ham_train` | `Junk/Train-Ham` | drop (or **copy**) known-good mail here for ham training |
 | `trained_ham` | `Junk/Trained-Ham` | post-learn archive for ham (auto-trashed by retention) |
-| `allowlist` | `INBOX/Allowlist` | drag mail here to person-allow the From address; filter MOVEs it back to Inbox |
-| `blocklist` | `INBOX/Blocklist` | drag mail here to person-block the From address; filter MOVEs it back to Inbox |
+| `allowlist` | `INBOX/Allowlist` | drag mail here to person-allow the From address, ham-learn it, then MOVE to Inbox (expunges a leftover source copy if the server treated MOVE as COPY) |
+| `blocklist` | `INBOX/Blocklist` | drag mail here to person-block the From address, spam-learn it, then MOVE to Junk (same leftover-copy cleanup) |
 | `auto_special_folders` | `true` | set `false` to use literal `junk`/`trash` names |
 
 IMAP drags persist immediately (no Save). The dashboard Save button is
@@ -661,9 +668,10 @@ progress, recent scans/learns, and per-account activity. Admins can
 also edit domain and user allow/block lists from a textarea (one
 address or `@host` per line). User lists override roster-scoped
 domain lists. Matching uses From and Sender only (not Reply-To).
-A list hit skips rspamd scan (`/checkv2`) so it cannot train Bayes or
-neural; it only changes routing (keep Inbox vs treat as spam).
-Train-* / Inbox↔Junk / bootstrap skip Bayes when a list hit
+A list hit still runs rspamd `/checkv2` so the dashboard has a score;
+the list only overrides routing (keep Inbox vs treat as spam). List
+hits never Bayes-learn by themselves. Train-* / Inbox↔Junk / Allowlist
+and Blocklist folder drags / bootstrap skip Bayes when a list hit
 contradicts the requested class (allow + spam, block + ham); aligned
 learns still run. Remove or flip the list entry, then train again, to
 override. IMAP folder drags still apply immediately (From address
@@ -671,7 +679,7 @@ only) and do not wait for dashboard Save. Responsive, dark-mode aware.
 **Off by default.** Scan/learn/config pages stay read-only.
 
 When enabled at process startup, the dashboard listens internally on **port
-8080**; pick any free host port in your orchestrator's port mapping.
+8099**; pick any free host port in your orchestrator's port mapping.
 
 ### Login
 
@@ -728,8 +736,8 @@ The dashboard starts only when at least one user exists at process startup.
 After creating the first file user, run `docker restart spamfilter`. On Unraid
 set the host port in the "Dashboard port" mapping and Apply (LAN access). On a
 VPS publish loopback only, for example
-`127.0.0.1:8080:8080` in Compose, and put a reverse proxy in front if
-you need remote access. Do not publish `8080:8080` on a public
+`127.0.0.1:8099:8099` in Compose, and put a reverse proxy in front if
+you need remote access. Do not publish `8099:8099` on a public
 interface.
 
 Open `http://<host>:<port>/` (or `http://127.0.0.1:<port>/` on a VPS).
@@ -749,7 +757,10 @@ Pages:
               action breakdown) + Bayes learn progress bars with
               per-class status and learn-balance check + active
               safe-mode + recent learns
-- `/messages` last 200 scored or learned msgs with score-band filter
+- `/messages` scored or learned msgs, 200 per page, newest first;
+              score bands (`= 0`, `< 4`, `4-8`, `8-19`, `>= 20`),
+              trained (spam / ham / *), Untrained (no user teaching),
+              plus spam/ham/both class filter
 - `/learned`  last 300 learn / learn_failed / learn_giveup events
 - `/events`   tail of the full events table
 - `/accounts` per-account scan / learn / fail counts, total spam &

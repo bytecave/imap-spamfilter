@@ -1,7 +1,11 @@
 """IMAP spam filter.
 
 Hard rules enforced in this file:
-  * Never EXPUNGE, never set \\Deleted, never IMAP DELETE.
+  * Never EXPUNGE, never set \\Deleted, never IMAP DELETE, except to
+    finish a list-folder MOVE whose server left the source copy
+    (Exchange IMAP commonly implements UID MOVE as COPY). That
+    expunge is only the leftover Allowlist/Blocklist UID; Inbox
+    already has the live message.
   * "Remove" means IMAP MOVE to another folder. Trash retention is the
     mail provider's responsibility.
   * Fail closed: on any uncertainty (rspamd unreachable, parse error,
@@ -39,7 +43,7 @@ from typing import Any, Iterator
 
 import requests
 import yaml
-from imapclient import IMAPClient
+from imapclient import DELETED, IMAPClient
 from imapclient.exceptions import IMAPClientError
 
 
@@ -149,6 +153,10 @@ LEARN_RETRY_BASE_S = 30
 LEARN_RETRY_MAX_S = 3600
 SAFE_MODE_UNSEEN_CAP = 500       # default Inbox-unseen cap; per-account override via safe_mode_unseen_cap
 SCAN_FETCH_CHUNK = 50            # max msgs fetched per scan_inbox FETCH call
+# Inbox rows recorded without our_score (old \\Seen skip, or a fetch that
+# upserted then failed before /checkv2). Scored on later passes; cap keeps
+# a large backlog from blocking new-mail handling.
+UNSCORED_INBOX_CATCHUP_CAP = 50
 RECONNECT_MIN_BACKOFF = 5
 RECONNECT_MAX_BACKOFF = 300
 HTTP_TIMEOUT = 30
@@ -1750,6 +1758,30 @@ class Db:
         )
         return cur.fetchone()
 
+    def unscored_inbox_uids(
+        self, folder: str, uidvalidity: int, limit: int
+    ) -> list[int]:
+        """Inbox UIDs still present in the DB with no rspamd score.
+
+        Excludes list-skip, user learns, and queued pending_learn so catch-up
+        does not fight allow/block or a Junk→Inbox revert.
+        """
+        cur = self.conn.execute(
+            """
+            SELECT uid FROM messages
+             WHERE account=? AND folder=? AND uidvalidity=?
+               AND current_folder=?
+               AND our_score IS NULL
+               AND IFNULL(our_action, '') NOT IN ('allowlisted')
+               AND IFNULL(learned_as, '') NOT IN ('ham', 'spam', 'unlearnable')
+               AND pending_learn IS NULL
+             ORDER BY uid ASC
+             LIMIT ?
+            """,
+            (self.account, folder, uidvalidity, folder, int(limit)),
+        )
+        return [int(r[0]) for r in cur.fetchall()]
+
     def find_by_sha256(self, sha256: str) -> list[sqlite3.Row]:
         if not sha256:
             return []
@@ -3001,6 +3033,82 @@ def _score_log(score: float | None) -> str:
     return f"{score:.2f}"
 
 
+def _score_and_store(
+    db: Db,
+    log: logging.Logger,
+    acc: Account,
+    state: "AccountState | None",
+    folder: str,
+    uv: int,
+    uid: int,
+    raw: bytes,
+    msgid: str | None,
+) -> float | None:
+    """POST /checkv2 and persist our_score. None means the caller must halt."""
+    recipient = first_recipient(raw, acc.user)
+    scan_detail = rspamd_scan_detail(
+        raw, recipient, acc.reject_score_above,
+        bayes_user=acc.bayes_user or acc.user,
+    )
+    if scan_detail is None:
+        log.warning(
+            "scan failed for %s (uid=%s) - keeping in %s", msgid, uid, folder,
+        )
+        db.log_event("scan_failed", msgid)
+        if state is not None:
+            state.scan_fail_streak += 1
+            if (
+                state.scan_fail_streak in (1, 10, 50)
+                or state.scan_fail_streak % 250 == 0
+            ):
+                log.error(
+                    "rspamd scan failing: %d consecutive failures "
+                    "(check rspamd container)",
+                    state.scan_fail_streak,
+                )
+                db.log_event(
+                    "scan_fail_streak", detail=str(state.scan_fail_streak),
+                )
+        return None
+    if state is not None and state.scan_fail_streak:
+        log.info(
+            "rspamd scan recovered after %d failures", state.scan_fail_streak,
+        )
+        db.log_event("scan_recovered", detail=str(state.scan_fail_streak))
+        state.scan_fail_streak = 0
+    score = scan_detail.score
+    detail_json = score_detail_json(scan_detail)
+    with db.tx():
+        db.update_imap_message(
+            folder, uv, uid,
+            our_score=score,
+            score_detail=detail_json,
+        )
+        db.log_event(
+            "scan", msgid,
+            detail=f"score={score:.2f} mode={acc.mode}",
+        )
+    log.debug("scored %s = %.2f", msgid, score)
+    explain_floor = max(float(acc.threshold), SCORE_EXPLAIN_LOG_MIN)
+    if score >= explain_floor:
+        log.info(
+            "score_explain %s score=%.2f top=%s",
+            msgid, score, format_top_symbols_line(scan_detail.symbols),
+        )
+    return score
+
+
+_FILTER_OWNED_JUNK_ACTIONS = frozenset({
+    "pending_move", "moved_to_junk", "pending_rescue", "rescued_to_inbox",
+})
+
+
+def _is_filter_owned_junk(siblings: list[sqlite3.Row]) -> bool:
+    return any(
+        r["our_action"] in _FILTER_OWNED_JUNK_ACTIONS for r in siblings
+    )
+
+
 def _list_hit_event_detail(hit: ListHit, score: float | None) -> str:
     return (
         f"pattern={hit.pattern} scope={hit.scope} "
@@ -3070,59 +3178,93 @@ def scan_inbox(
         uid for uid in set(client.search(["UID", new_range]) or [])
         if uid > bookmark
     )
-    if not candidates:
-        return
 
     # Fetch FLAGS as part of the candidate snapshot rather than issuing a
     # second UNSEEN search. Mail arriving between two searches could otherwise
-    # appear only in the all-UID result and be mistaken for already-seen mail.
+    # appear only in the all-UID result and be mistaken for unread, which
+    # would inflate the safe-mode UNSEEN cap.
     metadata: dict[int, dict] = {}
-    meta_items = [b"RFC822.SIZE", b"FLAGS", b"INTERNALDATE"]
-    for start in range(0, len(candidates), SCAN_FETCH_CHUNK):
-        chunk = candidates[start : start + SCAN_FETCH_CHUNK]
-        metadata.update(client.fetch(chunk, meta_items))
-    unseen = {
-        uid for uid in candidates
-        if "\\Seen" not in _kw((metadata.get(uid) or {}).get(b"FLAGS", ()))
-    }
-    cap = acc.safe_mode_unseen_cap
-    if len(unseen) > cap:
-        reason = f"Inbox UNSEEN > {cap} ({len(unseen)}) - refusing to process"
-        log.error(reason)
-        with db.tx():
-            db.enter_safe_mode("all", reason)
-            db.log_event("safe_mode", detail=reason)
-        return
-    # Auto-exit safe mode once the trigger condition (unseen > cap) clears.
-    # The only enter_safe_mode("all", ...) call site is the cap check above,
-    # so observing unseen <= cap is sufficient to know it is safe to resume.
-    if db.in_safe_mode("all"):
-        log.info("exiting safe mode (unseen=%d back under cap=%d)",
-                 len(unseen), cap)
-        with db.tx():
-            db.exit_safe_mode("all")
-            db.log_event("safe_mode_exit", detail=f"unseen={len(unseen)}")
-
-    # Chunk the FETCH so a single oversized inbox does not allocate up
-    # to len(candidates) * MAX_FETCH_BYTES at once. With 200 candidates
-    # and 5 MB cap that would be 1 GB of resident memory.
-    #
-    # Bookmark advance is a prefix of terminally handled UIDs, not
-    # max(candidates). A rspamd blip / missing body must not skip mail
-    # forever. SHUTDOWN returns immediately without writing.
-    last_terminal: int | None = None
     halted = False
-    for chunk_start in range(0, len(candidates), SCAN_FETCH_CHUNK):
+    if candidates:
+        meta_items = [b"RFC822.SIZE", b"FLAGS", b"INTERNALDATE"]
+        for start in range(0, len(candidates), SCAN_FETCH_CHUNK):
+            chunk = candidates[start : start + SCAN_FETCH_CHUNK]
+            metadata.update(client.fetch(chunk, meta_items))
+        unseen = {
+            uid for uid in candidates
+            if "\\Seen" not in _kw((metadata.get(uid) or {}).get(b"FLAGS", ()))
+        }
+        cap = acc.safe_mode_unseen_cap
+        if len(unseen) > cap:
+            reason = f"Inbox UNSEEN > {cap} ({len(unseen)}) - refusing to process"
+            log.error(reason)
+            with db.tx():
+                db.enter_safe_mode("all", reason)
+                db.log_event("safe_mode", detail=reason)
+            return
+        # Auto-exit safe mode once the trigger condition (unseen > cap) clears.
+        # The only enter_safe_mode("all", ...) call site is the cap check above,
+        # so observing unseen <= cap is sufficient to know it is safe to resume.
+        if db.in_safe_mode("all"):
+            log.info("exiting safe mode (unseen=%d back under cap=%d)",
+                     len(unseen), cap)
+            with db.tx():
+                db.exit_safe_mode("all")
+                db.log_event("safe_mode_exit", detail=f"unseen={len(unseen)}")
+
+        # Chunk the FETCH so a single oversized inbox does not allocate up
+        # to len(candidates) * MAX_FETCH_BYTES at once. With 200 candidates
+        # and 5 MB cap that would be 1 GB of resident memory.
+        #
+        # Bookmark advance is a prefix of terminally handled UIDs, not
+        # max(candidates). A rspamd blip / missing body must not skip mail
+        # forever. SHUTDOWN returns immediately without writing.
+        halted, last_terminal = _scan_inbox_uid_batch(
+            client, db, log, acc, fmap, state, uv, candidates, metadata,
+        )
         if SHUTDOWN.is_set():
             return
+        if last_terminal is not None:
+            with db.tx():
+                db.set_scan_bookmark(fmap["inbox"], uv, last_terminal)
+
+    if SHUTDOWN.is_set() or halted or db.in_safe_mode("all"):
+        return
+    _catchup_unscored_inbox(client, db, log, acc, fmap, state, uv, candidates)
+
+
+def _scan_inbox_uid_batch(
+    client: IMAPClient,
+    db: Db,
+    log: logging.Logger,
+    acc: Account,
+    fmap: dict[str, str],
+    state: "AccountState | None",
+    uv: int,
+    uids: list[int],
+    metadata: dict[int, dict],
+) -> tuple[bool, int | None]:
+    """Score and act on Inbox UIDs. Returns (halted, last_terminal_uid).
+
+    Every first-appearance UID is scored, including already-\\Seen. Opening
+    mail in a client is not user training and must not skip /checkv2.
+    A persisted our_score still bypasses a second scan so an interrupted
+    action can be replayed. SHUTDOWN is observed via the global event;
+    the caller must not advance the bookmark when it is set.
+    """
+    last_terminal: int | None = None
+    halted = False
+    for chunk_start in range(0, len(uids), SCAN_FETCH_CHUNK):
+        if SHUTDOWN.is_set():
+            return halted, last_terminal
         if halted:
             break
-        chunk = candidates[chunk_start : chunk_start + SCAN_FETCH_CHUNK]
+        chunk = uids[chunk_start : chunk_start + SCAN_FETCH_CHUNK]
         for uid, data, oversize in fetch_under_cap(
             client, chunk, prefetched_meta=metadata
         ):
             if SHUTDOWN.is_set():
-                return
+                return halted, last_terminal
             if oversize:
                 _log_skipped_oversize(
                     db, log, uid=uid, folder=fmap["inbox"], size=_rfc822_size(data),
@@ -3200,10 +3342,25 @@ def scan_inbox(
             score: float | None = None
             over_threshold = False
 
-            if hit is not None:
-                # Lists skip /checkv2 so neural/Bayes never see these
-                # messages. Keep a previously stored score for audit only.
+            if stored_raw is not None:
                 score = _finite_score(stored_raw)
+                if score is None:
+                    log.error(
+                        "invalid stored score for %s (uid=%s) - keeping in inbox",
+                        msgid, uid,
+                    )
+                    db.log_event("invalid_stored_score", msgid, detail=f"uid={uid}")
+                    halted = True
+                    break
+            else:
+                score = _score_and_store(
+                    db, log, acc, state, fmap["inbox"], uv, uid, raw, msgid,
+                )
+                if score is None:
+                    halted = True
+                    break
+
+            if hit is not None:
                 hit_detail = _list_hit_event_detail(hit, score)
                 _log_list_hit(log, acc, hit, msgid, subject, hit_detail)
                 if hit.decision == "allow":
@@ -3225,70 +3382,7 @@ def scan_inbox(
                     if hit.conflict:
                         db.log_event("list_conflict", msgid, detail=hit_detail)
                 over_threshold = True
-            elif stored_raw is not None:
-                score = _finite_score(stored_raw)
-                if score is None:
-                    log.error(
-                        "invalid stored score for %s (uid=%s) - keeping in inbox",
-                        msgid, uid,
-                    )
-                    db.log_event("invalid_stored_score", msgid, detail=f"uid={uid}")
-                    halted = True
-                    break
-                over_threshold = score >= acc.threshold
             else:
-                # Only score unseen messages on first appearance. A persisted
-                # score bypasses this gate so an interrupted required action
-                # can be replayed even if flags changed after the first pass.
-                if uid not in unseen:
-                    last_terminal = uid
-                    continue
-
-                recipient = first_recipient(raw, acc.user)
-                scan_detail = rspamd_scan_detail(
-                    raw, recipient, acc.reject_score_above,
-                    bayes_user=acc.bayes_user or acc.user,
-                )
-                if scan_detail is None:
-                    log.warning("scan failed for %s (uid=%s) - keeping in inbox", msgid, uid)
-                    db.log_event("scan_failed", msgid)
-                    if state is not None:
-                        state.scan_fail_streak += 1
-                        # Escalate loudly at 1/10/50/250+ so rspamd downtime
-                        # shows up in logs and Unraid notification scrapers
-                        # without spamming once per scanned message.
-                        if state.scan_fail_streak in (1, 10, 50) or state.scan_fail_streak % 250 == 0:
-                            log.error(
-                                "rspamd scan failing: %d consecutive failures (check rspamd container)",
-                                state.scan_fail_streak,
-                            )
-                            db.log_event("scan_fail_streak", detail=str(state.scan_fail_streak))
-                    halted = True
-                    break
-                if state is not None and state.scan_fail_streak:
-                    log.info("rspamd scan recovered after %d failures", state.scan_fail_streak)
-                    db.log_event("scan_recovered", detail=str(state.scan_fail_streak))
-                    state.scan_fail_streak = 0
-
-                score = scan_detail.score
-                detail_json = score_detail_json(scan_detail)
-                with db.tx():
-                    db.update_imap_message(
-                        fmap["inbox"], uv, uid,
-                        our_score=score,
-                        score_detail=detail_json,
-                    )
-                    db.log_event(
-                        "scan", msgid,
-                        detail=f"score={score:.2f} mode={acc.mode}",
-                    )
-                log.debug("scored %s = %.2f", msgid, score)
-                explain_floor = max(float(acc.threshold), SCORE_EXPLAIN_LOG_MIN)
-                if score >= explain_floor:
-                    log.info(
-                        "score_explain %s score=%.2f top=%s",
-                        msgid, score, format_top_symbols_line(scan_detail.symbols),
-                    )
                 over_threshold = score >= acc.threshold
 
             if not over_threshold:
@@ -3358,10 +3452,53 @@ def scan_inbox(
                             detail=f"score={_score_log(score)}",
                         )
             last_terminal = uid
+    return halted, last_terminal
 
-    if last_terminal is not None:
-        with db.tx():
-            db.set_scan_bookmark(fmap["inbox"], uv, last_terminal)
+
+def _catchup_unscored_inbox(
+    client: IMAPClient,
+    db: Db,
+    log: logging.Logger,
+    acc: Account,
+    fmap: dict[str, str],
+    state: "AccountState | None",
+    uv: int,
+    already: list[int],
+) -> None:
+    """Score Inbox rows that were recorded without our_score.
+
+    Does not move the scan bookmark (those UIDs are already at or below
+    it). Caps work per pass so a large backlog cannot starve new mail.
+    """
+    skip = set(already)
+    wanted = [
+        uid for uid in db.unscored_inbox_uids(
+            fmap["inbox"], uv, UNSCORED_INBOX_CATCHUP_CAP + len(skip)
+        )
+        if uid not in skip
+    ][:UNSCORED_INBOX_CATCHUP_CAP]
+    if not wanted:
+        return
+    lo = min(wanted)
+    present = {
+        uid for uid in set(client.search(["UID", f"{lo}:*"]) or [])
+        if uid in set(wanted)
+    }
+    catchup = [uid for uid in wanted if uid in present]
+    if not catchup:
+        return
+    log.info(
+        "scan_inbox: scoring %d previously unscored Inbox message(s)",
+        len(catchup),
+    )
+    metadata: dict[int, dict] = {}
+    meta_items = [b"RFC822.SIZE", b"FLAGS", b"INTERNALDATE"]
+    for start in range(0, len(catchup), SCAN_FETCH_CHUNK):
+        chunk = catchup[start : start + SCAN_FETCH_CHUNK]
+        metadata.update(client.fetch(chunk, meta_items))
+    _scan_inbox_uid_batch(
+        client, db, log, acc, fmap, state, uv, catchup, metadata,
+    )
 
 
 def execute_due_moves(client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fmap: dict[str, str]) -> None:
@@ -3452,7 +3589,131 @@ def execute_due_moves(client: IMAPClient, db: Db, log: logging.Logger, acc: Acco
     log.info("moved %d message(s) inbox->junk", len(to_move))
 
 
-def poll_junk(client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fmap: dict[str, str]) -> None:
+def _queue_junk_rescue(
+    db: Db,
+    log: logging.Logger,
+    acc: Account,
+    junk: str,
+    uv: int,
+    uid: int,
+    msgid: str | None,
+    score: float,
+) -> None:
+    """Queue a provider-Junk → Inbox rescue. Never Bayes-learns."""
+    detail = f"score={score:.2f} mode={acc.mode}"
+    if acc.mode != "move":
+        log.info(
+            "[%s] would rescue %s %s",
+            acc.mode, msgid, detail,
+        )
+        db.log_event("would_rescue", msgid, detail=detail)
+        return
+    with db.tx():
+        db.add_pending_move(uv, uid, msgid or "", folder=junk)
+        db.update_imap_message(junk, uv, uid, our_action="pending_rescue")
+        db.log_event("pending_rescue", msgid, detail=detail)
+
+
+def execute_due_rescues(
+    client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fmap: dict[str, str]
+) -> None:
+    """MOVE due provider-Junk rescues to Inbox. Move mode only; no Bayes learn."""
+    if acc.mode != "move":
+        return
+    if db.in_safe_mode("all"):
+        return
+    junk = fmap["junk"]
+    uv = select_with_uidvalidity_check(client, db, junk, log)
+    rows = db.due_pending_moves(junk, uv, acc.move_grace_seconds)
+    if not rows:
+        return
+    if not check_rate(db, log, "move", acc.max_moves_per_hour):
+        return
+
+    uids = [r["uid"] for r in rows]
+    to_move: list[int] = []
+    by_uid = {r["uid"]: r for r in rows}
+    for uid, data, oversize in fetch_under_cap(client, uids):
+        r = by_uid[uid]
+        flags = data.get(b"FLAGS")
+        missing = flags is None and not _body_bytes(data) and _rfc822_size(data) is None
+        if missing:
+            with db.tx():
+                db.drop_pending_move(junk, uv, uid)
+                db.log_event("rescue_skipped_missing", r["message_id"])
+            continue
+        raw = _body_bytes(data)
+        if oversize or not raw:
+            log.info(
+                "rescue skipped (cannot revalidate) uid=%s oversize=%s",
+                uid, oversize,
+            )
+            db.log_event(
+                "rescue_skipped_unvalidated", r["message_id"],
+                detail=f"uid={uid} oversize={oversize}",
+            )
+            continue
+        hit = classify_list_hit(acc, db, iter_list_header_addrs(raw))
+        if hit is not None and hit.decision == "block":
+            hit_detail = _list_hit_event_detail(hit, None)
+            with db.tx():
+                db.drop_pending_move(junk, uv, uid)
+                db.update_imap_message(junk, uv, uid, our_action="blocklisted")
+                db.log_event("blocklisted", r["message_id"], detail=hit_detail)
+                db.log_event(
+                    "pending_rescue_canceled", r["message_id"], detail=hit_detail,
+                )
+            continue
+        row = db.get_imap_message(junk, uv, uid)
+        score = _finite_score(row["our_score"] if row is not None else None)
+        allow = hit is not None and hit.decision == "allow"
+        if not allow and (score is None or score >= acc.threshold):
+            with db.tx():
+                db.drop_pending_move(junk, uv, uid)
+                db.log_event(
+                    "pending_rescue_canceled", r["message_id"],
+                    detail=f"score={_score_log(score)}",
+                )
+            continue
+        to_move.append(uid)
+
+    if not to_move:
+        return
+    remaining = acc.max_moves_per_hour - db.rate_count("move", 3600)
+    to_move = to_move[: max(0, remaining)]
+    if not to_move:
+        return
+    try:
+        client.move(to_move, fmap["inbox"])
+    except IMAPClientError as ex:
+        detail = redact_log(str(ex), acc.password)
+        log.warning("rescue to inbox failed: %s", detail)
+        db.log_event("rescue_failed", detail=detail)
+        return
+
+    with db.tx():
+        for r in rows:
+            if r["uid"] not in to_move:
+                continue
+            db.drop_pending_move(junk, uv, r["uid"])
+            db.update_imap_message(
+                junk, uv, r["uid"],
+                current_folder=fmap["inbox"],
+                our_action="rescued_to_inbox",
+            )
+            db.record_rate("move")
+            db.log_event("rescued_to_inbox", r["message_id"])
+    log.info("rescued %d message(s) junk->inbox", len(to_move))
+
+
+def poll_junk(
+    client: IMAPClient,
+    db: Db,
+    log: logging.Logger,
+    acc: Account,
+    fmap: dict[str, str],
+    state: "AccountState | None" = None,
+) -> None:
     uv = select_with_uidvalidity_check(
         client, db, fmap["junk"], log, readonly=True
     )
@@ -3515,21 +3776,15 @@ def poll_junk(client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fma
                     )
 
                 # Both completed and uncertain filter-owned moves are excluded
-                # from user feedback. A server may complete MOVE while its
-                # response or our reconciliation write is lost.
-                if any(
-                    r["our_action"] in ("pending_move", "moved_to_junk")
-                    for r in siblings
-                ):
+                # from user feedback and from provider-junk scoring/rescue.
+                if _is_filter_owned_junk(siblings):
                     last_terminal = uid
                     continue
                 # Learn spam only from a confirmed user move Inbox -> Junk,
                 # i.e. a sha256 sibling still recorded as living in Inbox.
                 # Mail with no sibling (delivered straight to Junk by the
                 # provider's own filter, never seen in Inbox) is NOT an
-                # explicit user move and is deliberately not learned - that
-                # would train Bayes on the provider's verdict, including its
-                # false positives.
+                # explicit user move and is deliberately not learned.
                 inbox_sibs = [
                     r for r in siblings
                     if (
@@ -3576,12 +3831,64 @@ def poll_junk(client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fma
                                     "pending_spam", msgid,
                                     detail="user move inbox->junk",
                                 )
+                    last_terminal = uid
+                    continue
+
+                stored = prior["our_score"] if prior is not None else None
+                if stored is not None:
+                    score = _finite_score(stored)
+                    if score is None:
+                        log.error(
+                            "invalid stored score for %s (uid=%s) - keeping in junk",
+                            msgid, uid,
+                        )
+                        db.log_event(
+                            "invalid_stored_score", msgid, detail=f"uid={uid}",
+                        )
+                        halted = True
+                        break
+                else:
+                    score = _score_and_store(
+                        db, log, acc, state, junk, uv, uid, raw, msgid,
+                    )
+                    if score is None:
+                        halted = True
+                        break
+                hit = classify_list_hit(acc, db, iter_list_header_addrs(raw))
+                if hit is not None:
+                    hit_detail = _list_hit_event_detail(hit, score)
+                    _log_list_hit(log, acc, hit, msgid, subject, hit_detail)
+                    if hit.conflict:
+                        with db.tx():
+                            db.log_event(
+                                "list_conflict", msgid, detail=hit_detail,
+                            )
+                    if hit.decision == "block":
+                        with db.tx():
+                            db.update_imap_message(
+                                junk, uv, uid, our_action="blocklisted",
+                            )
+                            db.log_event(
+                                "blocklisted", msgid, detail=hit_detail,
+                            )
+                        last_terminal = uid
+                        continue
+                    _queue_junk_rescue(
+                        db, log, acc, junk, uv, uid, msgid, score,
+                    )
+                    last_terminal = uid
+                    continue
+                if score < acc.threshold:
+                    _queue_junk_rescue(
+                        db, log, acc, junk, uv, uid, msgid, score,
+                    )
                 last_terminal = uid
         if last_terminal is not None:
             with db.tx():
                 db.set_scan_bookmark(junk, uv, last_terminal)
 
     process_pending_learns(client, db, log, acc, fmap)
+    execute_due_rescues(client, db, log, acc, fmap)
 
 
 def process_pending_learns(
@@ -3807,6 +4114,110 @@ def drain_list_block(
     _drain_list_folder(client, db, log, acc, fmap, kind="block")
 
 
+def _uids_still_present(client: IMAPClient, uids: list[int]) -> list[int]:
+    if not uids:
+        return []
+    present = set(client.search(["ALL"]) or [])
+    return [uid for uid in uids if uid in present]
+
+
+def _expunge_source_uids(
+    client: IMAPClient,
+    uids: list[int],
+    log: logging.Logger,
+    *,
+    password: str,
+) -> None:
+    """UID-EXPUNGE leftover source copies after a MOVE that did not remove them.
+
+    The destination already has the live message; this only clears the
+    filter-owned list folder. Prefer UIDPLUS UID EXPUNGE so other
+    \\Deleted mail in the folder is left alone.
+    """
+    try:
+        client.add_flags(uids, [DELETED])
+    except IMAPClientError as ex:
+        log.warning(
+            "could not flag leftover source uids %s: %s",
+            uids, redact_log(str(ex), password),
+        )
+        return
+    try:
+        client.uid_expunge(uids)
+        return
+    except (IMAPClientError, AttributeError):
+        pass
+    try:
+        client.expunge(uids)
+    except (IMAPClientError, TypeError) as ex:
+        log.warning(
+            "expunge leftover source uids %s failed: %s",
+            uids, redact_log(str(ex), password),
+        )
+
+
+def _move_clearing_source(
+    client: IMAPClient,
+    uids: list[int],
+    dest: str,
+    log: logging.Logger,
+    *,
+    password: str,
+    src_label: str,
+) -> None:
+    """UID MOVE to dest, then UID-EXPUNGE any source UIDs the server left.
+
+    Microsoft 365 / Exchange IMAP often implements MOVE as COPY and
+    leaves the original in Allowlist/Blocklist. Inbox already has the
+    returned message; expunging the leftover source UID finishes the
+    move without discarding mail.
+    """
+    client.move(uids, dest)
+    leftover = _uids_still_present(client, uids)
+    if not leftover:
+        return
+    log.info(
+        "MOVE %s -> %s left %d source uid(s); expunging leftover copies",
+        src_label, dest, len(leftover),
+    )
+    _expunge_source_uids(client, leftover, log, password=password)
+
+
+def _message_ids_in_folder(
+    client: IMAPClient,
+    folder: str,
+    msgids: set[str],
+    log: logging.Logger,
+    *,
+    password: str,
+) -> set[str]:
+    """Return the subset of Message-IDs that already have a copy in `folder`."""
+    if not msgids:
+        return set()
+    try:
+        client.select_folder(folder, readonly=True)
+    except IMAPClientError as ex:
+        log.warning(
+            "list drain: cannot select %s to check copies: %s",
+            folder, redact_log(str(ex), password),
+        )
+        return set()
+    found: set[str] = set()
+    for msgid in msgids:
+        variants = [msgid]
+        if not msgid.startswith("<"):
+            variants.append(f"<{msgid}>")
+        for needle in variants:
+            try:
+                hits = client.search(["HEADER", "Message-ID", needle])
+            except IMAPClientError:
+                continue
+            if hits:
+                found.add(msgid)
+                break
+    return found
+
+
 def _drain_list_folder(
     client: IMAPClient,
     db: Db,
@@ -3816,11 +4227,18 @@ def _drain_list_folder(
     *,
     kind: str,
 ) -> None:
-    """Person-list upsert/flip from INBOX/Allowlist or Blocklist, then MOVE
-    the message back to Inbox. From address only; never a domain pattern."""
+    """Person-list upsert/flip from INBOX/Allowlist or Blocklist.
+
+    Allow: ham-learn then MOVE to Inbox. Block: spam-learn then MOVE to Junk.
+    From address only; never a domain pattern. Learn failure leaves the
+    message in the list folder for retry; oversize/empty still route.
+    """
     assert kind in {"allow", "block"}
     src_key = "allowlist" if kind == "allow" else "blocklist"
+    dest_key = "inbox" if kind == "allow" else "junk"
+    learn_kind = "ham" if kind == "allow" else "spam"
     folder = fmap[src_key]
+    dest = fmap[dest_key]
     try:
         uv = select_with_uidvalidity_check(client, db, folder, log)
     except IMAPClientError as ex:
@@ -3830,32 +4248,44 @@ def _drain_list_folder(
     if not uids:
         return
     uids = uids[: acc.max_list_per_run]
-    to_move: list[int] = []
+    pending: list[tuple[int, str]] = []
     for uid, data, oversize in fetch_under_cap(client, uids):
         if SHUTDOWN.is_set():
             return
-        to_move.append(uid)
+        msgid = ""
         if oversize:
             _log_skipped_oversize(
                 db, log, uid=uid, folder=folder, size=_rfc822_size(data),
             )
+            pending.append((uid, msgid))
             continue
         raw = _body_bytes(data)
         if not raw:
-            log.info("list drain uid=%s: empty body, returning to Inbox", uid)
+            log.info("list drain uid=%s: empty body, routing to %s", uid, dest)
+            pending.append((uid, msgid))
             continue
-        msgid, _subject, sender = parse_envelope(raw)
+        parsed_msgid, _subject, sender = parse_envelope(raw)
+        msgid = parsed_msgid or ""
         if not sender:
-            log.info("list drain uid=%s: empty From, returning to Inbox", uid)
+            log.info("list drain uid=%s: empty From, routing to %s", uid, dest)
+            pending.append((uid, msgid))
             continue
         try:
             parsed = parse_list_line(sender, allow_domain=False)
         except ValueError as ex:
             log.info("list drain uid=%s from=%r: %s", uid, sender, ex)
+            pending.append((uid, msgid))
             continue
         if parsed is None:
+            pending.append((uid, msgid))
             continue
+        sha = body_sha256(raw)
         with db.tx():
+            db.upsert_imap_message(
+                folder, uv, uid,
+                message_id=msgid or None, sender=sender, subject=_subject,
+                received_at=_internaldate_ts(data), body_sha256=sha,
+            )
             outcome = db.list_flip_address(
                 "person", acc.actual_name, kind, parsed,
                 source="imap", actor=acc.name,
@@ -3880,15 +4310,60 @@ def _drain_list_folder(
                     "list_imap_add", msgid,
                     detail=f"kind={kind} pattern={parsed.pattern} outcome={outcome}",
                 )
-    if not to_move:
+        if acc.learn_from_moves:
+            ok = try_learn(
+                db, log, acc, raw, msgid, learn_kind,
+                reason=f"list_{kind}_folder",
+                folder=folder, uidvalidity=uv, uid=uid,
+            )
+            if not ok:
+                continue
+        pending.append((uid, msgid))
+    if not pending:
         return
+    already_in_dest = _message_ids_in_folder(
+        client, dest, {m for _, m in pending if m}, log,
+        password=acc.password,
+    )
     try:
-        client.move(to_move, fmap["inbox"])
+        select_with_uidvalidity_check(client, db, folder, log)
     except IMAPClientError as ex:
         log.warning(
-            "list drain MOVE %s -> Inbox failed: %s",
+            "list drain: cannot re-select %s after dest check: %s",
             folder, redact_log(str(ex), acc.password),
         )
+        return
+    to_move = [uid for uid, msgid in pending if not msgid or msgid not in already_in_dest]
+    to_clear = [uid for uid, msgid in pending if msgid and msgid in already_in_dest]
+    if to_move:
+        try:
+            _move_clearing_source(
+                client, to_move, dest, log,
+                password=acc.password, src_label=folder,
+            )
+        except IMAPClientError as ex:
+            log.warning(
+                "list drain MOVE %s -> %s failed: %s",
+                folder, dest, redact_log(str(ex), acc.password),
+            )
+            return
+        dest_label = "inbox" if kind == "allow" else "junk"
+        with db.tx():
+            for uid, msgid in pending:
+                if uid not in to_move:
+                    continue
+                db.update_imap_message(
+                    folder, uv, uid,
+                    current_folder=dest,
+                    our_action="allowlisted" if kind == "allow" else "blocklisted",
+                )
+                db.log_event(f"list_drain_{dest_label}", msgid or None)
+    if to_clear:
+        log.info(
+            "list drain: %d uid(s) already in %s; expunging leftover copies in %s",
+            len(to_clear), dest, folder,
+        )
+        _expunge_source_uids(client, to_clear, log, password=acc.password)
 
 
 # ----- retention ----------------------------------------------------------
@@ -4048,10 +4523,13 @@ def _run_account(acc: Account, db: Db) -> None:
                 if SHUTDOWN.is_set():
                     break
                 execute_due_moves(client, db, log, acc, acc.folder_map)
+                if SHUTDOWN.is_set():
+                    break
+                execute_due_rescues(client, db, log, acc, acc.folder_map)
 
                 now = time.monotonic()
                 if now - state.last_junk_poll >= acc.junk_poll_interval:
-                    poll_junk(client, db, log, acc, acc.folder_map)
+                    poll_junk(client, db, log, acc, acc.folder_map, state)
                     state.last_junk_poll = now
 
                 if now - state.last_retention >= acc.retention_check_interval:
@@ -4165,7 +4643,7 @@ def main() -> int:
     # legacy DASHBOARD_USER + DASHBOARD_PASSWORD pair. dashboard.start()
     # makes the final call; this gate just avoids importing Flask when
     # the dashboard is clearly unused. Listens on a fixed internal port
-    # 8080; the orchestrator chooses the host port.
+    # 8099; the orchestrator chooses the host port.
     if (
         os.environ.get("DASHBOARD_USERS")
         or (os.environ.get("DASHBOARD_USER")

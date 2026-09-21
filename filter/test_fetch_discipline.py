@@ -44,11 +44,12 @@ def _wants_full_body(parts) -> bool:
 class CapIMAP:
     """Records FETCH parts and refuses BODY.PEEK[] for oversize UIDs."""
 
-    def __init__(self, *, existing, uids, bodies, sizes=None):
+    def __init__(self, *, existing, uids, bodies, sizes=None, flags=None):
         self.existing = set(existing)
         self.uids = list(uids)
         self.bodies = dict(bodies)
         self.sizes = dict(sizes or {})
+        self.flags = dict(flags or {})
         self.fetch_calls: list[tuple[list[int], list[bytes]]] = []
         self.searches: list[list] = []
         self.moved: list[tuple[list[int], str]] = []
@@ -107,7 +108,7 @@ class CapIMAP:
                     if u in self.bodies:
                         rec[b"BODY[]"] = self.bodies[u]
                 elif p == b"FLAGS":
-                    rec[p] = ()
+                    rec[p] = self.flags.get(u, ())
                 elif p == b"INTERNALDATE":
                     rec[p] = None
             out[u] = rec
@@ -166,11 +167,14 @@ def test_poll_junk_init_does_not_fetch_bodies(tmp_path):
     assert any(c[0] == "ALL" for c in client.searches)
 
 
-def test_poll_junk_second_pass_fetches_only_above_bookmark(tmp_path):
+def test_poll_junk_second_pass_fetches_only_above_bookmark(tmp_path, monkeypatch):
     db = _mk_db(tmp_path)
     acc = _mk_account()
     with db.tx():
         db.set_scan_bookmark("Junk", 1, 3)
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(9.0, (), None),
+    )
     client = CapIMAP(
         existing=_all_existing(),
         uids=[1, 2, 3, 4],
