@@ -81,9 +81,9 @@ restricted to `[A-Za-z0-9_-]`.
 **`?next=`.** After login, allow only `^/[A-Za-z0-9/_-]*$`. Anything
 else (including `//host`, scheme-relative, `/?q=`) becomes `/`.
 
-**Bind.** Container still listens on `0.0.0.0:8080`. Compose example
-and README tell operators to publish `127.0.0.1:8080:8080` on a VPS
-(not `8080:8080`). Unraid keeps its existing host-port mapping
+**Bind.** Container still listens on `0.0.0.0:8099`. Compose example
+and README tell operators to publish `127.0.0.1:8099:8099` on a VPS
+(not `8099:8099`). Unraid keeps its existing host-port mapping
 (LAN WebUI).
 
 ---

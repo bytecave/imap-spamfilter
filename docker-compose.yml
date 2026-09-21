@@ -82,15 +82,15 @@ services:
       # dashboard.py`. Creating the first user requires a container restart;
       # later user-file edits are re-read at login. (Legacy DASHBOARD_USER +
       # DASHBOARD_PASSWORD still works.) The container always listens
-      # internally on 8080 once configured at process startup; map a host port
+      # internally on 8099 once configured at process startup; map a host port
       # in the ports: block below.
       # On a VPS bind the host side to loopback, not all interfaces:
-      #   "127.0.0.1:8080:8080"
+      #   "127.0.0.1:8099:8099"
       # - DASHBOARD_USERS=${DASHBOARD_USERS:-}
       # - DASHBOARD_USER=${DASHBOARD_USER:-}
       # - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:-}
     # ports:
-    #   - "127.0.0.1:8080:8080"
+    #   - "127.0.0.1:8099:8099"
     # Healthcheck baked into the image (see filter/Dockerfile). Compose
     # used to shadow it with a shell-string form that broke under Unraid
     # `--health-cmd`; the image definition works the same everywhere.

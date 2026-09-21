@@ -129,13 +129,13 @@ Phase 2 was **not** a product feature in git — it reset live corpus state so P
 | `/opt/bytelord/compose/imap-spamfilter/compose.yaml` | Live filter stack |
 | `/opt/bytelord/compose/email-oauth2-proxy/compose.yaml` | Live proxy |
 
-Dashboard: `127.0.0.1:8080` only. From Windows PowerShell:
+Dashboard: `127.0.0.1:8099` only. From Windows PowerShell:
 
 ```powershell
-ssh -L 8080:127.0.0.1:8080 bytecave@bytelord
+ssh -L 8099:127.0.0.1:8099 bytecave@bytelord
 ```
 
-Then http://127.0.0.1:8080/ — hard-refresh after JS/CSS deploys (`Ctrl+F5`).
+Then http://127.0.0.1:8099/ — hard-refresh after JS/CSS deploys (`Ctrl+F5`).
 
 Rebuild/restart filter (as user `bytecave`, uid/gid 1001):
 

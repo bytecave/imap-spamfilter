@@ -22,7 +22,7 @@ Allow/block lists + one VPS Bayes notebook (design-arch slices 9–12) are **on 
 | Item | Value |
 |---|---|
 | `origin/main` HEAD (last known) | `4e2d994` — “Code review results, Cursor plans, misc” |
-| Prior markers | `953b756` ai-memory marker; `b991f71` contradict-learn skip; tag `before-allow-block-list` at `a0b8897` |
+| Prior markers | `b991f71` contradict-learn skip; tag `before-allow-block-list` at `a0b8897` |
 | **Working tree (2026-09-10)** | **Uncommitted** CR fixes + tests + docs (see below). Do **not** commit/push unless the user asks. |
 
 **Modified (tracked):** `.github/workflows/build.yml`, `README.md`, `filter/{filter,dashboard,bootstrap_train,explain_score}.py`, `filter/requirements.txt` (Flask **3.1.3**), several `filter/test_*.py`, `unraid/bootstrap.sh`.
@@ -113,10 +113,10 @@ spamfilter.db / -wal / -shm / heartbeat    -rw------- (0600)
 | `/opt/bytelord/compose/imap-spamfilter/compose.yaml` | Live filter stack |
 | `/opt/bytelord/compose/email-oauth2-proxy/compose.yaml` | Live proxy |
 
-Dashboard: `127.0.0.1:8080` only. From Windows PowerShell:
+Dashboard: `127.0.0.1:8099` only (`https://spam.bytelord.net/` on NetBird). From Windows PowerShell:
 
 ```powershell
-ssh -L 8080:127.0.0.1:8080 bytecave@bytelord
+ssh -L 8099:127.0.0.1:8099 bytecave@bytelord
 ```
 
 Rebuild/restart filter only (as `bytecave`, uid/gid 1001):

@@ -84,7 +84,7 @@ services:
       - /opt/bytelord/projects/imap-spamfilter/accounts.yml:/app/accounts.yml:ro
       - /opt/bytelord/data/imap-spamfilter/state:/state
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8099:8099"
     networks: [spamnet]
 
 networks:

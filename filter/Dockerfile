@@ -24,7 +24,7 @@ COPY filter.py bootstrap_train.py explain_score.py dashboard.py lists.js favicon
 
 # Read-only web dashboard; disabled by default. Operator opts in by
 # setting DASHBOARD_USER + DASHBOARD_PASSWORD.
-EXPOSE 8080
+EXPOSE 8099
 
 RUN mkdir -p /state && chown -R 99:100 /app /state
 # Run as Unraid's nobody:users so bind-mounted appdata files

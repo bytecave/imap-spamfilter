@@ -78,7 +78,7 @@ Self-hosted IMAP spam filter (Python + Rspamd + Redis + Unbound). Per-mailbox th
 | `/opt/bytelord/secrets/imap-spamfilter.env` | Rspamd/Redis passwords |
 | `/opt/bytelord/projects/email-oauth2-proxy/` | Proxy project |
 | `/opt/bytelord/compose/email-oauth2-proxy/compose.yaml` | Live proxy |
-| Dashboard | `127.0.0.1:8080` (SSH tunnel from Windows) |
+| Dashboard | `127.0.0.1:8099` (`https://spam.bytelord.net/` on NetBird) |
 
 ---
 
