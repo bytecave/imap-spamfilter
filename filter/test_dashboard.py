@@ -435,9 +435,13 @@ def test_messages_shows_learned_rows_without_score(dashboard_db, monkeypatch):
     resp = client.get("/messages")
     assert resp.status_code == 200
     assert b"ALPHA TRAIN COPY" in resp.data
-    spam = client.get("/messages?band=spam")
-    assert b"ALPHA TRAIN COPY" not in spam.data
-    assert b"ALPHA SUBJECT" in spam.data
+    high = client.get("/messages?band=high")
+    assert b"ALPHA TRAIN COPY" not in high.data
+    assert b"ALPHA SUBJECT" in high.data
+    # Legacy >=8 chip name still maps to 8-19.
+    legacy = client.get("/messages?band=spam")
+    assert b"ALPHA SUBJECT" in legacy.data
+    assert b"ALPHA TRAIN COPY" not in legacy.data
 
 
 def test_messages_sort_by_score(dashboard_db, monkeypatch):
@@ -456,6 +460,266 @@ def test_messages_sort_by_score(dashboard_db, monkeypatch):
     html = asc.data.decode()
     assert html.index("BETA SUBJECT") < html.index("ALPHA SUBJECT")
     assert 'dir=desc' in html
+
+
+@pytest.mark.parametrize(
+    "band",
+    [
+        "all", "zero", "low", "mid", "high", "ge20",
+        "trained_spam", "trained_ham", "trained", "untrained", "spam",
+    ],
+)
+@pytest.mark.parametrize("kind", ["both", "spam", "ham"])
+def test_messages_score_band_with_kind_does_not_error(
+        band, kind, dashboard_db, monkeypatch):
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    resp = client.get(f"/messages?band={band}&kind={kind}")
+    assert resp.status_code == 200
+    assert b"state DB error" not in resp.data
+
+
+def test_messages_band_low_returns_only_low_scores(dashboard_db, monkeypatch):
+    now = int(time.time())
+    conn = sqlite3.connect(dashboard_db)
+    conn.execute(
+        """
+        INSERT INTO messages(
+            account, folder, uidvalidity, uid, message_id, body_sha256,
+            first_seen, last_seen, current_folder, our_score, score_detail,
+            our_action, learned_as, learned_at, sender, subject, received_at
+        ) VALUES (?, 'INBOX', 1, 99, 'low@id', 'low-body', ?, ?, 'INBOX',
+                  1.5, NULL, NULL, NULL, NULL, 'low@sender', 'LOW SUBJECT', ?)
+        """,
+        ("acct-alpha", now, now, now),
+    )
+    conn.commit()
+    conn.close()
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    low = client.get("/messages?band=low")
+    assert low.status_code == 200
+    html = low.data.decode()
+    assert "LOW SUBJECT" in html
+    assert "ALPHA SUBJECT" not in html
+    assert "BETA SUBJECT" not in html
+    combo = client.get("/messages?band=low&kind=ham")
+    assert combo.status_code == 200
+    assert b"LOW SUBJECT" in combo.data
+    assert b"state DB error" not in combo.data
+
+
+def test_messages_trained_and_zero_and_ge20_bands(dashboard_db, monkeypatch):
+    now = int(time.time())
+    conn = sqlite3.connect(dashboard_db)
+    conn.executemany(
+        """
+        INSERT INTO messages(
+            account, folder, uidvalidity, uid, message_id, body_sha256,
+            first_seen, last_seen, current_folder, our_score, score_detail,
+            our_action, learned_as, learned_at, sender, subject, received_at
+        ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                "acct-alpha", "INBOX", 30, "zero@id", "zero-body",
+                now, now, "INBOX", None, "allowlisted", None, None,
+                "zero@sender", "ZERO SUBJECT", now,
+            ),
+            (
+                "acct-alpha", "INBOX", 31, "zscore@id", "zscore-body",
+                now, now, "INBOX", 0.0, "allowlisted", None, None,
+                "zero@sender", "ZERO SCORE SUBJECT", now,
+            ),
+            (
+                "acct-alpha", "INBOX", 32, "hot@id", "hot-body",
+                now, now, "INBOX", 21.0, "pending_move", None, None,
+                "hot@sender", "HOT SUBJECT", now,
+            ),
+            (
+                "acct-alpha", "Junk Email/Train-Spam", 40, "train-spam@id",
+                "train-spam-body", now, now, "Junk Email/Trained-Spam",
+                None, None, "spam", now, "spam@sender", "TRAIN SPAM COPY", now,
+            ),
+            (
+                "acct-beta", "Junk", 41, "junk-learn@id", "junk-learn-body",
+                now, now, "Junk", 9.0, "moved_to_junk", "spam", now,
+                "junk@sender", "JUNK LEARN SUBJECT", now,
+            ),
+            (
+                "acct-alpha", "Junk Email", 42, "user-junk@id", "user-junk-body",
+                now, now, "Junk Email", None, None, "spam", now,
+                "user@sender", "USER JUNK DRAG", now,
+            ),
+            (
+                "acct-alpha", "INBOX", 43, "unlearn@id", "unlearn-body",
+                now, now, "INBOX", None, None, "unlearnable", now,
+                "u@sender", "UNLEARNABLE SUBJECT", now,
+            ),
+            (
+                "acct-alpha", "INBOX/Allowlist", 44, "allow-drag@id",
+                "allow-drag-body", now, now, "INBOX/Allowlist", None, None,
+                None, None, "a@sender", "ALLOW DRAG SUBJECT", now,
+            ),
+            (
+                "acct-alpha", "INBOX", 45, "empty@id", "empty-body",
+                now, now, "INBOX", None, None, None, None,
+                "e@sender", "EMPTY SUBJECT", now,
+            ),
+            (
+                "acct-alpha", "INBOX", 46, "pending@id", "pending-body",
+                now, now, "INBOX", None, None, None, None,
+                "p@sender", "PENDING LEARN SUBJECT", now,
+            ),
+        ],
+    )
+    conn.execute(
+        "UPDATE messages SET pending_learn='ham' WHERE message_id='pending@id'"
+    )
+    conn.commit()
+    conn.close()
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+
+    trained_ham = client.get("/messages?band=trained_ham").data.decode()
+    assert "ALPHA TRAIN COPY" in trained_ham
+    assert "BETA SUBJECT" not in trained_ham
+    assert "ALPHA SUBJECT" not in trained_ham
+    assert "JUNK LEARN SUBJECT" not in trained_ham
+
+    trained_spam = client.get("/messages?band=trained_spam").data.decode()
+    assert "TRAIN SPAM COPY" in trained_spam
+    assert "USER JUNK DRAG" in trained_spam
+    assert "BETA SUBJECT" in trained_spam
+    assert "ALPHA TRAIN COPY" not in trained_spam
+    assert "JUNK LEARN SUBJECT" not in trained_spam
+    assert "HOT SUBJECT" not in trained_spam
+
+    trained = client.get("/messages?band=trained").data.decode()
+    assert "ALPHA TRAIN COPY" in trained
+    assert "TRAIN SPAM COPY" in trained
+    assert "USER JUNK DRAG" in trained
+    assert "BETA SUBJECT" in trained
+    assert "JUNK LEARN SUBJECT" not in trained
+    assert "HOT SUBJECT" not in trained
+    assert "ZERO SUBJECT" not in trained
+
+    untrained = client.get("/messages?band=untrained").data.decode()
+    assert "ALPHA SUBJECT" in untrained
+    assert "HOT SUBJECT" in untrained
+    assert "JUNK LEARN SUBJECT" in untrained
+    assert "EMPTY SUBJECT" in untrained
+    assert "ALPHA TRAIN COPY" not in untrained
+    assert "TRAIN SPAM COPY" not in untrained
+    assert "USER JUNK DRAG" not in untrained
+    assert "BETA SUBJECT" not in untrained
+    assert "ZERO SUBJECT" not in untrained
+    assert "UNLEARNABLE SUBJECT" not in untrained
+    assert "ALLOW DRAG SUBJECT" not in untrained
+    assert "PENDING LEARN SUBJECT" not in untrained
+
+    zero = client.get("/messages?band=zero").data.decode()
+    assert "ZERO SUBJECT" in zero
+    assert "ZERO SCORE SUBJECT" in zero
+    assert "ALPHA TRAIN COPY" not in zero
+    assert "BETA SUBJECT" not in zero
+    assert "ALPHA SUBJECT" not in zero
+
+    ge20 = client.get("/messages?band=ge20").data.decode()
+    assert "HOT SUBJECT" in ge20
+    assert "ALPHA SUBJECT" not in ge20
+
+    high = client.get("/messages?band=high").data.decode()
+    assert "ALPHA SUBJECT" in high
+    assert "HOT SUBJECT" not in high
+    assert "BETA SUBJECT" not in high
+
+    page = client.get("/messages").data.decode()
+    assert "Trained Spam" in page
+    assert "Trained Ham" in page
+    assert "Trained *" in page
+    assert "Untrained" in page
+    assert "= 0" in page
+    assert "8-19" in page
+    assert "&gt;= 20" in page or ">= 20" in page
+
+
+def test_messages_kind_filter_spam_ham_both(dashboard_db, monkeypatch):
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    both = client.get("/messages")
+    assert both.status_code == 200
+    html = both.data.decode()
+    assert "ALPHA SUBJECT" in html
+    assert "ALPHA TRAIN COPY" in html
+    assert "BETA SUBJECT" in html
+    assert "Class" in html
+    spam = client.get("/messages?kind=spam").data.decode()
+    assert "ALPHA SUBJECT" in spam
+    assert "BETA SUBJECT" in spam
+    assert "ALPHA TRAIN COPY" not in spam
+    ham = client.get("/messages?kind=ham").data.decode()
+    assert "ALPHA TRAIN COPY" in ham
+    assert "ALPHA SUBJECT" not in ham
+    assert "BETA SUBJECT" not in ham
+    junk = client.get("/messages?kind=nope")
+    assert junk.status_code == 200
+    assert "ALPHA TRAIN COPY" in junk.data.decode()
+
+
+def test_messages_sort_by_when_newest_first(dashboard_db, monkeypatch):
+    now = int(time.time())
+    conn = sqlite3.connect(dashboard_db)
+    conn.execute(
+        "UPDATE messages SET received_at=?, last_seen=? WHERE subject=?",
+        (now - 300, now - 300, "ALPHA SUBJECT"),
+    )
+    conn.execute(
+        "UPDATE messages SET received_at=?, last_seen=? WHERE subject=?",
+        (now - 100, now - 100, "BETA SUBJECT"),
+    )
+    conn.execute(
+        "UPDATE messages SET received_at=?, last_seen=? WHERE subject=?",
+        (now, now, "ALPHA TRAIN COPY"),
+    )
+    conn.commit()
+    conn.close()
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    html = client.get("/messages").data.decode()
+    assert html.index("ALPHA TRAIN COPY") < html.index("BETA SUBJECT")
+    assert html.index("BETA SUBJECT") < html.index("ALPHA SUBJECT")
+    assert "sort=when" in html
+    oldest = client.get("/messages?sort=when&dir=asc").data.decode()
+    assert oldest.index("ALPHA SUBJECT") < oldest.index("BETA SUBJECT")
+    assert oldest.index("BETA SUBJECT") < oldest.index("ALPHA TRAIN COPY")
+
+
+def test_messages_pagination(dashboard_db, monkeypatch):
+    monkeypatch.setattr(d, "MESSAGES_PAGE_SIZE", 2)
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    subjects = ("ALPHA SUBJECT", "BETA SUBJECT", "ALPHA TRAIN COPY")
+    page1 = client.get("/messages").data.decode()
+    assert "2 per page" in page1
+    assert "1&ndash;2 of 3" in page1
+    assert "page=2" in page1
+    assert ">First<" in page1
+    assert ">Last<" in page1
+    assert 'name="page"' in page1
+    page2 = client.get("/messages?page=2").data.decode()
+    assert "3&ndash;3 of 3" in page2
+    combined = page1 + page2
+    for subject in subjects:
+        assert subject in combined
+    assert sum(s in page1 for s in subjects) == 2
+    assert sum(s in page2 for s in subjects) == 1
+    clamped = client.get("/messages?page=99")
+    assert clamped.status_code == 200
+    assert "3&ndash;3 of 3" in clamped.data.decode()
+    zero = client.get("/messages?page=0")
+    assert zero.status_code == 200
+    assert "1&ndash;2 of 3" in zero.data.decode()
 
 
 def test_learned_sort_by_event(dashboard_db, monkeypatch):

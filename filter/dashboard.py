@@ -2,7 +2,7 @@
 
 Disabled by default. Enable it by configuring at least one dashboard
 user (see below); the daemon then serves it on a fixed internal port
-8080 and the orchestrator maps a host port. Most pages read the SQLite
+8099 and the orchestrator maps a host port. Most pages read the SQLite
 state DB read-only. Admin list editors (Domain lists / User lists) can
 write allow/block rows. Intended for LAN / VPN access behind a reverse
 proxy that terminates TLS.
@@ -75,7 +75,17 @@ FAVICON_PATH = Path(__file__).with_name("favicon.png")
 # class scores nothing until it reaches this many learns.
 BAYES_MIN_LEARNS = int(os.environ.get("BAYES_MIN_LEARNS", "200"))
 # Container-internal listen port is fixed; the orchestrator maps a host port.
-DASHBOARD_PORT = 8080
+DASHBOARD_PORT = 8099
+MESSAGES_PAGE_SIZE = 200
+_SPAM_ACTIONS = (
+    "pending_move",
+    "moved_to_junk",
+    "flagged",
+    "shadow",
+    "blocklisted",
+    "move",
+    "tag",
+)
 PBKDF2_ITERATIONS = 600_000
 SESSION_IDLE_S = 8 * 3600
 SESSION_ABS_S = 24 * 3600
@@ -641,6 +651,78 @@ def _parse_dir(raw: str | None, default: str = "desc") -> str:
     return v if v in ("asc", "desc") else default
 
 
+def _user_trained_sql(kind: str) -> str:
+    """User-taught rows: Train-* folder drags, or Inbox↔Junk move learns.
+
+    Automatic scan classification (score + our_action only) does not match.
+    Filter-owned junk moves (pending_move / moved_to_junk / flagged / shadow)
+    are excluded even if learned_as was set, unless the row is in Train-*.
+    """
+    if kind == "spam":
+        folders = _train_folder_sql(("Train-Spam", "Trained-Spam"))
+        learned = "IFNULL(m.learned_as, '') = 'spam'"
+    elif kind == "ham":
+        folders = _train_folder_sql(("Train-Ham", "Trained-Ham"))
+        learned = "IFNULL(m.learned_as, '') = 'ham'"
+    else:
+        folders = _train_folder_sql(
+            ("Train-Spam", "Trained-Spam", "Train-Ham", "Trained-Ham")
+        )
+        learned = "IFNULL(m.learned_as, '') IN ('ham', 'spam')"
+    auto = (
+        "IFNULL(m.our_action, '') IN "
+        "('pending_move', 'moved_to_junk', 'flagged', 'shadow')"
+    )
+    return f"({folders} OR ({learned} AND NOT {auto}))"
+
+
+def _train_folder_sql(names: tuple[str, ...]) -> str:
+    """Match IMAP Train-* / Trained-* folder names on folder or current_folder.
+
+    Names are code constants, never request input.
+    """
+    parts: list[str] = []
+    for name in names:
+        for col in ("m.folder", "m.current_folder"):
+            parts.append(f"{col} = '{name}'")
+            parts.append(f"{col} LIKE '%/{name}'")
+    return "(" + " OR ".join(parts) + ")"
+
+
+# Extra AND-fragments for /messages?band=. Numeric ranges do not overlap.
+# "all" keeps the historic "scored or trained" gate. "zero" is the inverse
+# for rows rspamd never scored (typical of allow/block list skips).
+# "untrained" is the complement of user teaching: not Train-*, not
+# Inbox↔Junk learns, not Allowlist/Blocklist drags, not list-skip
+# allowlisted, not queued pending_learn, not rspamd-declined unlearnable.
+_BAND_SQL = {
+    "all": (
+        "AND (m.our_score IS NOT NULL "
+        "OR m.learned_as IN ('ham', 'spam'))"
+    ),
+    "zero": (
+        "AND IFNULL(m.learned_as, '') NOT IN ('ham', 'spam') "
+        "AND (m.our_score IS NULL OR m.our_score = 0)"
+    ),
+    "low": "AND m.our_score < 4",
+    "mid": "AND m.our_score >= 4 AND m.our_score < 8",
+    "high": "AND m.our_score >= 8 AND m.our_score < 20",
+    "ge20": "AND m.our_score >= 20",
+    "trained_spam": "AND " + _user_trained_sql("spam"),
+    "trained_ham": "AND " + _user_trained_sql("ham"),
+    "trained": "AND " + _user_trained_sql("any"),
+    "untrained": (
+        "AND NOT ("
+        + _user_trained_sql("any")
+        + " OR " + _train_folder_sql(("Allowlist", "Blocklist"))
+        + " OR IFNULL(m.our_action, '') = 'allowlisted'"
+        + " OR IFNULL(m.learned_as, '') = 'unlearnable'"
+        + " OR IFNULL(m.pending_learn, '') IN ('ham', 'spam')"
+        + ")"
+    ),
+}
+
+
 def _sort_th(
     label: str,
     col: str,
@@ -667,6 +749,153 @@ def _sort_th(
     return (
         f'<th{cls_attr}><a class="th-sort" href="{_h(href)}">'
         f"{_h(label)}{marker}</a></th>"
+    )
+
+
+def _parse_band(raw: str | None) -> str:
+    v = (raw or "all").strip().lower()
+    if v == "spam":
+        # Legacy chip "score >= 8" is now the 8-19 band.
+        return "high"
+    return v if v in _BAND_SQL else "all"
+
+
+def _band_sql(band: str) -> str:
+    return _BAND_SQL[band]
+
+
+def _parse_kind(raw: str | None) -> str:
+    v = (raw or "both").strip().lower()
+    return v if v in ("both", "spam", "ham") else "both"
+
+
+def _parse_page(raw: str | None) -> int:
+    try:
+        page = int(raw or 1)
+    except (TypeError, ValueError):
+        return 1
+    return page if page >= 1 else 1
+
+
+def _messages_qs(
+    *,
+    band: str = "all",
+    kind: str = "both",
+    sort: str = "when",
+    direction: str = "desc",
+    page: int = 1,
+    include_sort: bool = True,
+) -> str:
+    parts: list[str] = []
+    if band != "all":
+        parts.append(f"band={band}")
+    if kind != "both":
+        parts.append(f"kind={kind}")
+    if include_sort:
+        if sort == "score":
+            parts.append("sort=score")
+            parts.append(f"dir={direction}")
+        elif sort == "when" and direction != "desc":
+            parts.append("sort=when")
+            parts.append(f"dir={direction}")
+    if page != 1:
+        parts.append(f"page={page}")
+    return "&".join(parts)
+
+
+def _kind_sql(kind: str) -> str:
+    placeholders = ",".join("?" * len(_SPAM_ACTIONS))
+    spam = (
+        f"(IFNULL(m.our_action, '') IN ({placeholders}) OR "
+        "(IFNULL(m.our_action, '') = '' AND IFNULL(m.learned_as, '') = 'spam'))"
+    )
+    if kind == "spam":
+        return f"AND {spam}"
+    if kind == "ham":
+        return f"AND NOT {spam}"
+    return ""
+
+
+def _kind_sql_params(kind: str) -> list[str]:
+    if kind in ("spam", "ham"):
+        return list(_SPAM_ACTIONS)
+    return []
+
+
+def _pager_html(
+    *,
+    total: int,
+    page: int,
+    pages: int,
+    page_size: int,
+    qs: str,
+) -> str:
+    if total == 0:
+        return (
+            '<div class="pager"><span class="pager-status">'
+            "0 messages</span></div>"
+        )
+    start = (page - 1) * page_size + 1
+    end = min(page * page_size, total)
+
+    def page_href(n: int) -> str:
+        extra = qs
+        if n != 1:
+            extra = f"{extra}&page={n}" if extra else f"page={n}"
+        return "?" + extra if extra else "?"
+
+    def nav(n: int, label: str, enabled: bool) -> str:
+        if not enabled:
+            return f'<span class="pager-disabled">{_h(label)}</span>'
+        return (
+            f'<a href="{_h(page_href(n))}" class="pager-nav">'
+            f"{_h(label)}</a>"
+        )
+
+    width = 7
+    if pages <= width:
+        window = range(1, pages + 1)
+    else:
+        half = width // 2
+        lo = max(1, page - half)
+        hi = min(pages, lo + width - 1)
+        lo = max(1, hi - width + 1)
+        window = range(lo, hi + 1)
+    nums = []
+    for n in window:
+        if n == page:
+            nums.append(f'<span class="pager-current">{n}</span>')
+        else:
+            nums.append(
+                f'<a href="{_h(page_href(n))}" class="pager-num">{n}</a>'
+            )
+    hidden = ""
+    for part in qs.split("&"):
+        if not part or part.startswith("page="):
+            continue
+        k, _, v = part.partition("=")
+        hidden += (
+            f'<input type="hidden" name="{_h(k)}" value="{_h(v)}">'
+        )
+    jump = (
+        '<form class="pager-jump" method="get">'
+        f"{hidden}"
+        f'<label>Page <input type="number" name="page" min="1" '
+        f'max="{pages}" value="{page}"></label>'
+        "<button type=submit>Go</button></form>"
+    )
+    return (
+        f'<div class="pager">'
+        f'<span class="pager-status">{start}&ndash;{end} of {total}'
+        f" &middot; {page_size} per page</span>"
+        '<div class="pager-controls">'
+        + nav(1, "First", page > 1)
+        + nav(page - 1, "Prev", page > 1)
+        + '<span class="pager-pages">' + "".join(nums) + "</span>"
+        + nav(page + 1, "Next", page < pages)
+        + nav(pages, "Last", page < pages)
+        + jump
+        + "</div></div>"
     )
 
 
@@ -959,6 +1188,25 @@ svg.spark polyline { fill:none; stroke:var(--accent); stroke-width:2;
   border:1px solid var(--border); color:var(--text); font-size:0.85em; }
 .filterbar a.active { background:var(--accent); border-color:var(--accent);
   color:#fff; }
+.filterbar .filter-label { color:var(--muted); font-size:0.78em;
+  text-transform:uppercase; letter-spacing:0.03em; align-self:center;
+  padding:0 0.2em 0 0.4em; }
+.pager { display:flex; flex-wrap:wrap; align-items:center; gap:0.7em;
+  margin:0.8em 0; color:var(--muted); font-size:0.88em; }
+.pager-controls { display:flex; flex-wrap:wrap; align-items:center; gap:0.35em; }
+.pager-pages { display:flex; gap:0.2em; }
+.pager a, .pager-current, .pager-disabled { text-decoration:none;
+  padding:0.25em 0.6em; border-radius:7px; border:1px solid var(--border);
+  color:var(--text); }
+.pager a:hover { border-color:var(--accent); color:var(--accent); }
+.pager-current { background:var(--accent); border-color:var(--accent); color:#fff; }
+.pager-disabled { opacity:0.4; }
+.pager-jump { display:flex; align-items:center; gap:0.35em; margin-left:0.4em; }
+.pager-jump input { width:4.2em; padding:0.25em 0.4em; border-radius:7px;
+  border:1px solid var(--border); background:var(--bg); color:var(--text); }
+.pager-jump button { padding:0.25em 0.65em; border-radius:7px;
+  border:1px solid var(--border); background:var(--surface); color:var(--text);
+  cursor:pointer; }
 th a.th-sort { color:inherit; text-decoration:none; }
 th a.th-sort:hover { color:var(--accent); }
 th.sort-active a.th-sort { color:var(--accent); }
@@ -1391,32 +1639,34 @@ def summary():
 @app.route("/messages")
 @_requires_auth
 def messages():
-    band = request.args.get("band", "all")
-    if band == "spam":
-        where = "AND m.our_score >= 8"
-    elif band == "mid":
-        where = "AND m.our_score BETWEEN 4 AND 8"
-    elif band == "low":
-        where = "AND m.our_score < 4"
-    else:
-        # Scanned Inbox rows, plus bootstrap/Train-* learns that have no score.
-        where = (
-            "AND (m.our_score IS NOT NULL "
-            "OR m.learned_as IN ('ham', 'spam'))"
-        )
-    sort = (request.args.get("sort") or "").strip().lower()
-    if sort != "score":
-        sort = ""
+    band = _parse_band(request.args.get("band"))
+    kind = _parse_kind(request.args.get("kind"))
+    where = _band_sql(band)
+    kind_sql = _kind_sql(kind)
+    if kind_sql:
+        where = f"{where} {kind_sql}"
+    sort = (request.args.get("sort") or "when").strip().lower()
+    if sort not in ("score", "when"):
+        sort = "when"
     direction = _parse_dir(request.args.get("dir"), "desc")
+    date_expr = "COALESCE(m.received_at, m.last_seen)"
     if sort == "score":
         order = (
-            f"m.our_score {direction.upper()}, "
-            "COALESCE(m.received_at, m.last_seen) DESC"
+            f"m.our_score {direction.upper()}, {date_expr} DESC"
         )
     else:
-        order = "COALESCE(m.received_at, m.last_seen) DESC"
+        order = f"{date_expr} {direction.upper()}"
     sc, sp = _scope_clause("AND", "m.account")
+    params = (*_kind_sql_params(kind), *sp)
+    page_size = MESSAGES_PAGE_SIZE
     with _db() as c:
+        total = c.execute(
+            f"SELECT COUNT(*) FROM messages m WHERE 1=1 {where}{sc}",
+            params,
+        ).fetchone()[0]
+        pages = max(1, (total + page_size - 1) // page_size) if total else 1
+        page = min(_parse_page(request.args.get("page")), pages)
+        offset = (page - 1) * page_size
         rows = c.execute(
             f"""
             SELECT m.account, m.message_id, m.last_seen, m.received_at, m.our_score,
@@ -1434,8 +1684,9 @@ def messages():
                    ) AS learned_as
               FROM messages m
              WHERE 1=1 {where}{sc}
-             ORDER BY {order} LIMIT 200
-            """, sp).fetchall()
+             ORDER BY {order}
+             LIMIT ? OFFSET ?
+            """, (*params, page_size, offset)).fetchall()
     body_rows = "".join(
         f'<tr><td>{_fmt_ts(r["received_at"] or r["last_seen"])}</td>'
         f'<td>{_h(r["account"])}</td>'
@@ -1448,27 +1699,56 @@ def messages():
         f'<td><span class="muted">{_h((r["sender"] or "")[:50])}</span></td>'
         f'<td><span class="subj">{_h(decode_rfc2047(r["subject"]) or "-")}</span></td></tr>'
         for r in rows)
-    extra = f"band={band}" if band != "all" else ""
+    extra = _messages_qs(
+        band=band, kind=kind, sort=sort, direction=direction, page=1,
+        include_sort=False,
+    )
+    when_th = _sort_th(
+        "When", "when", sort, direction, extra=extra, first_dir="desc",
+    )
     score_th = _sort_th(
         "Score", "score", sort, direction, extra=extra, css="num",
         first_dir="desc",
     )
-    bands = [("all", "all"), ("spam", "score >= 8"),
-             ("mid", "score 4-8"), ("low", "score < 4")]
-    sort_qs = f"&sort=score&dir={direction}" if sort == "score" else ""
-    filt = "".join(
-        f'<a href="?band={b}{sort_qs}" class="{"active" if band==b else ""}">'
-        f"{_h(lbl)}</a>" for b, lbl in bands)
+    bands = [
+        ("all", "all"),
+        ("zero", "= 0"),
+        ("low", "< 4"),
+        ("mid", "4-8"),
+        ("high", "8-19"),
+        ("ge20", ">= 20"),
+        ("trained_spam", "Trained Spam"),
+        ("trained_ham", "Trained Ham"),
+        ("trained", "Trained *"),
+        ("untrained", "Untrained"),
+    ]
+    kinds = [("both", "both"), ("spam", "spam"), ("ham", "ham")]
+    band_filt = "".join(
+        f'<a href="?{_h(_messages_qs(band=b, kind=kind, sort=sort, direction=direction))}" '
+        f'class="{"active" if band==b else ""}">{_h(lbl)}</a>'
+        for b, lbl in bands)
+    kind_filt = "".join(
+        f'<a href="?{_h(_messages_qs(band=band, kind=k, sort=sort, direction=direction))}" '
+        f'class="{"active" if kind==k else ""}">{_h(lbl)}</a>'
+        for k, lbl in kinds)
+    pager = _pager_html(
+        total=total, page=page, pages=pages, page_size=page_size,
+        qs=_messages_qs(band=band, kind=kind, sort=sort, direction=direction),
+    )
     body = (
-        f'<div class="filterbar">{filt}</div>'
-        '<div class="card"><div class="tw"><table>'
-        "<tr><th>When</th><th>Account</th>" + score_th
+        f'<div class="filterbar"><span class="filter-label">Score</span>{band_filt}</div>'
+        f'<div class="filterbar"><span class="filter-label">Class</span>{kind_filt}</div>'
+        + pager
+        + '<div class="card"><div class="tw"><table>'
+        "<tr>" + when_th + "<th>Account</th>" + score_th
         + "<th>Action</th><th>Folder</th><th>Learn</th><th>Sender</th>"
         "<th>Subject</th></tr>"
         + (body_rows
            or '<tr><td colspan=8 class=muted>(no messages yet)</td></tr>')
-        + "</table></div></div>")
-    return render(f"Messages ({len(rows)} shown)", "messages", body)
+        + "</table></div></div>"
+        + pager)
+    title = "Messages" if total == 0 else f"Messages ({total})"
+    return render(title, "messages", body)
 
 
 def _event_table(rows) -> str:
