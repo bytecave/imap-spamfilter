@@ -1271,3 +1271,37 @@ def test_authenticated_responses_send_vary_cookie(dashboard_db, monkeypatch):
     assert login.status_code == 200
     assert login.headers["Cache-Control"] == "no-store"
 
+
+def test_rspamd_webui_link_hidden_when_unset(dashboard_db, monkeypatch):
+    monkeypatch.setattr(d, "RSPAMD_WEBUI_URL", "")
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert b"Rspamd" not in resp.data
+
+
+def test_rspamd_webui_link_shown_when_set(dashboard_db, monkeypatch):
+    monkeypatch.setattr(
+        d, "RSPAMD_WEBUI_URL", "https://spam.bytelord.net/rspamd/"
+    )
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert b'href="https://spam.bytelord.net/rspamd/"' in resp.data
+    assert b'target="_blank"' in resp.data
+    assert b'rel="noopener noreferrer"' in resp.data
+
+
+def test_rspamd_webui_link_shown_for_non_admin_viewer(dashboard_db, monkeypatch):
+    # Not admin-gated - it is a plain link out, not a lists-edit control.
+    monkeypatch.setattr(
+        d, "RSPAMD_WEBUI_URL", "https://spam.bytelord.net/rspamd/"
+    )
+    user = d._User("viewer", "plain:stable", False, frozenset({"acct-alpha"}))
+    client = _authenticated_client(monkeypatch, user)
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert b'href="https://spam.bytelord.net/rspamd/"' in resp.data
+

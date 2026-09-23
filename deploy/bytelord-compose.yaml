@@ -47,7 +47,7 @@ services:
     networks: [spamnet]
 
   spamfilter-rspamd:
-    image: rspamd/rspamd:4.1.3
+    image: rspamd/rspamd:4.2.0
     container_name: spamfilter-rspamd
     restart: unless-stopped
     logging: *log-rotate
@@ -57,6 +57,11 @@ services:
     volumes:
       - /opt/bytelord/data/imap-spamfilter/rspamd/local.d:/etc/rspamd/local.d:ro
       - /opt/bytelord/data/imap-spamfilter/rspamd/data:/var/lib/rspamd
+    ports:
+      # Rspamd's own WebUI lives on the controller port. Loopback-only;
+      # Caddy (spam.bytelord.net/rspamd/ -> 127.0.0.1:11334) puts it on
+      # NetBird. Does not weaken worker-controller.inc's password gate.
+      - "127.0.0.1:11334:11334"
     networks: [spamnet]
 
   spamfilter:
@@ -75,6 +80,11 @@ services:
       SECRETS_FILE: /run/secrets/imap-spamfilter.env
       RSPAMD_SCAN_URL: http://spamfilter-rspamd:11333/checkv2
       RSPAMD_LEARN_URL: http://spamfilter-rspamd:11334
+      # Shows a "Rspamd" link in the dashboard nav (opens in a new tab).
+      # Requires the ports: mapping above on spamfilter-rspamd plus the
+      # Caddy route in front of it. Rspamd's own login screen still gates
+      # access - this is just a link, not a proxy or auto-login.
+      RSPAMD_WEBUI_URL: https://spam.bytelord.net/rspamd/
       STATE_DIR: /state
       LOG_LEVEL: INFO
       TZ: Europe/Berlin

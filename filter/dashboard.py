@@ -69,6 +69,11 @@ CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "/app/accounts.yml"))
 RSPAMD_CONTROLLER_URL = os.environ.get(
     "RSPAMD_LEARN_URL", "http://spamfilter-rspamd:11334"
 )
+# Optional "Rspamd" nav link that opens rspamd's own built-in WebUI in a
+# new tab. Unset by default so a deployment without the controller port
+# published/reverse-proxied doesn't show a dead link. This is a plain
+# link, not a proxy - rspamd's own login screen still gates access.
+RSPAMD_WEBUI_URL = os.environ.get("RSPAMD_WEBUI_URL", "").strip()
 # Project logo, shipped into the image next to this module (see Dockerfile).
 FAVICON_PATH = Path(__file__).with_name("favicon.png")
 # Mirrors min_learns in rspamd/local.d/classifier-bayes.conf. A Bayes
@@ -1271,6 +1276,9 @@ BASE = """<!doctype html>
   <a href="/lists/domains" {% if active=='lists-domains' %}class="active"{% endif %}>Domain lists</a>
   <a href="/lists/users" {% if active=='lists-users' %}class="active"{% endif %}>User lists</a>
   {% endif %}
+  {% if rspamd_webui_url %}
+  <a href="{{ rspamd_webui_url }}" target="_blank" rel="noopener noreferrer">Rspamd &#8599;</a>
+  {% endif %}
   <span class="spacer"></span>
   {% if user %}<span class="who">{{ user }}{% if is_admin %} &middot; admin{% endif %}</span>
   <form method="post" action="/logout" class="logout">
@@ -1319,6 +1327,7 @@ def render(title, active, body_html):
     return render_template_string(
         BASE, title=title, active=active, body=body_html,
         user=session.get("user"), is_admin=_current_scope()[0],
+        rspamd_webui_url=RSPAMD_WEBUI_URL,
     )
 
 

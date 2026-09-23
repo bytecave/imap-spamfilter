@@ -83,7 +83,7 @@ gap when YAML omits the key. Per-account keys already win via merge.
 
 | Image | Pin |
 |---|---|
-| `rspamd/rspamd` | `4.1.3` |
+| `rspamd/rspamd` | `4.2.0` |
 | `mvance/unbound` | `1.22.0` |
 | `python` (Dockerfile) | `3.14.7-slim-bookworm` |
 | filter / redis | unchanged (`:latest` / `8-alpine`) |

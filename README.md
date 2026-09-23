@@ -14,7 +14,7 @@ Four containers on a shared `spamnet` Docker network:
 | ------------------ | ---------------------- | ---- |
 | spamfilter-redis   | `redis:8-alpine`       | Persists rspamd Bayes tokens, fuzzy hashes, neural weights (AOF + RDB). |
 | spamfilter-unbound | `mvance/unbound:1.22.0`| Local recursive DNS. Keeps DNSBL lookups out of shared-resolver quotas. |
-| spamfilter-rspamd  | `rspamd/rspamd:4.1.3` | Scores messages: Bayes / fuzzy / neural / RBL. No autolearn. |
+| spamfilter-rspamd  | `rspamd/rspamd:4.2.0` | Scores messages: Bayes / fuzzy / neural / RBL. No autolearn. |
 | spamfilter         | this repo (custom)     | Python service. One thread per account, IDLE on Inbox, polls Junk, scores, moves, learns. |
 
 Per-account operating modes (set in `accounts.yml`, promoted manually):
@@ -258,12 +258,19 @@ Expect:
 [your_name] connected, delimiter='.', mode=shadow
 ```
 
-The rspamd controller (port 11334) is **not** published to the host — the
-stack deliberately keeps it on the internal `spamnet` network only. To
-reach rspamd's own web UI, either add an `11334:11334` port mapping to the
-rspamd container yourself, or use the read-only dashboard (see below). The
-controller password, if you need it for a private troubleshooting session, is
-the `RSPAMD_PASSWORD` value in the protected file:
+The rspamd controller (port 11334) is **not** published to the host by
+default — the stack deliberately keeps it on the internal `spamnet` network
+only. Rspamd ships its own built-in web UI (Bayes stats, symbol
+history/search, Selectors, Errors) on that same controller port. To reach
+it, either publish `11334` yourself (see the commented `ports:` block on
+`spamfilter-rspamd` in `docker-compose.yml` — bind to loopback and put a
+reverse proxy in front, same as the dashboard) and set `RSPAMD_WEBUI_URL` so
+the dashboard nav shows a link to it (opens in a new tab), or use the
+read-only dashboard alone (see below). Either way, rspamd's own login
+screen still gates access with the controller password — publishing the
+port does not weaken that. The controller password, if you need it for a
+private troubleshooting session, is the `RSPAMD_PASSWORD` value in the
+protected file:
 
 ```bash
 grep '^RSPAMD_PASSWORD=' \
@@ -376,6 +383,12 @@ ByteLord paths and loopback-only dashboard publication remain unchanged.
 Dashboard is on `127.0.0.1:8099` only. Add users with
 `docker exec -it spamfilter python dashboard.py`; restart `spamfilter` after
 creating the first user so the listener starts.
+
+On ByteLord, `spamfilter-rspamd`'s controller (11334, the Rspamd WebUI) is
+also published to `127.0.0.1:11334`, and `RSPAMD_WEBUI_URL` points at the
+NetBird-private Caddy route in front of it (see `deploy/bytelord-compose.yaml`),
+so the dashboard nav shows a "Rspamd" link that opens the Rspamd WebUI in
+a new tab.
 
 ---
 
@@ -726,6 +739,18 @@ Two env-var alternatives also work, if you prefer config over a file:
 the legacy single-user `DASHBOARD_USER` + `DASHBOARD_PASSWORD`
 (plaintext, admin). All three sources merge. Prefer the hashed-users
 file over the legacy plaintext env pair.
+
+### Rspamd WebUI link
+
+Set `RSPAMD_WEBUI_URL` (e.g. `https://spam.bytelord.net/rspamd/`) to show
+a "Rspamd" link in the dashboard nav that opens Rspamd's own built-in web
+UI in a new tab. Left unset (the default), the link is hidden — nothing
+changes. This only makes sense once the controller port (11334) is
+actually reachable at that URL (published to the host and, if remote,
+proxied); see the "Known limitations" / VPS install notes above. The
+dashboard does not proxy or pre-authenticate the WebUI — it is a plain
+link, and Rspamd's own password screen (`RSPAMD_PASSWORD`) still gates
+access exactly as it does today.
 
 The session signing secret is generated once into
 `state/dashboard_secret` (mode 600) and reused across restarts.
