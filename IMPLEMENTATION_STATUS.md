@@ -1,6 +1,6 @@
 # Implementation status — imap-spamfilter (ByteLord)
 
-**Last updated:** 2026-09-22  
+**Last updated:** 2026-09-23  
 **Audience:** brand-new agent sessions (Cursor / Claude Code / Codex) with no prior chat memory.  
 **Companion:** [`SESSION_HANDOFF.md`](SESSION_HANDOFF.md) (short “where we left off”; this file is the durable product/deploy/agent map).
 
@@ -8,13 +8,19 @@
 **Remote:** `github.com:bytecave/imap-spamfilter.git` (branch `main`)  
 **Upstream fork of:** marcelverdult/imap-spamfilter  
 
-**Read this first** before exploring the tree. Then follow **Agent onboarding** below.
+**Mandatory at session start (with [`SESSION_HANDOFF.md`](SESSION_HANDOFF.md)):**
+
+1. Read **this entire file**.
+2. Read **`SESSION_HANDOFF.md`** (current “continue here”).
+3. **Supermemory is mandatory:** `supermemory_search` with `container=project` (and `supermemory_list` for recent items) before answering prior-work, scoring, or “what’s next” questions. Search seeds and capture rules are in **Agent onboarding §3**. Do not skip because this file already summarizes the topic.
+
+Then follow **Agent onboarding** below.
 
 ---
 
 ## Snapshot in one paragraph
 
-Self-hosted IMAP spam filter (Python + Rspamd + Redis + Unbound) on ByteLord. Mailboxes authenticate through sibling **`email-oauth2-proxy`** (XOAUTH2 to M365); this filter speaks plain IMAP `LOGIN` to the proxy. Allow/block lists + one shared Bayes notebook (`defaults.bayes_user: bytelord`) are live. **All accounts remain `mode: shadow`** (scan/log; no auto Inbox→Junk), but Train-* and Allowlist/Blocklist drains still MOVE. **2026-09-21:** dashboard moved to **8099** / `https://spam.bytelord.net` (NetBird); Messages got Untrained + score-band filters; Inbox scores already-`\Seen` mail; list hits are scored; provider-Junk can be scored and (in **move** mode) rescued; Allow/Block drags learn + route. **2026-09-22:** Rspamd bumped `4.1.3` → `4.2.0` and **live** (both `spamfilter-rspamd` and `spamfilter` recreated, verified: `rspamd --version` 4.2.0, a real `/checkv2` scan, all 10 accounts reconnected cleanly); dashboard gained an optional **`RSPAMD_WEBUI_URL`** nav link that opens Rspamd's own built-in WebUI in a new tab; Caddy routes `spam.bytelord.net/rspamd/` → the Rspamd controller, verified end-to-end (`/rspamd` → 301 → `/rspamd/` → 200; dashboard `/` unaffected). Working tree is **clean on `origin/main`** as of this update (see Git section for the exact commits). Full filter pytest: **337 passed** (2026-09-22, includes 3 new WebUI-link tests). **Next preferred step: full code + security review by Claude Code or Codex** (see What’s next).
+Self-hosted IMAP spam filter (Python + Rspamd + Redis + Unbound) on ByteLord. Mailboxes authenticate through sibling **`email-oauth2-proxy`** (XOAUTH2 to M365); this filter speaks plain IMAP `LOGIN` to the proxy. Allow/block lists + one shared Bayes notebook (`defaults.bayes_user: bytelord`) are live. **All accounts remain `mode: shadow`** (scan/log; no auto Inbox→Junk), but Train-* and Allowlist/Blocklist drains still MOVE. **2026-09-21:** dashboard on **8099** / `https://spam.bytelord.net`; Messages Untrained + score-band filters; Inbox scores `\Seen` mail; list hits scored; provider-Junk score/rescue; Allow/Block learn+route. **2026-09-22:** Rspamd **4.2.0** live; `RSPAMD_WEBUI_URL` → `spam.bytelord.net/rspamd/`. **2026-09-23:** root cause of Google/Amazon ~18–22 false rejects documented — IMAP second-pass auth recheck vs M365 edge `Authentication-Results`; remediation buckets A/B/C locked (see findings section); **leaving shadow blocked on A+B**; **`BROKEN_HEADERS` investigation (C) still pending**. Full filter pytest: **337 passed** (2026-09-22). **Next preferred step: IMAP-path auth remediation (A+B)**, then bucket-C investigation, then shadow→flag→move only when scores look sane.
 
 ---
 
@@ -75,7 +81,7 @@ Live config is still **shadow**. `learn_grace_seconds: 30` (was 15). **`accounts
 | Item | Value |
 |---|---|
 | `origin/main` HEAD | `git log -1` — pushed 2026-09-22 (this file's own commit SHA isn't listed below to avoid a self-reference that goes stale on every amend) |
-| Working tree | **Clean**, pushed 2026-09-22 |
+| Working tree | Check `git status`. As of the 2026-09-23 handoff refresh, `SESSION_HANDOFF.md` and this file may be dirty (findings + next steps) until the operator asks to commit. |
 | Branch | `main` tracking `origin/main` |
 
 **2026-09-22 commits (newest last):**
@@ -237,13 +243,15 @@ Notable defaults (verify in file — operators edit live YAML):
 
 ## Agent onboarding (new session checklist)
 
-### 0. Global ByteLord rules
+### 0. Global ByteLord rules + mandatory reads
 
-Read **`/home/bytecave/.claude/CLAUDE.md`** at session start (Cursor user rule requires it). It covers:
+**Before any other work in this repo:**
 
-- Agent Mail (required on ByteLord git repos)
-- Subagent limits (≤2; main session commits)
-- Graphify-first research + **`graphify query "…" --dfs --budget 3333`**
+1. Read **`IMPLEMENTATION_STATUS.md`** (this file) in full.
+2. Read **`SESSION_HANDOFF.md`** (where the last session stopped).
+3. Call **`supermemory_search`** (`container=project`) and skim **`supermemory_list`**. Skipping Supermemory because the docs “already say it” is a rule violation.
+
+Also read **`/home/bytecave/.claude/CLAUDE.md`** (Cursor user rule). It covers Agent Mail, subagent limits (≤2; main session commits), graphify-first research (`graphify query "…" --dfs --budget 3333`), and mandatory Supermemory recall/capture. Machine-local copies: `~/.cursor/rules/graphify.mdc` and `~/.cursor/rules/supermemory.mdc`. There is **no** project `.cursor/rules/graphify.mdc` (removed 2026-09-23).
 
 ### 1. Agent Mail (MCP `user-mcp-agent-mail`)
 
@@ -274,20 +282,20 @@ graphify path "<A>" "<B>"
 graphify update .
 ```
 
-Prefer `explain` / `path` for specific symbols; use `query --dfs --budget 3333` for broad architecture. Project rule: `.cursor/rules/graphify.mdc`. Graph artifacts under `graphify-out/` are **gitignored**. If `graphify-out/needs_update` exists, refresh before trusting doc-derived graph context (see CLAUDE.md).
+Prefer `explain` / `path` for specific symbols; use `query --dfs --budget 3333` for broad architecture. Graph artifacts under `graphify-out/` are **gitignored**. If `graphify-out/needs_update` exists, refresh before trusting doc-derived graph context (see CLAUDE.md).
 
-### 3. Supermemory (MCP `plugin-cursor-supermemory-supermemory`)
+### 3. Supermemory (mandatory — MCP `plugin-cursor-supermemory-supermemory`)
 
-Use **project** container for this codebase; **user** for cross-project preferences.
+**Must** search before prior-work / scoring / policy answers. Use **`container=project`** for this codebase; **`user`** only for cross-project preferences.
 
-Useful search seeds:
+Search seeds (run at least the first):
 
-- `imap-spamfilter dashboard 8099 Untrained`
-- `provider junk rescue allow block learn`
-- `compose SPAMFILTER_UID 1001`
-- `LEARN unlearnable`
+- `IMAP-path remediation buckets A B C mx.microsoft.com BROKEN_HEADERS`
+- `Amazon UID 235843 DKIM body hash Authentication-Results`
+- `imap-spamfilter shadow dashboard 8099 provider junk`
+- `compose dual-file SPAMFILTER_UID 1001 RSPAMD 4.2.0`
 
-After hard bugs or policy decisions, `supermemory_add` with `container: project`.
+After a live deploy, a scoring-policy decision, or a root-cause finding, **`supermemory_add`** with `container=project` before ending the turn. Never store secrets or `accounts.yml` contents.
 
 ### 4. Tests (no host pytest — use Docker)
 
@@ -297,7 +305,7 @@ docker run --rm -v /opt/bytelord/projects/imap-spamfilter:/src -w /src/filter \
   "pip install -q -r requirements.txt pytest==8.4.2 && python -m pytest -q --tb=short"
 ```
 
-**Last known:** **334 passed** (2026-09-21).
+**Last known:** **337 passed** (2026-09-22).
 
 ### 5. Rafter / secrets
 
@@ -309,15 +317,39 @@ Only when the user asks. No force-push, no `--no-verify`, no secrets. Main sessi
 
 ---
 
+## 2026-09-23 findings — IMAP rescan vs edge auth (blocker for leaving shadow)
+
+**Problem:** Legit Google Security alerts and Amazon transactional mail score ~18–22 (`reject`) in shadow. That is **not** “M365 headers are ugly” and **not** proof Google/Amazon are spam. Proofpoint/M365 mark the same mail good because they score at **SMTP ingress**. imap-spamfilter **IMAP-fetches the stored copy** and re-runs rspamd `/checkv2` with **no SMTP `Ip`/`Helo`**.
+
+**Evidence (live):**
+- Amazon UID `235843` (`auto-confirm@amazon.com`): M365 `Authentication-Results: mx.microsoft.com` → `dkim=pass`, `dmarc=pass`, `spf=pass`. Rspamd recheck → `R_DKIM_REJECT`, `BLACKLIST_DMARC=+6`, etc. **DKIM body hash of IMAP `BODY.PEEK[]` does not match** the `bh=` in the amazon.com signature — stored body ≠ wire body Microsoft verified. Stripping `X-MS-*`/ARC/AR headers does **not** clear the fails.
+- Google alerts: same class of auth-recheck + IMAP-path noise; often Gmail CAF forward into M365 as well.
+- Among 40 recent scores ≥15: all had `BROKEN_HEADERS` in the top 5; most were ≥60% auth/header symbols.
+
+**Do not trust Microsoft’s spam/junk decision** (SCL / Junk folder) — that is why this project exists. **Do trust Microsoft’s edge SPF/DKIM/DMARC verdict** when stamped as `Authentication-Results` with authserv-id **`mx.microsoft.com`**. Spammers cannot make *that* check return pass without actually passing SPF/DKIM/DMARC (or sending via an authorized path). Residual risks are **not** “spoof MS crypto,” they are: (1) **implementation** — only honor AR from `mx.microsoft.com`, prefer the M365-stamped/outermost header (ignore forged AR from other authserv-ids; be careful if duplicate `mx.microsoft.com` headers exist); (2) **spam that correctly passes auth** (BEC / compromised mailbox) — AR pass is correct; Bayes/URLs/fuzzy/neural/lists must still catch it.
+
+**Remediation buckets (locked product direction 2026-09-23):**
+
+| Bucket | Symbols | Action |
+|---|---|---|
+| **A — IMAP noise** | `HFILTER_HOSTNAME_UNKNOWN`, `RDNS_NONE` | Safe to zero/downweight. No client IP on this architecture → nearly all mail pays the same penalty; removing it does not favor spam over ham. |
+| **B — Auth recheck** | `R_DKIM_REJECT`, `R_SPF_FAIL`, `DMARC_POLICY_*`, `BLACKLIST_DMARC`, related | **Suppress failure weight only when** trusted `mx.microsoft.com` AR says the corresponding check **pass**. If AR says fail / missing / untrusted authserv → **keep** failure symbols. Do **not** blanket-disable auth scoring. Prefer rspamd mechanisms (`trusted_authserv_id`, ARC `whitelisted_signers_map` + `adjust_dmarc` for `microsoft.com`) over crude global score cuts. |
+| **C — Content / MIME** | Bayes, URLs, fuzzy, neural, lists, **`BROKEN_HEADERS`** | **Keep.** Do **not** globally disable `BROKEN_HEADERS` yet — spammers abuse broken MIME too. **Investigation pending:** why rspamd sets `broken_headers` / `MIME_TRACE` part `2:~` on otherwise-clean Amazon/Google MIME (name is misleading; it is a MIME-parser flag, not “bad X-MS headers”). |
+
+Ham training **cannot** cancel A/B auth-header symbols. Leaving shadow before A+B (and a decision on C) would auto-Junk a lot of good mail.
+
+---
+
 ## What’s next (suggested order)
 
-1. **Full code + security review of this project by Claude Code or Codex** (primary next step). Scope should include `filter/filter.py`, `filter/dashboard.py`, list/Bayes paths, provider-Junk rescue, Allow/Block learn+MOVE, state permissions, compose/secrets handling, and dashboard auth. Produce findings with severity + recommended fixes; do **not** auto-promote accounts out of shadow based on the review alone.
-2. **Rspamd 4.2.0 / WebUI-link deploy is done** (2026-09-22) — both containers recreated and verified, `spam.bytelord.net/rspamd/` loads, committed and pushed. Watch scores in shadow for a day before touching thresholds/modes given the new 4.2.0 symbols.
-3. **Stay in shadow** until scores and rescues look sane in the dashboard; then promote carefully `flag` → `move` when the operator asks.
-4. **IMAP-path symbol remediation** for M365 rewrite false positives (`BROKEN_HEADERS`, `BLACKLIST_DMARC`, SPF/DKIM after rewrite) via rspamd `local.d` weights; use `explain_score.py` before/after — worth re-checking once 4.2.0's `R_DKIM_ALIGNED` split is live, it may shift or explain some of these.
-5. **CR-016 / supply-chain** (accepted risk): lock+hash deps, image digests, GHA SHA pins — when prioritized.
-6. More M365 mailboxes only with Exchange grant + proxy section + YAML. No generic IMAP for `bytelord.net` unless asked.
-7. Optional polish called out in CR disposition (fingerprint caps, SQLite CHECKs, etc.) — not release blockers.
+1. **IMAP-path auth remediation (buckets A+B)** — **primary blocker for leaving shadow.** Implement selective policy above in rspamd `local.d` (and/or a small filter-side helper only if rspamd config cannot express it). Validate with `explain_score.py` / Messages `score_detail` on known Google + Amazon UIDs **and** on known spam (auth-fail and auth-pass phishing if available). Success = legit mail drops under threshold without giving auth-fail spam a free pass; content symbols still score.
+2. **Bucket C pending: investigate `BROKEN_HEADERS`** on Amazon/Google samples (MIME structure / `MIME_TRACE`), then decide narrow exception vs leave scored. **Do not** zero it in the same change as A+B without that investigation.
+3. **Stay in `shadow`** until A+B are live and dashboard scores look sane; then promote carefully `flag` → `move` when the operator asks. Do **not** auto-promote from a code review alone.
+4. **Full code + security review** by Claude Code or Codex (`filter.py`, `dashboard.py`, list/Bayes, provider-Junk rescue, Allow/Block learn+MOVE, state permissions, compose/secrets, dashboard auth). Findings with severity + fixes; still no auto-promote out of shadow.
+5. **Rspamd 4.2.0 / WebUI-link deploy is done** (2026-09-22). Re-check scores after A+B; 4.2.0’s `R_DKIM_ALIGNED` may interact with B.
+6. **CR-016 / supply-chain** (accepted risk): lock+hash deps, image digests, GHA SHA pins — when prioritized.
+7. More M365 mailboxes only with Exchange grant + proxy section + YAML. No generic IMAP for `bytelord.net` unless asked.
+8. Optional polish from CR disposition (fingerprint caps, SQLite CHECKs, etc.) — not release blockers.
 
 ---
 
@@ -325,8 +357,8 @@ Only when the user asks. No force-push, no `--no-verify`, no secrets. Main sessi
 
 | File | Why |
 |---|---|
-| `IMPLEMENTATION_STATUS.md` | This file — start here |
-| `SESSION_HANDOFF.md` | Short continuity note (may lag; prefer this file for 2026-09-21+) |
+| `IMPLEMENTATION_STATUS.md` | **Mandatory** — this file |
+| `SESSION_HANDOFF.md` | **Mandatory** — current continue-here note (2026-09-23) |
 | `README.md` | Operator docs (modes, folders, dashboard, safe-mode) |
 | `CHATGPT_CODE_REVIEW.md` | Prior CR findings + disposition |
 | `design-arch/allow_block_sliced_plan.md` | List/Bayes product decisions (reopenable) |
@@ -337,8 +369,8 @@ Only when the user asks. No force-push, no `--no-verify`, no secrets. Main sessi
 | `filter/bootstrap_train.py` / `explain_score.py` | Ops tools |
 | `filter/test_*.py` | Regression suite |
 | `deploy/bytelord-compose.yaml` | Compose source of truth |
-| `.cursor/rules/graphify.mdc` | Graphify explore rule |
-| `/home/bytecave/.claude/CLAUDE.md` | ByteLord-wide agent protocol |
+| `/home/bytecave/.claude/CLAUDE.md` | ByteLord-wide agent protocol (graphify + supermemory mandatory) |
+| `/home/bytecave/.cursor/rules/*.mdc` | Machine-local Cursor globals (graphify, supermemory) |
 
 Sibling project: `/opt/bytelord/projects/email-oauth2-proxy` (OAuth / M365 IMAP bridge).
 
