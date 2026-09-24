@@ -277,6 +277,7 @@ RSPAMD_FILES=(
   fuzzy_check.conf
   neural.conf
   rbl.conf
+  hfilter_group.conf
 )
 BUNDLE_STAGE=""
 cleanup_stage() {
