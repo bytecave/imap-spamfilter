@@ -588,7 +588,7 @@ in `accounts.yml` trains its own Bayes namespace keyed by its `user`.
 
 | Key | Default | Notes |
 | --- | --- | --- |
-| `bayes_user` | unset | HTTP `Rcpt` on scan (and `Delivered-To` on learn); overrides the per-recipient default |
+| `bayes_user` | unset | Shared Bayes key. An address is HTTP `Rcpt` on scan. A bare name is `Delivered-To` on scan and learn (real mailbox stays in `Rcpt`) |
 
 Use `bayes_user` to pool training across mailboxes. Accounts that omit
 the field stay isolated under their own IMAP user. Allow/block lists
@@ -892,11 +892,20 @@ Restore is the reverse: stop the four containers, extract the tar over
   or `Helo` to `/checkv2`. RBL `from` lookups, SPF, and DMARC envelope
   alignment are degraded; they rely on `Received:` chains in the message
   plus Bayes/fuzzy/neural. HTTP `From` is the message From (not the IMAP
-  recipient). `Rcpt` remains the Bayes identity (`bayes_user` or the
-  account user). After M365 delivery, symbols like `BROKEN_HEADERS`,
-  `BLACKLIST_DMARC`, `R_SPF_FAIL`, and `R_DKIM_REJECT` can dominate the
-  score even when Bayes is silent — Amazon transactional mail is a common
-  example. To dump the symbol table for one message:
+  recipient). A `bayes_user` that is an address is HTTP `Rcpt`. A bare
+  name such as `bytelord` is prepended as `Delivered-To` (the same prefix
+  learning uses) and `Rcpt` stays the mailbox address, so rspamd does not
+  treat the Bayes key as a broken recipient. `HFILTER_HOSTNAME_UNKNOWN` and `RDNS_NONE` are weighted
+  0 (`rspamd/local.d/hfilter_group.conf`) because there is no client IP.
+  Failure symbols `R_DKIM_REJECT`, `R_SPF_FAIL`, `DMARC_POLICY_*`, and
+  `BLACKLIST_DMARC` are zeroed only from the outermost
+  `Authentication-Results` header, and only when that header is Microsoft's
+  stamp: authserv-id `mx.microsoft.com`, or no authserv-id but `compauth=`
+  in that same header plus an outermost `Received-SPF` receiver of
+  `protection.outlook.com`, and that method is a clean pass. A later
+  header, any other authserv, or a fail/softfail keeps the rspamd weight.
+  `BROKEN_HEADERS` is still scored.
+  To dump the symbol table for one message:
 
   ```bash
   docker exec spamfilter python explain_score.py rich_bytecave --uid 234134

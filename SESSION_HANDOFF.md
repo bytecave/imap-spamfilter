@@ -1,6 +1,6 @@
 # Session handoff — imap-spamfilter (ByteLord VPS)
 
-**Last updated:** 2026-09-23  
+**Last updated:** 2026-09-24  
 **Repo:** `/opt/bytelord/projects/imap-spamfilter`  
 **Remote:** `github.com:bytecave/imap-spamfilter.git` (branch `main`)  
 **Upstream fork of:** marcelverdult/imap-spamfilter  
@@ -53,19 +53,27 @@ Ham training **cannot** cancel these auth/header symbols. **All accounts stay `m
 
 ---
 
+## Where A+B landed (2026-09-24)
+
+Buckets A+B are implemented and live. Do not redo them.
+
+- **A:** `rspamd/local.d/hfilter_group.conf` sets `HFILTER_HOSTNAME_UNKNOWN` and `RDNS_NONE` weight to 0. Copied to the live mount `/opt/bytelord/data/imap-spamfilter/rspamd/local.d/` and rspamd reloaded. `configdump` shows weight 0.0.
+- **B:** rspamd 4.2 `trusted_authserv_id` only reuses Authentication-Results while **signing ARC**. It does not suppress inbound failure symbols. `apply_m365_auth_trust` in `filter/filter.py` zeros `R_DKIM_REJECT`, `R_SPF_FAIL`, `DMARC_POLICY_*`, and `BLACKLIST_DMARC` only from the **outermost** `Authentication-Results` header, when that header is Microsoft's stamp: authserv-id `mx.microsoft.com`, **or** no authserv-id but `compauth=` in that same header plus outermost `Received-SPF` receiver `protection.outlook.com`, and that method is a clean pass. A later header does not count. `spamfilter` was rebuilt and recreated. Redis was not restarted. Google payroll mail (rich_eizenhoefer UID 140596) uses the no-authserv form.
+- **Checked with `explain_score.py`:** Amazon UID **235843** 21.95 → **7.95** (auth symbols 0, `BROKEN_HEADERS` still +8). Bank of America UID **236012** 17.9 → **9.40**. Amazon UID **235888** has no `mx.microsoft.com` authserv-id, so failures stayed and the score stayed **17.45**. Office alert UID **236011** (`dkim=none`) kept `DMARC_POLICY_REJECT` and `R_SPF_FAIL`. Google UID **235853** is no longer in the mailbox. Google UID **235918** stays **15.00** because its AR has no `mx.microsoft.com` authserv-id (it starts at `spf=pass`); that is the locked rule, not a miss.
+- Pytest: **343 passed** before the Rcpt change; `test_rspamd_scan.py` is **17 passed** after it. All accounts stay `mode: shadow`.
+
+## Where the +8 went (2026-09-24)
+
+`BROKEN_HEADERS` on the Amazon and Google samples was not broken MIME. HTTP `Rcpt: bytelord` is not an address, and rspamd sets the flag for that. The symbol is still on. A bare `bayes_user` is now prepended as `Delivered-To` (same as learn) and `Rcpt` is the mailbox address. An address-shaped `bayes_user` is still sent as `Rcpt`.
+
+- Payroll UID **140596**: stored 16.6 → **3.65**. No `BROKEN_HEADERS`. Auth still suppressed. `BAYES_SPAM` +0.55, so the `bytelord` notebook is still consulted.
+- Amazon UID **235843**: 21.95 → **−2.05** (`BAYES_HAM` −3). Auth still suppressed.
+- A message with a non-header line and a trailing MIME epilogue, scanned with `Rcpt` set to a real address, still gets `BROKEN_HEADERS` **+8** (rspamc score 10.40).
+
 ## Next steps (do these, in order)
 
-Full wording and evidence live in `IMPLEMENTATION_STATUS.md` → “2026-09-23 findings” and “What’s next.”
-
-1. **Implement buckets A+B** in `rspamd/local.d` (small filter helper only if rspamd config cannot express B). Validate with `docker exec spamfilter python explain_score.py …` and Messages `score_detail` on:
-   - Google Security alert (rich_bytecave Inbox UID **235853** is one sample)
-   - Amazon UID **235843**
-   - known **auth-fail** spam (must still score high)
-   - if available, auth-pass phishing/BEC (content symbols must still fire)
-   Success: legit samples drop under the reject threshold (~15) without a free pass for auth-fail spam.
-2. **Investigate bucket C `BROKEN_HEADERS`** on those same samples (`MIME_TRACE`, MIME structure). Decide narrow exception vs leave scored. **Do not** zero it in the same change as A+B without that investigation.
-3. **Stay in shadow** until A+B are live and dashboard scores look sane. Promote `flag` → `move` only when the operator asks.
-4. Later: full code/security review (Claude Code or Codex); CR-016 supply chain; more mailboxes only when asked.
+1. **Stay in shadow** until dashboard scores look sane. Promote `flag` → `move` only when the operator asks.
+2. Later: full code/security review (Claude Code or Codex); CR-016 supply chain; more mailboxes only when asked.
 
 ---
 
