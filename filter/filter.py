@@ -2321,23 +2321,32 @@ def rspamd_scan_detail(
 ) -> ScanResult | None:
     """POST to /checkv2. Return score + symbol breakdown, or None on error.
 
-    `bayes_user`, if given, is used as the `Rcpt` header so rspamd's
-    per-user classifier (with `users_enabled = true`) looks up Bayes data
-    under that identity instead of the message recipient. Multiple accounts
-    using the same `bayes_user` share a Bayes namespace.
+    `bayes_user`, when it contains `@`, is sent as the HTTP `Rcpt`
+    header so rspamd's per-user classifier looks up that identity.
+    A bare name such as `bytelord` is not an email address: putting it
+    in `Rcpt` makes rspamd set BROKEN_HEADERS. In that case `Rcpt` is
+    the real recipient, and the same `Delivered-To` prefix used when
+    learning selects the shared notebook.
 
     HTTP `From` is the message From address (rspamd treats it as
     envelope-from for SPF/DMARC). It is omitted when From is empty.
     IMAP has no SMTP client IP — do not send `Ip` or `Helo`.
+    Do not send HTTP `User`: rspamd treats that as an authenticated
+    submission and skips DKIM/DMARC failure symbols.
     """
     try:
-        rcpt = bayes_user or recipient
+        posted = raw
+        if bayes_user and "@" not in bayes_user:
+            rcpt = recipient
+            posted = f"Delivered-To: {bayes_user}\r\n".encode() + raw
+        else:
+            rcpt = bayes_user or recipient
         headers: dict[str, str] = {"Rcpt": rcpt}
         _msgid, _subject, sender = parse_envelope(raw)
         if sender:
             headers["From"] = sender
         resp = requests.post(
-            RSPAMD_SCAN_URL, data=raw, headers=headers, timeout=HTTP_TIMEOUT
+            RSPAMD_SCAN_URL, data=posted, headers=headers, timeout=HTTP_TIMEOUT
         )
         resp.raise_for_status()
         data = resp.json()

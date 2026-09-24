@@ -1,4 +1,4 @@
-"""Rspamd /checkv2 metadata: real From, Rcpt as Bayes identity, no fake IP.
+"""Rspamd /checkv2 metadata: real From, address Rcpt, no fake IP.
 
 Run: STATE_DIR=/tmp/x python -m pytest test_rspamd_scan.py
 """
@@ -63,10 +63,20 @@ def test_scan_from_is_message_from_not_recipient(monkeypatch):
     )
     assert score == 1.5
     assert captured["headers"]["From"] == "sender@example.com"
-    assert captured["headers"]["Rcpt"] == "bayes-pool"
+    assert captured["headers"]["Rcpt"] == "u@example.com"
+    assert captured["data"].startswith(b"Delivered-To: bayes-pool\r\n")
     assert "Ip" not in captured["headers"]
     assert "Helo" not in captured["headers"]
     assert "User" not in captured["headers"]
+
+
+def test_address_bayes_user_stays_in_rcpt(monkeypatch):
+    captured = _capture_post(monkeypatch)
+    f.rspamd_scan(
+        RAW_WITH_FROM, "u@example.com", 100.0, bayes_user="pool@example.com"
+    )
+    assert captured["headers"]["Rcpt"] == "pool@example.com"
+    assert not captured["data"].startswith(b"Delivered-To:")
 
 
 def test_scan_omits_from_when_missing(monkeypatch):
@@ -101,7 +111,8 @@ def test_scan_detail_sorts_and_keeps_bayes_zero(monkeypatch):
     assert result is not None
     assert result.score == 24.9
     assert result.action == "reject"
-    assert captured["headers"]["Rcpt"] == "bytelord"
+    assert captured["headers"]["Rcpt"] == "u@example.com"
+    assert captured["data"].startswith(b"Delivered-To: bytelord\r\n")
     names = [s.name for s in result.symbols]
     assert names[0] == "BROKEN_HEADERS"
     assert names[1] == "BLACKLIST_DMARC"
