@@ -328,6 +328,128 @@ def format_top_symbols_line(
     return " ".join(parts) if parts else "(no symbols)"
 
 
+# Bucket B. Only the outermost Authentication-Results header counts.
+# A later header, even one that says mx.microsoft.com, is ignored.
+_M365_AUTHSERV_ID = "mx.microsoft.com"
+_M365_SPF_RECEIVER = "protection.outlook.com"
+_AR_AUTHSERV_RE = re.compile(r"^\s*([^\s;]+)")
+_AR_BARE_METHOD_RE = re.compile(r"^\s*(?:spf|dkim|dmarc)\s*=", re.IGNORECASE)
+_AR_COMPAUTH_RE = re.compile(r"(?:^|[;\s])compauth\s*=", re.IGNORECASE)
+_AR_METHOD_RE = re.compile(
+    r"(?:^|[;\s])(dkim|spf|dmarc)\s*=\s*([A-Za-z]+)", re.IGNORECASE
+)
+_RECEIVED_SPF_RECEIVER_RE = re.compile(
+    r"receiver\s*=\s*([^\s;]+)", re.IGNORECASE
+)
+_AR_HARD_FAIL = frozenset(
+    {"fail", "softfail", "permerror", "temperror", "reject", "quarantine"}
+)
+
+
+def _header_text(value: Any) -> str:
+    text = value if isinstance(value, str) else str(value)
+    return text.replace("\r", " ").replace("\n", " ")
+
+
+def _method_passes(header: str) -> dict[str, bool]:
+    seen: dict[str, set[str]] = {"dkim": set(), "spf": set(), "dmarc": set()}
+    for method, result in _AR_METHOD_RE.findall(header):
+        seen[method.casefold()].add(result.casefold())
+    return {
+        method: bool(results)
+        and "pass" in results
+        and not (results & _AR_HARD_FAIL)
+        for method, results in seen.items()
+    }
+
+
+def _outermost_received_spf_is_outlook(msg: email.message.Message) -> bool:
+    headers = msg.get_all("Received-SPF") or []
+    if not headers:
+        return False
+    first = _header_text(headers[0])
+    match = _RECEIVED_SPF_RECEIVER_RE.search(first)
+    return bool(match and match.group(1).casefold() == _M365_SPF_RECEIVER)
+
+
+def _m365_method_passes(raw: bytes) -> tuple[dict[str, bool], str]:
+    """Outermost M365 AR: (method -> clean pass, trust label).
+
+    Trust the first Authentication-Results header only, and only when it is
+    Microsoft's stamp: authserv-id ``mx.microsoft.com``, or no authserv-id
+    but ``compauth=`` in that same header plus an outermost Received-SPF
+    whose receiver is ``protection.outlook.com``. A method counts as pass
+    only when it has at least one ``pass`` and no hard failure.
+    """
+    empty: dict[str, bool] = {}
+    try:
+        msg = email.message_from_bytes(raw, policy=email.policy.compat32)
+    except Exception:
+        return empty, ""
+    headers = msg.get_all("Authentication-Results") or []
+    if not headers:
+        return empty, ""
+    chosen = _header_text(headers[0])
+    authserv = _AR_AUTHSERV_RE.match(chosen)
+    token = authserv.group(1).casefold() if authserv else ""
+    if token == _M365_AUTHSERV_ID:
+        return _method_passes(chosen), _M365_AUTHSERV_ID
+    if (
+        _AR_BARE_METHOD_RE.match(chosen)
+        and _AR_COMPAUTH_RE.search(chosen)
+        and _outermost_received_spf_is_outlook(msg)
+    ):
+        return _method_passes(chosen), _M365_SPF_RECEIVER
+    return empty, ""
+
+
+def _bucket_b_method(symbol_name: str) -> str | None:
+    if symbol_name == "R_DKIM_REJECT":
+        return "dkim"
+    if symbol_name == "R_SPF_FAIL":
+        return "spf"
+    if symbol_name == "BLACKLIST_DMARC" or symbol_name.startswith("DMARC_POLICY_"):
+        return "dmarc"
+    return None
+
+
+def apply_m365_auth_trust(raw: bytes, result: ScanResult) -> ScanResult:
+    """Drop failure weight when the outermost M365 AR recorded a clean pass.
+
+    Rspamd 4.2 ``trusted_authserv_id`` only reuses Authentication-Results
+    while signing ARC; it does not suppress inbound DKIM/SPF/DMARC symbols.
+    ``BROKEN_HEADERS`` and every other symbol are left alone. Auth-fail,
+    a missing header, a later header, or any other authserv keeps the
+    original failure weight.
+    """
+    passes, label = _m365_method_passes(raw)
+    if not any(passes.values()):
+        return result
+    delta = 0.0
+    adjusted: list[ScanSymbol] = []
+    changed = False
+    for sym in result.symbols:
+        method = _bucket_b_method(sym.name)
+        if method and passes.get(method) and sym.score > 0:
+            delta += sym.score
+            note = "suppressed: " + label + " " + method + "=pass"
+            desc = sym.description
+            if note not in desc:
+                desc = (desc + "; " + note).strip("; ") if desc else note
+            adjusted.append(ScanSymbol(sym.name, 0.0, desc[:120]))
+            changed = True
+        else:
+            adjusted.append(sym)
+    if not changed:
+        return result
+    adjusted.sort(key=lambda s: (-abs(s.score), s.name))
+    return ScanResult(
+        score=result.score - delta,
+        symbols=tuple(adjusted),
+        action=result.action,
+    )
+
+
 @dataclass
 class Account:
     name: str
@@ -2237,10 +2359,13 @@ def rspamd_scan_detail(
         action = data.get("action")
         if not isinstance(action, str):
             action = None
-        return ScanResult(
-            score=score,
-            symbols=parse_scan_symbols(data),
-            action=action,
+        return apply_m365_auth_trust(
+            raw,
+            ScanResult(
+                score=score,
+                symbols=parse_scan_symbols(data),
+                action=action,
+            ),
         )
     except (requests.RequestException, TypeError, ValueError, OverflowError):
         return None

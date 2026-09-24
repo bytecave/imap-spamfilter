@@ -114,6 +114,165 @@ def test_scan_detail_sorts_and_keeps_bayes_zero(monkeypatch):
     assert "BROKEN_HEADERS=+8.00" in f.format_top_symbols_line(result.symbols)
 
 
+def _raw_with_ar(*headers: str) -> bytes:
+    blob = "".join(h if h.endswith("\r\n") else h + "\r\n" for h in headers)
+    blob += "From: Sender Name <sender@example.com>\r\n\r\nbody\r\n"
+    return blob.encode()
+
+
+_FAIL_SYMBOLS = {
+    "R_DKIM_REJECT": {"score": 1.0, "description": "DKIM reject"},
+    "R_SPF_FAIL": {"score": 1.0, "description": "SPF fail"},
+    "DMARC_POLICY_REJECT": {"score": 2.0, "description": "DMARC reject"},
+    "BLACKLIST_DMARC": {"score": 6.0, "description": "DMARC blacklist"},
+    "BROKEN_HEADERS": {"score": 8.0, "description": "broken mime"},
+    "HFILTER_HOSTNAME_UNKNOWN": {"score": 2.5, "description": "no hostname"},
+}
+
+
+def test_m365_pass_suppresses_only_matching_auth_failures(monkeypatch):
+    raw = _raw_with_ar(
+        "Authentication-Results: mx.microsoft.com; dkim=pass; spf=pass; dmarc=pass"
+    )
+    _capture_post(monkeypatch, score=20.5, symbols=_FAIL_SYMBOLS, action="reject")
+    result = f.rspamd_scan_detail(raw, "u@example.com", 100.0)
+    assert result is not None
+    by_name = {s.name: s for s in result.symbols}
+    assert by_name["R_DKIM_REJECT"].score == 0.0
+    assert by_name["R_SPF_FAIL"].score == 0.0
+    assert by_name["DMARC_POLICY_REJECT"].score == 0.0
+    assert by_name["BLACKLIST_DMARC"].score == 0.0
+    assert "mx.microsoft.com dkim=pass" in by_name["R_DKIM_REJECT"].description
+    assert by_name["BROKEN_HEADERS"].score == 8.0
+    assert by_name["HFILTER_HOSTNAME_UNKNOWN"].score == 2.5
+    assert result.score == 20.5 - 1.0 - 1.0 - 2.0 - 6.0
+
+
+def test_m365_partial_pass_keeps_failed_method(monkeypatch):
+    raw = _raw_with_ar(
+        "Authentication-Results: mx.microsoft.com; dkim=fail; spf=pass; dmarc=pass"
+    )
+    _capture_post(monkeypatch, score=10.0, symbols=_FAIL_SYMBOLS)
+    result = f.rspamd_scan_detail(raw, "u@example.com", 100.0)
+    assert result is not None
+    by_name = {s.name: s for s in result.symbols}
+    assert by_name["R_DKIM_REJECT"].score == 1.0
+    assert by_name["R_SPF_FAIL"].score == 0.0
+    assert by_name["DMARC_POLICY_REJECT"].score == 0.0
+    assert result.score == 10.0 - 1.0 - 2.0 - 6.0
+
+
+def test_untrusted_authserv_keeps_failures(monkeypatch):
+    raw = _raw_with_ar(
+        "Authentication-Results: evil.example; dkim=pass; spf=pass; dmarc=pass"
+    )
+    _capture_post(monkeypatch, score=18.5, symbols=_FAIL_SYMBOLS)
+    result = f.rspamd_scan_detail(raw, "u@example.com", 100.0)
+    assert result is not None
+    assert result.score == 18.5
+    assert {s.name: s.score for s in result.symbols}["R_DKIM_REJECT"] == 1.0
+
+
+def test_outermost_m365_header_wins_over_later_copy(monkeypatch):
+    raw = _raw_with_ar(
+        "Authentication-Results: mx.microsoft.com; dkim=fail; spf=fail; dmarc=fail",
+        "Authentication-Results: mx.microsoft.com; dkim=pass; spf=pass; dmarc=pass",
+    )
+    _capture_post(monkeypatch, score=10.0, symbols=_FAIL_SYMBOLS)
+    result = f.rspamd_scan_detail(raw, "u@example.com", 100.0)
+    assert result is not None
+    assert result.score == 10.0
+    assert all(s.score > 0 for s in result.symbols if s.name == "R_DKIM_REJECT")
+
+
+def test_missing_ar_keeps_failures(monkeypatch):
+    _capture_post(monkeypatch, score=10.0, symbols=_FAIL_SYMBOLS)
+    result = f.rspamd_scan_detail(RAW_WITH_FROM, "u@example.com", 100.0)
+    assert result is not None
+    assert result.score == 10.0
+
+
+_GOOGLE_AR = (
+    "Authentication-Results: spf=pass (sender IP is 2607:f8b0:4864:20::b149) "
+    "smtp.mailfrom=google.com; dkim=pass (signature was verified) "
+    "header.d=google.com; dmarc=pass action=none header.from=google.com; "
+    "compauth=pass reason=100"
+)
+_OUTLOOK_SPF = (
+    "Received-SPF: Pass (protection.outlook.com: domain of google.com designates "
+    "2607:f8b0:4864:20::b149 as permitted sender) receiver=protection.outlook.com; "
+    "client-ip=2607:f8b0:4864:20::b149; helo=mail-yx1-xb149.google.com"
+)
+
+
+def test_outlook_compauth_stamp_suppresses_without_authserv_id(monkeypatch):
+    raw = _raw_with_ar(_GOOGLE_AR, _OUTLOOK_SPF)
+    _capture_post(monkeypatch, score=12.1, symbols=_FAIL_SYMBOLS, action="reject")
+    result = f.rspamd_scan_detail(raw, "u@example.com", 100.0)
+    assert result is not None
+    by_name = {s.name: s for s in result.symbols}
+    assert by_name["R_DKIM_REJECT"].score == 0.0
+    assert by_name["DMARC_POLICY_REJECT"].score == 0.0
+    assert by_name["R_SPF_FAIL"].score == 0.0
+    assert "protection.outlook.com dkim=pass" in by_name["R_DKIM_REJECT"].description
+    assert by_name["BROKEN_HEADERS"].score == 8.0
+    assert result.score == 12.1 - 1.0 - 1.0 - 2.0 - 6.0
+
+
+def test_compauth_without_outlook_received_spf_keeps_failures(monkeypatch):
+    raw = _raw_with_ar(_GOOGLE_AR)
+    _capture_post(monkeypatch, score=12.1, symbols=_FAIL_SYMBOLS)
+    result = f.rspamd_scan_detail(raw, "u@example.com", 100.0)
+    assert result is not None
+    assert result.score == 12.1
+
+
+def test_compauth_with_other_spf_receiver_keeps_failures(monkeypatch):
+    raw = _raw_with_ar(
+        _GOOGLE_AR,
+        "Received-SPF: Pass (google.com) receiver=mail.google.com; client-ip=1.2.3.4",
+    )
+    _capture_post(monkeypatch, score=12.1, symbols=_FAIL_SYMBOLS)
+    result = f.rspamd_scan_detail(raw, "u@example.com", 100.0)
+    assert result is not None
+    assert result.score == 12.1
+
+
+def test_later_compauth_header_does_not_override_outermost(monkeypatch):
+    raw = _raw_with_ar(
+        "Authentication-Results: evil.example; dkim=fail; spf=fail; dmarc=fail",
+        _GOOGLE_AR,
+        _OUTLOOK_SPF,
+    )
+    _capture_post(monkeypatch, score=12.1, symbols=_FAIL_SYMBOLS)
+    result = f.rspamd_scan_detail(raw, "u@example.com", 100.0)
+    assert result is not None
+    assert result.score == 12.1
+
+
+def test_later_mx_microsoft_header_does_not_override_outermost(monkeypatch):
+    raw = _raw_with_ar(
+        "Authentication-Results: evil.example; dkim=fail; spf=fail; dmarc=fail",
+        "Authentication-Results: mx.microsoft.com; dkim=pass; spf=pass; dmarc=pass",
+    )
+    _capture_post(monkeypatch, score=10.0, symbols=_FAIL_SYMBOLS)
+    result = f.rspamd_scan_detail(raw, "u@example.com", 100.0)
+    assert result is not None
+    assert result.score == 10.0
+
+
+def test_mixed_dkim_pass_and_fail_is_not_a_clean_pass(monkeypatch):
+    raw = _raw_with_ar(
+        "Authentication-Results: mx.microsoft.com; dkim=pass header.d=a.com; dkim=fail header.d=b.com; spf=softfail"
+    )
+    _capture_post(monkeypatch, score=2.0, symbols=_FAIL_SYMBOLS)
+    result = f.rspamd_scan_detail(raw, "u@example.com", 100.0)
+    assert result is not None
+    by_name = {s.name: s for s in result.symbols}
+    assert by_name["R_DKIM_REJECT"].score == 1.0
+    assert by_name["R_SPF_FAIL"].score == 1.0
+
+
 def test_parse_envelope_decodes_rfc2047_subject():
     raw = (
         b"From: a@example.com\r\n"
