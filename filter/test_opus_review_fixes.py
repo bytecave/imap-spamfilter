@@ -14,7 +14,13 @@ import pytest  # noqa: E402
 
 import filter as f  # noqa: E402
 from test_fetch_discipline import CapIMAP  # noqa: E402
-from test_shadow_mode import FMAP, _all_existing, _mk_account, _mk_db  # noqa: E402
+from test_shadow_mode import (  # noqa: E402
+    FMAP,
+    RecordingIMAP,
+    _all_existing,
+    _mk_account,
+    _mk_db,
+)
 
 LOG = logging.getLogger("test")
 
@@ -346,3 +352,64 @@ def test_rescue_respects_internaldate_age(tmp_path, monkeypatch, age, rescued):
     else:
         assert client.moved == []
         assert "old_internaldate" in _events(db, "rescue_skipped")[0]
+
+
+# ----- OPUS-CR-009: Junk retention keeps what it must not trash -------------
+
+
+def _sweep_junk(db, acc, uids):
+    client = RecordingIMAP(existing=_all_existing(), search_uids=uids)
+    f._sweep_folder_to_trash(
+        client, db, LOG, acc, FMAP,
+        src=FMAP["junk"], days=10, exclude_learned_ham=True, tag="junk_retention",
+    )
+    return [u for batch, dest in client.moved if dest == "Trash" for u in batch]
+
+
+def test_junk_retention_waits_for_poll_junk_bookmark(tmp_path):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="flag")
+    assert _sweep_junk(db, acc, [5, 6]) == []  # no bookmark yet
+    with db.tx():
+        db.set_scan_bookmark("Junk", 1, 5)
+    assert _sweep_junk(db, acc, [5, 6]) == [5]  # 6 not yet seen by poll_junk
+
+
+def test_junk_retention_skips_pending_allowlisted_and_rescue_rows(tmp_path):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="flag")
+    with db.tx():
+        db.set_scan_bookmark("Junk", 1, 20)
+        for uid in (11, 12, 13, 14, 15):
+            db.upsert_imap_message("Junk", 1, uid, message_id=f"r{uid}@x")
+        db.update_imap_message("Junk", 1, 11, pending_learn="spam", pending_learn_at=1)
+        db.update_imap_message("Junk", 1, 12, our_action="allowlisted")
+        db.update_imap_message("Junk", 1, 13, our_action="pending_rescue")
+        db.update_imap_message("Junk", 1, 14, learned_as="ham")
+    assert _sweep_junk(db, acc, [11, 12, 13, 14, 15, 16]) == [15, 16]
+
+
+def test_poll_junk_marks_allowlisted_provider_junk(tmp_path, monkeypatch):
+    db, acc = _allowlisted_junk_setup(tmp_path, mode="flag")
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(12.0, (), None),
+    )
+    raw = _raw(4, sender="ap@vendor.example")
+    client = CapIMAP(existing=_all_existing(), uids=[4], bodies={4: raw})
+    f.poll_junk(client, db, LOG, acc, FMAP)
+    assert db.get_imap_message("Junk", 1, 4)["our_action"] == "allowlisted"
+    assert client.moved == []  # flag mode never rescues
+    assert _sweep_junk(db, acc, [4]) == []
+
+
+def test_canceled_rescue_does_not_stay_pending(tmp_path):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="move", move_grace_seconds=0, threshold=8.0)
+    with db.tx():
+        db.upsert_imap_message("Junk", 1, 4, message_id="m4@example.com")
+        db.update_imap_message("Junk", 1, 4, our_score=9.0, our_action="pending_rescue")
+        db.add_pending_move(1, 4, "m4@example.com", folder="Junk")
+    client = CapIMAP(existing=_all_existing(), uids=[4], bodies={4: _raw(4)})
+    f.execute_due_rescues(client, db, LOG, acc, FMAP)
+    assert client.moved == []
+    assert db.get_imap_message("Junk", 1, 4)["our_action"] is None

@@ -33,3 +33,12 @@ Tests: `test_user_rejunk_of_rescued_message_is_learned`, `test_filter_move_of_re
 ### OPUS-CR-008 — Rescue no longer bounces the user's own old mail back out of Junk (Medium)
 `_rescue_blocker()` now also refuses a rescue when the Junk message's INTERNALDATE is older than `RESCUE_MAX_AGE_S` (3 days). IMAP MOVE keeps INTERNALDATE, so an old message that just appeared in Junk was moved there by the user (from Archive, or pre-install Inbox mail with no fingerprint), not delivered by Microsoft. It gets a `rescue_skipped old_internaldate` event instead of a MOVE to Inbox. Fresh provider deliveries and messages with no INTERNALDATE behave as before. The age check applies when the rescue is queued, not when it runs, so a long `move_grace_seconds` cannot cancel valid rescues.
 Tests: `test_rescue_respects_internaldate_age[90 days → no rescue | 1 hour → rescue]`; existing rescue tests (no INTERNALDATE) unchanged.
+
+### OPUS-CR-009 — Junk retention keeps pending, unseen, and allowlisted mail (Medium)
+`_sweep_folder_to_trash` now, for Junk:
+- only trashes UIDs at or below the Junk scan bookmark, and skips the Junk sweep until `poll_junk` has set that bookmark, so a message the user just dragged in is learned before it can age out;
+- skips rows with `pending_learn` (in every swept folder);
+- skips Junk rows marked `allowlisted` or `pending_rescue`.
+
+It also applies the 500-per-pass cap *after* these exclusions. `poll_junk` marks allow-hit provider-Junk as `allowlisted` (unless the rescue is blocked as a spoof or old mail), so in `flag` mode R&J allowlisted mail in Junk is no longer sent to Trash after `junk_retention_days`. `execute_due_rescues` clears `pending_rescue` when it cancels on score.
+Tests: `test_junk_retention_waits_for_poll_junk_bookmark`, `test_junk_retention_skips_pending_allowlisted_and_rescue_rows`, `test_poll_junk_marks_allowlisted_provider_junk`, `test_canceled_rescue_does_not_stay_pending`; the existing flag/move retention tests still pass.

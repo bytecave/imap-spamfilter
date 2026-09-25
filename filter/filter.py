@@ -3976,6 +3976,7 @@ def execute_due_rescues(
         if not allow and (score is None or score >= acc.threshold):
             with db.tx():
                 db.drop_pending_move(junk, uv, uid)
+                db.update_imap_message(junk, uv, uid, our_action=None)
                 db.log_event(
                     "pending_rescue_canceled", r["message_id"],
                     detail=f"score={_score_log(score)}",
@@ -4203,6 +4204,14 @@ def poll_junk(
                         with db.tx():
                             db.log_event("rescue_skipped", msgid, detail=detail)
                     else:
+                        if hit is not None:
+                            # Keeps allowlisted provider-Junk out of retention
+                            # in flag mode; move mode overwrites it with
+                            # pending_rescue below.
+                            with db.tx():
+                                db.update_imap_message(
+                                    junk, uv, uid, our_action="allowlisted",
+                                )
                         _queue_junk_rescue(
                             db, log, acc, junk, uv, uid, msgid, score,
                         )
@@ -4753,6 +4762,11 @@ def retention_sweep(
         )
 
 
+# Junk rows retention must leave alone: allowlisted provider-Junk (kept for
+# the operator or a later move-mode rescue) and rescues still in flight.
+_RETENTION_KEEP_JUNK_ACTIONS = frozenset({"allowlisted", "pending_rescue"})
+
+
 def _sweep_folder_to_trash(
     client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fmap: dict[str, str],
     *, src: str, days: int, exclude_learned_ham: bool, tag: str,
@@ -4786,12 +4800,31 @@ def _sweep_folder_to_trash(
         return
     if not uids:
         return
-    uids = uids[:500]
+    # Junk retention only touches UIDs poll_junk has already processed, so a
+    # message the user just dragged into Junk is learned before it can age
+    # out (its INTERNALDATE may already be past the cutoff).
+    junk_bookmark: int | None = None
+    is_junk = src == fmap["junk"]
+    if is_junk:
+        junk_bookmark = db.get_scan_bookmark(src, uv)
+        if junk_bookmark is None:
+            log.info(
+                "retention %s: skipped until poll_junk initializes %s", tag, src,
+            )
+            return
     to_move: list[int] = []
-    for uid in uids:
-        if exclude_learned_ham:
-            row = db.get_imap_message(src, uv, uid)
-            if row is not None and row["learned_as"] == "ham":
+    for uid in sorted(uids):
+        if len(to_move) >= 500:
+            break
+        if junk_bookmark is not None and uid > junk_bookmark:
+            continue
+        row = db.get_imap_message(src, uv, uid)
+        if row is not None:
+            if row["pending_learn"]:
+                continue  # a user move is waiting out learn_grace_seconds
+            if exclude_learned_ham and row["learned_as"] == "ham":
+                continue
+            if is_junk and row["our_action"] in _RETENTION_KEEP_JUNK_ACTIONS:
                 continue
         to_move.append(uid)
     if not to_move:
