@@ -42,3 +42,7 @@ Tests: `test_rescue_respects_internaldate_age[90 days → no rescue | 1 hour →
 
 It also applies the 500-per-pass cap *after* these exclusions. `poll_junk` marks allow-hit provider-Junk as `allowlisted` (unless the rescue is blocked as a spoof or old mail), so in `flag` mode R&J allowlisted mail in Junk is no longer sent to Trash after `junk_retention_days`. `execute_due_rescues` clears `pending_rescue` when it cancels on score.
 Tests: `test_junk_retention_waits_for_poll_junk_bookmark`, `test_junk_retention_skips_pending_allowlisted_and_rescue_rows`, `test_poll_junk_marks_allowlisted_provider_junk`, `test_canceled_rescue_does_not_stay_pending`; the existing flag/move retention tests still pass.
+
+### OPUS-CR-010 — Mail without a Message-ID is filtered like any other (Medium)
+`scan_inbox` and `poll_junk` no longer skip messages without a Message-ID. The `no_message_id` audit event is still logged (once, when the UID is first seen), but the message is now stored (`message_id` NULL), scored, list-matched, flagged or queued for move, and learned from on user moves. `pending_move.message_id` is `NOT NULL`, so it stores `""`, and the due-move/rescue executors turn that back into NULL for events. This supersedes the "no Message-ID → permanent skip" rows in slices 3 and 5, which dated from when Message-ID was the primary key.
+Tests: `test_inbox_without_message_id_is_scored_and_routed[flag|move]`, `test_user_move_without_message_id_is_learned`.

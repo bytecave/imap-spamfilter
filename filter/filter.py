@@ -3552,14 +3552,15 @@ def _scan_inbox_uid_batch(
                 break
             flags = _kw(data.get(b"FLAGS", ()))
             msgid, subject, sender = parse_envelope(raw)
-            if not msgid:
-                log.debug("inbox uid %s: no Message-ID, skipping", uid)
-                db.log_event("no_message_id", detail=f"uid={uid}")
-                last_terminal = uid
-                continue
 
             sha = body_sha256(raw)
             prior = db.get_imap_message(fmap["inbox"], uv, uid)
+            if not msgid and prior is None:
+                # Message-ID is metadata, not identity (slice 5): audit it,
+                # but score and route the message like any other so spam
+                # cannot bypass the filter by omitting the header.
+                log.debug("inbox uid %s: no Message-ID", uid)
+                db.log_event("no_message_id", detail=f"uid={uid}")
             siblings = _other_sha256_rows(db, sha, fmap["inbox"], uv, uid)
             with db.tx():
                 db.upsert_imap_message(
@@ -3723,7 +3724,7 @@ def _scan_inbox_uid_batch(
                     # move_grace_seconds whether or not the flag is set.
                     with db.tx():
                         db.add_pending_move(
-                            uv, uid, msgid, folder=fmap["inbox"]
+                            uv, uid, msgid or "", folder=fmap["inbox"]
                         )
                         db.update_imap_message(
                             fmap["inbox"], uv, uid, our_action="pending_move"
@@ -3806,7 +3807,7 @@ def execute_due_moves(client: IMAPClient, db: Db, log: logging.Logger, acc: Acco
         if missing:
             with db.tx():
                 db.drop_pending_move(fmap["inbox"], uv, uid)
-                db.log_event("move_skipped_missing", r["message_id"])
+                db.log_event("move_skipped_missing", (r["message_id"] or None))
             continue
         raw = _body_bytes(data)
         if oversize or not raw:
@@ -3815,7 +3816,7 @@ def execute_due_moves(client: IMAPClient, db: Db, log: logging.Logger, acc: Acco
                 uid, oversize,
             )
             db.log_event(
-                "move_skipped_unvalidated", r["message_id"],
+                "move_skipped_unvalidated", (r["message_id"] or None),
                 detail=f"uid={uid} oversize={oversize}",
             )
             continue
@@ -3827,9 +3828,9 @@ def execute_due_moves(client: IMAPClient, db: Db, log: logging.Logger, acc: Acco
                 db.update_imap_message(
                     fmap["inbox"], uv, uid, our_action="allowlisted"
                 )
-                db.log_event("allowlisted", r["message_id"], detail=hit_detail)
+                db.log_event("allowlisted", (r["message_id"] or None), detail=hit_detail)
                 db.log_event(
-                    "pending_move_canceled", r["message_id"], detail=hit_detail
+                    "pending_move_canceled", (r["message_id"] or None), detail=hit_detail
                 )
             continue
         to_move.append(uid)
@@ -3866,7 +3867,7 @@ def execute_due_moves(client: IMAPClient, db: Db, log: logging.Logger, acc: Acco
                 moved_to_junk_at=now,
             )
             db.record_rate("move")
-            db.log_event("moved_to_junk", r["message_id"])
+            db.log_event("moved_to_junk", (r["message_id"] or None))
     log.info("moved %d message(s) inbox->junk", len(to_move))
 
 
@@ -3937,7 +3938,7 @@ def execute_due_rescues(
         if missing:
             with db.tx():
                 db.drop_pending_move(junk, uv, uid)
-                db.log_event("rescue_skipped_missing", r["message_id"])
+                db.log_event("rescue_skipped_missing", (r["message_id"] or None))
             continue
         raw = _body_bytes(data)
         if oversize or not raw:
@@ -3946,7 +3947,7 @@ def execute_due_rescues(
                 uid, oversize,
             )
             db.log_event(
-                "rescue_skipped_unvalidated", r["message_id"],
+                "rescue_skipped_unvalidated", (r["message_id"] or None),
                 detail=f"uid={uid} oversize={oversize}",
             )
             continue
@@ -3956,7 +3957,7 @@ def execute_due_rescues(
                 db.drop_pending_move(junk, uv, uid)
                 db.update_imap_message(junk, uv, uid, our_action=None)
                 db.log_event(
-                    "pending_rescue_canceled", r["message_id"], detail=blocked,
+                    "pending_rescue_canceled", (r["message_id"] or None), detail=blocked,
                 )
             continue
         hit = classify_list_hit(acc, db, iter_list_header_addrs(raw))
@@ -3965,9 +3966,9 @@ def execute_due_rescues(
             with db.tx():
                 db.drop_pending_move(junk, uv, uid)
                 db.update_imap_message(junk, uv, uid, our_action="blocklisted")
-                db.log_event("blocklisted", r["message_id"], detail=hit_detail)
+                db.log_event("blocklisted", (r["message_id"] or None), detail=hit_detail)
                 db.log_event(
-                    "pending_rescue_canceled", r["message_id"], detail=hit_detail,
+                    "pending_rescue_canceled", (r["message_id"] or None), detail=hit_detail,
                 )
             continue
         row = db.get_imap_message(junk, uv, uid)
@@ -3978,7 +3979,7 @@ def execute_due_rescues(
                 db.drop_pending_move(junk, uv, uid)
                 db.update_imap_message(junk, uv, uid, our_action=None)
                 db.log_event(
-                    "pending_rescue_canceled", r["message_id"],
+                    "pending_rescue_canceled", (r["message_id"] or None),
                     detail=f"score={_score_log(score)}",
                 )
             continue
@@ -4009,7 +4010,7 @@ def execute_due_rescues(
                 our_action="rescued_to_inbox",
             )
             db.record_rate("move")
-            db.log_event("rescued_to_inbox", r["message_id"])
+            db.log_event("rescued_to_inbox", (r["message_id"] or None))
     log.info("rescued %d message(s) junk->inbox", len(to_move))
 
 
@@ -4075,9 +4076,6 @@ def poll_junk(
                     break
                 flags = _kw(data.get(b"FLAGS", ()))
                 msgid, subject, sender = parse_envelope(raw)
-                if not msgid:
-                    last_terminal = uid
-                    continue
                 sha = body_sha256(raw)
                 prior = db.get_imap_message(junk, uv, uid)
                 siblings = _other_sha256_rows(db, sha, junk, uv, uid)

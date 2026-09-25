@@ -413,3 +413,50 @@ def test_canceled_rescue_does_not_stay_pending(tmp_path):
     f.execute_due_rescues(client, db, LOG, acc, FMAP)
     assert client.moved == []
     assert db.get_imap_message("Junk", 1, 4)["our_action"] is None
+
+
+# ----- OPUS-CR-010: no Message-ID is not a filter bypass --------------------
+
+
+RAW_NO_MSGID = (
+    b"From: spammer@example.net\r\nTo: u@example.com\r\nSubject: win\r\n"
+    b"\r\nno message id here\r\n"
+)
+
+
+@pytest.mark.parametrize("mode", ["flag", "move"])
+def test_inbox_without_message_id_is_scored_and_routed(tmp_path, monkeypatch, mode):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode=mode, move_grace_seconds=0)
+    with db.tx():
+        db.set_scan_bookmark("INBOX", 1, 0)
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(12.0, (), None),
+    )
+    client = CapIMAP(existing=_all_existing(), uids=[1], bodies={1: RAW_NO_MSGID})
+    f.scan_inbox(client, db, LOG, acc, FMAP, f.AccountState())
+    row = db.get_imap_message("INBOX", 1, 1)
+    assert row["message_id"] is None
+    assert row["our_score"] == 12.0
+    assert db.get_scan_bookmark("INBOX", 1) == 1
+    assert "no_message_id" in _events(db)
+    if mode == "flag":
+        assert client.flags_added == [(1, [b"\\Flagged"])]
+    else:
+        f.execute_due_moves(client, db, LOG, acc, FMAP)
+        assert client.moved == [([1], "Junk")]
+        assert db.get_imap_message("INBOX", 1, 1)["our_action"] == "moved_to_junk"
+
+
+def test_user_move_without_message_id_is_learned(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="shadow")
+    with db.tx():
+        db.set_scan_bookmark("Junk", 1, 3)
+        db.upsert_imap_message(
+            "INBOX", 1, 40, message_id=None,
+            body_sha256=f.body_sha256(RAW_NO_MSGID),
+        )
+    client = CapIMAP(existing=_all_existing(), uids=[4], bodies={4: RAW_NO_MSGID})
+    f.poll_junk(client, db, LOG, acc, FMAP)
+    assert db.get_imap_message("Junk", 1, 4)["pending_learn"] == "spam"
