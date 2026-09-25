@@ -1,6 +1,6 @@
 # Implementation status — imap-spamfilter (ByteLord)
 
-**Last updated:** 2026-09-24 (evening)  
+**Last updated:** 2026-09-25 (Claude Opus 5.5 extra code review + fixes on branch `claude/blissful-dijkstra-qzxvln`)  
 **Audience:** brand-new agent sessions (Cursor / Claude Code / Codex) with no prior chat memory.  
 **Companion:** [`SESSION_HANDOFF.md`](SESSION_HANDOFF.md) (short “where we left off”; this file is the durable product/deploy/agent map).
 
@@ -20,7 +20,7 @@ Then follow **Agent onboarding** below.
 
 ## Snapshot in one paragraph
 
-Self-hosted IMAP spam filter (Python + Rspamd + Redis + Unbound) on ByteLord. Mailboxes authenticate through sibling **`email-oauth2-proxy`** (XOAUTH2 to M365); this filter speaks plain IMAP `LOGIN` to the proxy. Allow/block lists + one shared Bayes notebook (`defaults.bayes_user: bytelord`) are live. **All accounts remain `mode: shadow`**. **2026-09-22:** Rspamd **4.2.0** live; dashboard WebUI link. **2026-09-24:** IMAP-path buckets **A+B+C live**. A zeros `HFILTER_HOSTNAME_UNKNOWN`/`RDNS_NONE`. B (`apply_m365_auth_trust`) zeros DKIM/SPF/DMARC/`BLACKLIST_DMARC` only from the outermost Microsoft AR (`mx.microsoft.com` or `compauth=` + `protection.outlook.com` Received-SPF). C: bare `bytelord` is `Delivered-To` on scan; mailbox is HTTP `Rcpt` (was the false `BROKEN_HEADERS` +8). Shared Bayes wiped and rebuilt from Trained-* (spam≈205, ham≈2410 after re-feed; Redis bak `dump.rdb.bak-20260924`). Dashboard Trained-* rows bulk-rescored into SQLite (~2897); Inbox/top Junk **not** bulk-rescored. Auth-passed content spam can still score low (operator will Train-Spam). Chelsea mistaken ham learn moved back to Trained-Spam. **Next: stay in shadow; promote only when asked.**
+Self-hosted IMAP spam filter (Python + Rspamd + Redis + Unbound) on ByteLord. Mailboxes authenticate through sibling **`email-oauth2-proxy`** (XOAUTH2 to M365); this filter speaks plain IMAP `LOGIN` to the proxy. Allow/block lists + one shared Bayes notebook (`defaults.bayes_user: bytelord`) are live. **All accounts remain `mode: shadow`**. **2026-09-22:** Rspamd **4.2.0** live; dashboard WebUI link. **2026-09-24:** IMAP-path buckets **A+B+C live**. A zeros `HFILTER_HOSTNAME_UNKNOWN`/`RDNS_NONE`. B (`apply_m365_auth_trust`) zeros DKIM/SPF/DMARC/`BLACKLIST_DMARC` only from the outermost Microsoft AR (`mx.microsoft.com` or `compauth=` + `protection.outlook.com` Received-SPF). C: bare `bytelord` is `Delivered-To` on scan; mailbox is HTTP `Rcpt` (was the false `BROKEN_HEADERS` +8). Shared Bayes wiped and rebuilt from Trained-* (spam≈205, ham≈2410 after re-feed; Redis bak `dump.rdb.bak-20260924`). Dashboard Trained-* rows bulk-rescored into SQLite (~2897); Inbox/top Junk **not** bulk-rescored. Auth-passed content spam can still score low (operator will Train-Spam). Chelsea mistaken ham learn moved back to Trained-Spam. **2026-09-25:** full code/security review done ([`CLAUDE_OPUS5.5_EXTRA_CODE_REVIEW.md`](CLAUDE_OPUS5.5_EXTRA_CODE_REVIEW.md), 28 findings). 15 fixes are committed on branch `claude/blissful-dijkstra-qzxvln` ([`CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md`](CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md)); **not merged, not deployed**. Human testing (see SESSION_HANDOFF) and a decision on neural autotrain (CR-004) are pending. **Next: test/merge the review branch; stay in shadow; promote only when asked.**
 
 ---
 
@@ -82,7 +82,32 @@ Live config is still **shadow**. `learn_grace_seconds: 30` (was 15). **`accounts
 |---|---|
 | `origin/main` HEAD | `git log -1` — pushed 2026-09-22 (this file's own commit SHA isn't listed below to avoid a self-reference that goes stale on every amend) |
 | Working tree | Check `git status`. As of the 2026-09-23 handoff refresh, `SESSION_HANDOFF.md` and this file may be dirty (findings + next steps) until the operator asks to commit. |
-| Branch | `main` tracking `origin/main` |
+| Branch | `main` tracking `origin/main`. **Review branch:** `claude/blissful-dijkstra-qzxvln` = `main` (`ff9461e`) + the 2026-09-25 review/fix commits below; not merged yet. |
+
+**2026-09-25 commits on `claude/blissful-dijkstra-qzxvln` (oldest first; not on `main`):**
+
+| SHA | Summary |
+|---|---|
+| `842cad0` | Add Claude Opus 5.5 extra code review findings |
+| `44819b3` | CR-001: require a byte-identical copy before expunging a list-folder drag |
+| `2dd08fc` | CR-002: give up on poison messages instead of halting scans forever |
+| `bb83eac` | CR-003: never rescue a Microsoft-flagged spoof out of Junk |
+| `35de033` | CR-005: let waitress admit full dashboard list saves |
+| `4862aab` | CR-006: select the learn-time Bayes notebook on every scan |
+| `64edd2d` | CR-007: learn spam when a user re-junks a rescued message |
+| `a3c291d` | CR-008: do not rescue mail the user moved into Junk long after it arrived |
+| `eb2c27e` | CR-009: keep unseen, pending, and allowlisted Junk out of retention |
+| `931d4fd` | CR-010: score and route mail that has no Message-ID |
+| `ba83356` | CR-011: begin SQLite write transactions IMMEDIATE |
+| `df419f6` | CR-012: reset reconnect backoff only after a successful pass |
+| `953efab` | CR-013: check the hourly learn budget before fetching bodies |
+| `4eebc57` | CR-014: do not re-move Train-* copies the server left after MOVE |
+| `bf5f051` | CR-016: log pending_move_canceled only for real cancellations |
+| `9120008` | CR-017: render bootstrap secret configs under umask 077 |
+| `38e757c` | CR-015: cover the core learning, safe-mode, and move-quota paths |
+| `292642d` | Document review fixes and correct README drift |
+| `0d4573d` | CR-002 refinement: require two healthy probes before give-up |
+| later | FIXED/handoff/status documentation commits |
 
 **2026-09-22 commits (newest last):**
 
@@ -114,6 +139,18 @@ Live config is still **shadow**. `learn_grace_seconds: 30` (was 15). **`accounts
 - ChatGPT CR **IMAP-CR-001…019** dispositioned in [`CHATGPT_CODE_REVIEW.md`](CHATGPT_CODE_REVIEW.md); valid fixes shipped (CR-002 ignore; CR-016 accepted risk).
 - Phase 2 Bayes wipe + `bootstrap_train.py --all-trained` (ops history).
 - Contradictory learn skip (`learn_skipped_list`) for allow+spam / block+ham.
+
+### 2026-09-25 session (Claude Opus 5.5 extra code review — cloud session, no VPS access)
+
+1. **Review:** read every doc in order (upstream README, the 27-document chronological archive, ChatGPT CR, README, this file, and the handoff), then every source/config file. Findings are traced requirement → architecture → acceptance → implementation → tests in [`CLAUDE_OPUS5.5_EXTRA_CODE_REVIEW.md`](CLAUDE_OPUS5.5_EXTRA_CODE_REVIEW.md). Key claims were reproduced with scripts, or checked against rspamd 4.2.0, waitress 3.0.2, and imapclient 3.1.0 source.
+2. **High findings.**
+   - **CR-001:** list-drain de-dup could **delete** a dragged message on a Message-ID collision.
+   - **CR-002:** one poison message **permanently halted** Inbox scanning / Junk learning for its account.
+   - **CR-003:** provider-Junk rescue could pull a **Microsoft-flagged spoof** of an allowlisted address back into Inbox.
+   - **CR-004:** rspamd **neural autotrains on unadjusted scores** and on every re-scan, which undercuts bucket B (operator decision; not changed).
+3. **Fixed (15, each with tests):** CR-001, 002, 003 (rescue side), 005, 006, 007, 008, 009, 010, 011, 012, 013, 014 (Train-* side), 016, 017. Also new coverage for core learning paths (CR-015) and README corrections. Details and deferrals are in [`CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md`](CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md).
+4. **Tests:** 349 → **397 passed**; `filter.py` branch coverage 72% → 78%.
+5. **Not deployed.** Filter image rebuild needed after merge. No Rspamd/Redis config or data changed.
 
 ### 2026-09-21 session (this status refresh)
 
@@ -151,7 +188,10 @@ Full plan at `~/.cursor/plans/rspamd_4.2.0_upgrade_and_webui_link_18e83c16.plan.
 | Precedence | user address → user `@host` → domain address → domain `@host`; allow wins only on true tie |
 | Allowlist drag | Upsert/flip + **ham learn** + MOVE → **Inbox** |
 | Blocklist drag | Upsert/flip + **spam learn** + MOVE → **Junk** |
-| Provider Junk | Score; no spam-learn from “landed in Junk”; rescue under threshold or allowlisted (**move** only); never train on rescue |
+| Provider Junk | Score; no spam-learn from “landed in Junk”; rescue under threshold or allowlisted (**move** only); never train on rescue. *(review branch)* Rescue is refused for Microsoft-flagged spoofs (trusted outermost AR `compauth=fail`, or `dmarc=fail` without compauth) and for mail whose INTERNALDATE is > 3 days old (user-moved, not delivered). A user re-junking a rescued message **is** learned as spam. |
+| Junk retention *(review branch)* | Only Junk UIDs `poll_junk` has processed; skips pending learns and allowlisted / in-flight-rescue rows (protects allowlisted provider-Junk in `flag` mode) |
+| Poison message *(review branch)* | After 5 failed passes over ≥ 10 min, and only when a synthetic probe proves rspamd healthy on two consecutive passes, the UID is `scan_giveup` (left in place) and scanning moves on. An rspamd outage still halts. |
+| No Message-ID *(review branch)* | Filtered normally by IMAP identity; `no_message_id` audit event only |
 | Contradictory Train/move | allow+spam / block+ham → `learn_skipped_list` |
 | Caps | `max_list_per_run=100`, `max_list_entries=1000` |
 
@@ -305,7 +345,7 @@ docker run --rm -v /opt/bytelord/projects/imap-spamfilter:/src -w /src/filter \
   "pip install -q -r requirements.txt pytest==8.4.2 && python -m pytest -q --tb=short"
 ```
 
-**Last known:** **343 passed** (2026-09-24).
+**Last known:** **397 passed** (2026-09-25, review branch `claude/blissful-dijkstra-qzxvln`; `main` was 349).
 
 ### 5. Rafter / secrets
 
@@ -342,13 +382,15 @@ Ham training **cannot** cancel A/B auth-header symbols when they still fire (unt
 
 ## What’s next (suggested order)
 
-1. **Stay in `shadow`.** Watch scores after the A/B/C + Bayes rebuild. Operator will Train-Spam auth-passed content spam (5Tool-style cold pitch, Chelsea, iPic). Promote carefully `flag` → `move` only when asked. Do **not** auto-promote from a code review alone. Do **not** wipe Bayes again unless asked.
-2. **A/B/C + Bayes rebuild + Trained-* dashboard rescore are done** (2026-09-24). Inbox/top-level Junk dashboard rows were intentionally not bulk-rescored. Optional later if the operator asks.
-3. **Full code + security review** by Claude Code or Codex (`filter.py`, `dashboard.py`, list/Bayes, provider-Junk rescue, Allow/Block learn+MOVE, state permissions, compose/secrets, dashboard auth). Findings with severity + fixes; still no auto-promote out of shadow.
-4. **Rspamd 4.2.0 / WebUI-link deploy is done** (2026-09-22).
-5. **CR-016 / supply-chain** (accepted risk): lock+hash deps, image digests, GHA SHA pins — when prioritized.
-6. More M365 mailboxes only with Exchange grant + proxy section + YAML. No generic IMAP for `bytelord.net` unless asked.
-7. Optional polish from CR disposition (fingerprint caps, SQLite CHECKs, etc.) — not release blockers.
+1. **Test and merge the review branch** `claude/blissful-dijkstra-qzxvln`, then rebuild `spamfilter`. The prioritized live test table is in `SESSION_HANDOFF.md` ("Test these first"). The riskiest behavior changes are CR-001 (list-drain de-dup), CR-002 (poison give-up), CR-011 (`BEGIN IMMEDIATE`), CR-013 (learn budget), and the move-mode rescue/retention guards (CR-003/007/008/009).
+2. **Decide CR-004 (neural autotrain)** before trusting scores for promotion: `train { autotrain = false; }` or `frozen = true;` plus, with explicit approval, deleting only the `rn_*` keys.
+3. **Stay in `shadow`.** Watch scores after the A/B/C + Bayes rebuild. The operator will Train-Spam auth-passed content spam (5Tool-style cold pitch, Chelsea, iPic). Before `flag`/`move`, run **one test mailbox in `move` mode** to confirm the rescue/retention guards and whether Exchange leaves Inbox copies after `UID MOVE` (CR-014). Promote only when asked; do **not** auto-promote from a code review alone. Do **not** wipe Bayes again unless asked.
+4. **A/B/C + Bayes rebuild + Trained-* dashboard rescore are done** (2026-09-24). Inbox and top-level Junk dashboard rows were intentionally not bulk-rescored; optional later if the operator asks.
+5. **Operator decisions from the review:** CR-003 Inbox-side allowlist-vs-spoof policy; CR-019 `Rcpt` = mailbox vs first To/Cc; CR-022/023 compose (`TZ`, drop `env_file`, `stop_grace_period`, `DASHBOARD_TRUSTED_PROXIES`).
+6. **Rspamd 4.2.0 / WebUI-link deploy is done** (2026-09-22).
+7. **ChatGPT CR-016 / supply chain** (accepted risk): lock and hash deps, image digests, GHA SHA pins — when prioritized.
+8. More M365 mailboxes only with an Exchange grant + proxy section + YAML. No generic IMAP for `bytelord.net` unless asked.
+9. Optional polish: ChatGPT CR disposition items, and the Low items under "Not fixed" in `CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md`. Not release blockers.
 
 ---
 
@@ -360,6 +402,9 @@ Ham training **cannot** cancel A/B auth-header symbols when they still fire (unt
 | `SESSION_HANDOFF.md` | **Mandatory** — current continue-here note (2026-09-24 evening) |
 | `README.md` | Operator docs (modes, folders, dashboard, safe-mode) |
 | `CHATGPT_CODE_REVIEW.md` | Prior CR findings + disposition |
+| `CLAUDE_OPUS5.5_EXTRA_CODE_REVIEW.md` | 2026-09-25 review: 28 traced findings (OPUS-CR-001…028) |
+| `CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md` | 2026-09-25 fixes (15), deferrals, validation |
+| `filter/test_opus_review_fixes.py` | Regression tests for the 2026-09-25 fixes |
 | `design-arch/allow_block_sliced_plan.md` | List/Bayes product decisions (reopenable) |
 | `design-arch/slice9_shared_bayes.md` … `slice12_dashboard_lists.md` | List specs (note policy drift vs 2026-09-21 — verify against code) |
 | `design-arch/slice3_inbox_bookmark.md` | Bookmark / terminal-prefix rules |
