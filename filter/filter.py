@@ -157,6 +157,13 @@ SCAN_FETCH_CHUNK = 50            # max msgs fetched per scan_inbox FETCH call
 # upserted then failed before /checkv2). Scored on later passes; cap keeps
 # a large backlog from blocking new-mail handling.
 UNSCORED_INBOX_CATCHUP_CAP = 50
+# A UID that fails to scan (or keeps returning an empty body) on every pass
+# would otherwise stop the bookmark forever. After this many consecutive
+# failures of the same UID over at least this long, and only if a synthetic
+# probe proves rspamd is healthy, the UID is given up (left in place).
+SCAN_POISON_ATTEMPTS = 5
+SCAN_POISON_MIN_AGE_S = 600
+SCAN_POISON_TRACK_MAX = 256
 RECONNECT_MIN_BACKOFF = 5
 RECONNECT_MAX_BACKOFF = 300
 HTTP_TIMEOUT = 30
@@ -1894,7 +1901,7 @@ class Db:
              WHERE account=? AND folder=? AND uidvalidity=?
                AND current_folder=?
                AND our_score IS NULL
-               AND IFNULL(our_action, '') NOT IN ('allowlisted')
+               AND IFNULL(our_action, '') NOT IN ('allowlisted', 'scan_giveup')
                AND IFNULL(learned_as, '') NOT IN ('ham', 'spam', 'unlearnable')
                AND pending_learn IS NULL
              ORDER BY uid ASC
@@ -2917,6 +2924,10 @@ class AccountState:
     last_junk_poll: float = 0.0
     last_retention: float = 0.0
     scan_fail_streak: int = 0
+    # (folder, uidvalidity, uid) -> (consecutive failures, monotonic first)
+    scan_failures: dict[tuple[str, int, int], tuple[int, float]] = field(
+        default_factory=dict
+    )
 
 
 def _kw(flags: tuple[bytes, ...] | list[bytes]) -> set[str]:
@@ -3210,6 +3221,8 @@ def _score_and_store(
         )
         db.log_event("scan_recovered", detail=str(state.scan_fail_streak))
         state.scan_fail_streak = 0
+    if state is not None:
+        state.scan_failures.pop((folder, uv, uid), None)
     score = scan_detail.score
     detail_json = score_detail_json(scan_detail)
     with db.tx():
@@ -3230,6 +3243,74 @@ def _score_and_store(
             msgid, score, format_top_symbols_line(scan_detail.symbols),
         )
     return score
+
+
+_RSPAMD_PROBE_RAW = (
+    b"From: imap-spamfilter-probe@localhost\r\n"
+    b"To: imap-spamfilter-probe@localhost\r\n"
+    b"Subject: imap-spamfilter health probe\r\n"
+    b"Message-ID: <imap-spamfilter-probe@localhost>\r\n"
+    b"Date: Thu, 01 Jan 2026 00:00:00 +0000\r\n"
+    b"\r\n"
+    b"imap-spamfilter health probe\r\n"
+)
+
+
+def rspamd_probe_ok(acc: Account) -> bool:
+    """True if rspamd scores a tiny synthetic message on the live path.
+
+    Separates "rspamd is down" (keep halting so nothing is skipped) from
+    "this one message always fails" (poison; give it up).
+    """
+    return rspamd_scan_detail(
+        _RSPAMD_PROBE_RAW, acc.user, acc.reject_score_above,
+        bayes_user=acc.bayes_user or acc.user,
+    ) is not None
+
+
+def _scan_giveup(
+    db: Db,
+    log: logging.Logger,
+    acc: Account,
+    state: "AccountState | None",
+    folder: str,
+    uv: int,
+    uid: int,
+    msgid: str | None,
+    *,
+    reason: str,
+    probe: bool,
+) -> bool:
+    """Record one scan failure for this exact IMAP object.
+
+    Returns True when the object is poison and the caller should treat it
+    as terminal (advance past it, leave the message where it is). Without
+    state, behaviour is the historic "halt and retry next pass".
+    """
+    if state is None:
+        return False
+    key = (folder, uv, uid)
+    now = time.monotonic()
+    count, first = state.scan_failures.get(key, (0, now))
+    count += 1
+    state.scan_failures[key] = (count, first)
+    if len(state.scan_failures) > SCAN_POISON_TRACK_MAX:
+        oldest = min(state.scan_failures, key=lambda k: state.scan_failures[k][1])
+        state.scan_failures.pop(oldest, None)
+    if count < SCAN_POISON_ATTEMPTS or now - first < SCAN_POISON_MIN_AGE_S:
+        return False
+    if probe and not rspamd_probe_ok(acc):
+        return False
+    state.scan_failures.pop(key, None)
+    detail = f"reason={reason} folder={folder} uid={uid} attempts={count}"
+    log.error(
+        "giving up on %s (uid=%s) after %d failed scan passes (%s); "
+        "leaving it in %s", msgid, uid, count, reason, folder,
+    )
+    with db.tx():
+        db.update_imap_message(folder, uv, uid, our_action="scan_giveup")
+        db.log_event("scan_giveup", msgid, detail=detail)
+    return True
 
 
 _FILTER_OWNED_JUNK_ACTIONS = frozenset({
@@ -3407,6 +3488,12 @@ def _scan_inbox_uid_batch(
                 continue
             raw = _body_bytes(data)
             if not raw:
+                if _scan_giveup(
+                    db, log, acc, state, fmap["inbox"], uv, uid, None,
+                    reason="no_body", probe=False,
+                ):
+                    last_terminal = uid
+                    continue
                 halted = True
                 break
             flags = _kw(data.get(b"FLAGS", ()))
@@ -3491,6 +3578,12 @@ def _scan_inbox_uid_batch(
                     db, log, acc, state, fmap["inbox"], uv, uid, raw, msgid,
                 )
                 if score is None:
+                    if _scan_giveup(
+                        db, log, acc, state, fmap["inbox"], uv, uid, msgid,
+                        reason="scan_failed", probe=True,
+                    ):
+                        last_terminal = uid
+                        continue
                     halted = True
                     break
 
@@ -3892,6 +3985,12 @@ def poll_junk(
                     continue
                 raw = _body_bytes(data)
                 if not raw:
+                    if _scan_giveup(
+                        db, log, acc, state, junk, uv, uid, None,
+                        reason="no_body", probe=False,
+                    ):
+                        last_terminal = uid
+                        continue
                     halted = True
                     break
                 flags = _kw(data.get(b"FLAGS", ()))
@@ -3986,6 +4085,12 @@ def poll_junk(
                         db, log, acc, state, junk, uv, uid, raw, msgid,
                     )
                     if score is None:
+                        if _scan_giveup(
+                            db, log, acc, state, junk, uv, uid, msgid,
+                            reason="scan_failed", probe=True,
+                        ):
+                            last_terminal = uid
+                            continue
                         halted = True
                         break
                 hit = classify_list_hit(acc, db, iter_list_header_addrs(raw))
