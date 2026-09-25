@@ -161,3 +161,97 @@ def test_poison_junk_uid_does_not_block_later_user_move_learn(
     assert db.get_scan_bookmark("Junk", 1) == 5
     assert db.get_imap_message("Junk", 1, 4)["our_action"] == "scan_giveup"
     assert db.get_imap_message("Junk", 1, 5)["pending_learn"] == "spam"
+
+
+# ----- OPUS-CR-003: never rescue a Microsoft-flagged spoof ------------------
+
+
+SPOOF_AR = (
+    b"Authentication-Results: mx.microsoft.com; spf=fail smtp.mailfrom=vendor.example;"
+    b" dkim=none header.d=none; dmarc=fail action=quarantine"
+    b" header.from=vendor.example; compauth=fail reason=000\r\n"
+)
+FORWARDED_AR = (
+    b"Authentication-Results: mx.microsoft.com; spf=fail smtp.mailfrom=vendor.example;"
+    b" dkim=fail header.d=vendor.example; dmarc=fail action=none"
+    b" header.from=vendor.example; compauth=pass reason=130\r\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        (SPOOF_AR, True),
+        (FORWARDED_AR, False),  # ARC-rescued forward: compauth wins over dmarc
+        (b"Authentication-Results: mx.microsoft.com; dmarc=fail header.from=x.example\r\n", True),
+        (b"Authentication-Results: mx.microsoft.com; dmarc=pass header.from=x.example\r\n", False),
+        (b"Authentication-Results: evil.example; compauth=fail reason=000\r\n", False),
+        (b"", False),
+    ],
+)
+def test_m365_spoof_verdict(header, expected):
+    assert f.m365_spoof_verdict(header + _raw(4)) is expected
+
+
+def _allowlisted_junk_setup(tmp_path, mode="move"):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(
+        mode=mode, move_grace_seconds=0, threshold=8.0, actual_name="Rich",
+    )
+    parsed = f.ParsedPattern("ap@vendor.example", "address")
+    with db.tx():
+        db.set_scan_bookmark("Junk", 1, 3)
+        db.list_upsert_address(
+            "person", "Rich", "allow", parsed, source="imap", max_entries=1000,
+        )
+    return db, acc
+
+
+def test_allowlisted_spoof_is_not_rescued(tmp_path, monkeypatch):
+    db, acc = _allowlisted_junk_setup(tmp_path)
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(1.0, (), None),
+    )
+    raw = SPOOF_AR + _raw(4, sender="ap@vendor.example")
+    client = CapIMAP(existing=_all_existing(), uids=[4], bodies={4: raw})
+    f.poll_junk(client, db, LOG, acc, FMAP)
+    assert client.moved == []
+    assert "m365_spoof_verdict" in _events(db, "rescue_skipped")[0]
+    assert "pending_rescue" not in _events(db)
+
+
+def test_spoof_is_not_reported_as_would_rescue_in_shadow(tmp_path, monkeypatch):
+    db, acc = _allowlisted_junk_setup(tmp_path, mode="shadow")
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(1.0, (), None),
+    )
+    raw = SPOOF_AR + _raw(4, sender="ap@vendor.example")
+    client = CapIMAP(existing=_all_existing(), uids=[4], bodies={4: raw})
+    f.poll_junk(client, db, LOG, acc, FMAP)
+    assert "would_rescue" not in _events(db)
+    assert _events(db, "rescue_skipped")
+
+
+def test_allowlisted_compauth_pass_is_still_rescued(tmp_path, monkeypatch):
+    db, acc = _allowlisted_junk_setup(tmp_path)
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(20.0, (), None),
+    )
+    raw = FORWARDED_AR + _raw(4, sender="ap@vendor.example")
+    client = CapIMAP(existing=_all_existing(), uids=[4], bodies={4: raw})
+    f.poll_junk(client, db, LOG, acc, FMAP)
+    assert client.moved == [([4], "INBOX")]
+
+
+def test_due_rescue_rechecks_spoof_verdict(tmp_path, monkeypatch):
+    db, acc = _allowlisted_junk_setup(tmp_path)
+    raw = SPOOF_AR + _raw(4, sender="ap@vendor.example")
+    with db.tx():
+        db.upsert_imap_message("Junk", 1, 4, message_id="m4@example.com")
+        db.update_imap_message("Junk", 1, 4, our_score=1.0, our_action="pending_rescue")
+        db.add_pending_move(1, 4, "m4@example.com", folder="Junk")
+    client = CapIMAP(existing=_all_existing(), uids=[4], bodies={4: raw})
+    f.execute_due_rescues(client, db, LOG, acc, FMAP)
+    assert client.moved == []
+    assert db.due_pending_moves("Junk", 1, 0) == []
+    assert _events(db, "pending_rescue_canceled") == ["m365_spoof_verdict"]

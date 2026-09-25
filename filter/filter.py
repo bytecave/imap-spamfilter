@@ -379,35 +379,75 @@ def _outermost_received_spf_is_outlook(msg: email.message.Message) -> bool:
     return bool(match and match.group(1).casefold() == _M365_SPF_RECEIVER)
 
 
-def _m365_method_passes(raw: bytes) -> tuple[dict[str, bool], str]:
-    """Outermost M365 AR: (method -> clean pass, trust label).
+def _trusted_m365_ar(raw: bytes) -> tuple[str, str] | None:
+    """The outermost Authentication-Results header if it is Microsoft's.
 
-    Trust the first Authentication-Results header only, and only when it is
-    Microsoft's stamp: authserv-id ``mx.microsoft.com``, or no authserv-id
-    but ``compauth=`` in that same header plus an outermost Received-SPF
-    whose receiver is ``protection.outlook.com``. A method counts as pass
-    only when it has at least one ``pass`` and no hard failure.
+    Returns (header text, trust label) or None. Trust the first
+    Authentication-Results header only, and only when it is Microsoft's
+    stamp: authserv-id ``mx.microsoft.com``, or no authserv-id but
+    ``compauth=`` in that same header plus an outermost Received-SPF whose
+    receiver is ``protection.outlook.com``.
     """
-    empty: dict[str, bool] = {}
     try:
         msg = email.message_from_bytes(raw, policy=email.policy.compat32)
     except Exception:
-        return empty, ""
+        return None
     headers = msg.get_all("Authentication-Results") or []
     if not headers:
-        return empty, ""
+        return None
     chosen = _header_text(headers[0])
     authserv = _AR_AUTHSERV_RE.match(chosen)
     token = authserv.group(1).casefold() if authserv else ""
     if token == _M365_AUTHSERV_ID:
-        return _method_passes(chosen), _M365_AUTHSERV_ID
+        return chosen, _M365_AUTHSERV_ID
     if (
         _AR_BARE_METHOD_RE.match(chosen)
         and _AR_COMPAUTH_RE.search(chosen)
         and _outermost_received_spf_is_outlook(msg)
     ):
-        return _method_passes(chosen), _M365_SPF_RECEIVER
-    return empty, ""
+        return chosen, _M365_SPF_RECEIVER
+    return None
+
+
+def _m365_method_passes(raw: bytes) -> tuple[dict[str, bool], str]:
+    """Outermost M365 AR: (method -> clean pass, trust label).
+
+    A method counts as pass only when it has at least one ``pass`` and no
+    hard failure. Untrusted or missing AR yields ({}, "").
+    """
+    trusted = _trusted_m365_ar(raw)
+    if trusted is None:
+        return {}, ""
+    chosen, label = trusted
+    return _method_passes(chosen), label
+
+
+_AR_COMPAUTH_RESULT_RE = re.compile(
+    r"(?:^|[;\s])compauth\s*=\s*([A-Za-z]+)", re.IGNORECASE
+)
+
+
+def m365_spoof_verdict(raw: bytes) -> bool:
+    """True when Microsoft's trusted outermost AR flags the message as spoofed.
+
+    ``compauth=fail`` is Microsoft's composite (ARC-aware) spoof decision.
+    Without a compauth token, ``dmarc=fail`` is used. Untrusted or missing
+    AR never counts: a sender cannot make this return True or False for a
+    message Microsoft stamped.
+    """
+    trusted = _trusted_m365_ar(raw)
+    if trusted is None:
+        return False
+    chosen, _label = trusted
+    compauth = [r.casefold() for r in _AR_COMPAUTH_RESULT_RE.findall(chosen)]
+    if compauth:
+        return "fail" in compauth
+    dmarc = {
+        result.casefold()
+        for method, result in _AR_METHOD_RE.findall(chosen)
+        if method.casefold() == "dmarc"
+    }
+    return "fail" in dmarc
 
 
 def _bucket_b_method(symbol_name: str) -> str | None:
@@ -3816,6 +3856,18 @@ def execute_due_moves(client: IMAPClient, db: Db, log: logging.Logger, acc: Acco
     log.info("moved %d message(s) inbox->junk", len(to_move))
 
 
+def _rescue_blocker(raw: bytes) -> str | None:
+    """Reason a Junk message must not be rescued to Inbox, or None.
+
+    Rescue overrides the provider's Junk decision, and allow hits match the
+    spoofable From/Sender headers. Never pull out a message Microsoft's
+    trusted Authentication-Results marks as spoofed.
+    """
+    if m365_spoof_verdict(raw):
+        return "m365_spoof_verdict"
+    return None
+
+
 def _queue_junk_rescue(
     db: Db,
     log: logging.Logger,
@@ -3879,6 +3931,15 @@ def execute_due_rescues(
                 "rescue_skipped_unvalidated", r["message_id"],
                 detail=f"uid={uid} oversize={oversize}",
             )
+            continue
+        blocked = _rescue_blocker(raw)
+        if blocked is not None:
+            with db.tx():
+                db.drop_pending_move(junk, uv, uid)
+                db.update_imap_message(junk, uv, uid, our_action=None)
+                db.log_event(
+                    "pending_rescue_canceled", r["message_id"], detail=blocked,
+                )
             continue
         hit = classify_list_hit(acc, db, iter_list_header_addrs(raw))
         if hit is not None and hit.decision == "block":
@@ -4112,15 +4173,19 @@ def poll_junk(
                             )
                         last_terminal = uid
                         continue
-                    _queue_junk_rescue(
-                        db, log, acc, junk, uv, uid, msgid, score,
-                    )
-                    last_terminal = uid
-                    continue
-                if score < acc.threshold:
-                    _queue_junk_rescue(
-                        db, log, acc, junk, uv, uid, msgid, score,
-                    )
+                # Allow hit, or unlisted and under threshold: a rescue
+                # candidate, unless evidence says it must stay in Junk.
+                if hit is not None or score < acc.threshold:
+                    blocked = _rescue_blocker(raw)
+                    if blocked is not None:
+                        detail = f"{blocked} score={_score_log(score)} mode={acc.mode}"
+                        log.info("rescue skipped for %s: %s", msgid, detail)
+                        with db.tx():
+                            db.log_event("rescue_skipped", msgid, detail=detail)
+                    else:
+                        _queue_junk_rescue(
+                            db, log, acc, junk, uv, uid, msgid, score,
+                        )
                 last_terminal = uid
         if last_terminal is not None:
             with db.tx():
