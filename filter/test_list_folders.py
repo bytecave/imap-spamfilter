@@ -214,8 +214,9 @@ def test_drain_blocklist_expunges_leftover_source_copy(tmp_path):
 
 
 def test_drain_allowlist_expunges_without_move_when_already_in_inbox(tmp_path):
-    """A leftover Allowlist copy whose Message-ID is already in Inbox must
-    not be MOVE'd again (that would duplicate) — only the leftover is cleared."""
+    """A leftover Allowlist copy whose byte-identical twin is already in
+    Inbox must not be MOVE'd again (that would duplicate) — only the
+    leftover is cleared."""
     db = _mk_db(tmp_path)
     acc = _mk_account(actual_name="Rich")
     client = RecordingIMAP(
@@ -230,3 +231,67 @@ def test_drain_allowlist_expunges_without_move_when_already_in_inbox(tmp_path):
     assert client.moved == []
     assert client.expunged == [[1]]
     assert client.search_uids == []
+
+
+RAW_COLLIDING = (
+    b"From: other@y.com\r\n"
+    b"To: u@example.com\r\n"
+    b"Subject: a different message\r\n"
+    b"Message-ID: <list1@example.com>\r\n"
+    b"\r\n"
+    b"completely different body\r\n"
+)
+
+
+class _CollidingIMAP(RecordingIMAP):
+    """HEADER Message-ID search in the destination finds UID 99, a different
+    message that merely reuses the dragged message's Message-ID."""
+
+    def search(self, criteria):
+        tokens = [
+            t.decode() if isinstance(t, bytes) else str(t) for t in criteria
+        ]
+        if any(t.upper() == "HEADER" for t in tokens):
+            return [99] if "list1@example.com" in tokens[-1] else []
+        return super().search(criteria)
+
+
+@pytest.mark.parametrize(
+    ("kind", "dest"), [("allow", FMAP["inbox"]), ("block", FMAP["junk"])]
+)
+def test_drain_message_id_collision_moves_instead_of_expunging(
+    tmp_path, kind, dest,
+):
+    """OPUS-CR-001: a destination message that only shares the Message-ID
+    is not a copy. The dragged message must be MOVEd, never expunged."""
+    db = _mk_db(tmp_path)
+    acc = _mk_account(actual_name="Rich")
+    client = _CollidingIMAP(
+        existing=_all_existing(),
+        search_uids=[1],
+        fetch_by_uid={
+            1: {b"BODY[]": RAW_FROM, b"FLAGS": ()},
+            99: {b"BODY[]": RAW_COLLIDING, b"FLAGS": ()},
+        },
+    )
+    f._drain_list_folder(client, db, LOG, acc, FMAP, kind=kind)
+    assert client.moved == [([1], dest)]
+    assert client.expunged == []
+
+
+def test_drain_oversize_destination_candidate_is_not_proof_of_copy(tmp_path):
+    """A same-Message-ID candidate that cannot be fetched under the cap
+    cannot be verified, so the dragged message is MOVEd (duplicate at worst)."""
+    db = _mk_db(tmp_path)
+    acc = _mk_account(actual_name="Rich")
+    client = _CollidingIMAP(
+        existing=_all_existing(),
+        search_uids=[1],
+        fetch_by_uid={
+            1: {b"BODY[]": RAW_FROM, b"FLAGS": ()},
+            99: {b"RFC822.SIZE": f.MAX_FETCH_BYTES + 1, b"FLAGS": ()},
+        },
+    )
+    f._drain_list_folder(client, db, LOG, acc, FMAP, kind="allow")
+    assert client.moved == [([1], FMAP["inbox"])]
+    assert client.expunged == []

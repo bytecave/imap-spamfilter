@@ -4317,16 +4317,29 @@ def _move_clearing_source(
     _expunge_source_uids(client, leftover, log, password=password)
 
 
-def _message_ids_in_folder(
+# Cap on destination candidates compared per Message-ID. A reused
+# Message-ID can match many unrelated messages; comparing a few is enough
+# to find a genuine leftover copy, and anything unverified is MOVEd.
+_IDENTICAL_COPY_MAX_CANDIDATES = 20
+
+
+def _identical_copies_in_folder(
     client: IMAPClient,
     folder: str,
-    msgids: set[str],
+    wanted: set[tuple[str, str]],
     log: logging.Logger,
     *,
     password: str,
-) -> set[str]:
-    """Return the subset of Message-IDs that already have a copy in `folder`."""
-    if not msgids:
+) -> set[tuple[str, str]]:
+    """Return the (Message-ID, body SHA-256) pairs with a byte-identical copy
+    already in `folder`.
+
+    Message-ID is sender-controlled and not unique, so a HEADER match alone
+    must never justify expunging the dragged message: a different message
+    that merely shares the Message-ID would make the drag delete mail. Only
+    a candidate whose fetched body hashes to the same SHA-256 counts.
+    """
+    if not wanted:
         return set()
     try:
         client.select_folder(folder, readonly=True)
@@ -4336,19 +4349,34 @@ def _message_ids_in_folder(
             folder, redact_log(str(ex), password),
         )
         return set()
-    found: set[str] = set()
-    for msgid in msgids:
+    found: set[tuple[str, str]] = set()
+    for msgid, sha in wanted:
         variants = [msgid]
         if not msgid.startswith("<"):
             variants.append(f"<{msgid}>")
+        hits: list[int] = []
         for needle in variants:
             try:
-                hits = client.search(["HEADER", "Message-ID", needle])
+                hits = list(client.search(["HEADER", "Message-ID", needle]) or [])
             except IMAPClientError:
                 continue
             if hits:
-                found.add(msgid)
                 break
+        if not hits:
+            continue
+        try:
+            for _uid, data, oversize in fetch_under_cap(
+                client, sorted(hits)[:_IDENTICAL_COPY_MAX_CANDIDATES]
+            ):
+                raw = None if oversize else _body_bytes(data)
+                if raw and body_sha256(raw) == sha:
+                    found.add((msgid, sha))
+                    break
+        except IMAPClientError as ex:
+            log.warning(
+                "list drain: cannot verify copies in %s: %s",
+                folder, redact_log(str(ex), password),
+            )
     return found
 
 
@@ -4382,7 +4410,10 @@ def _drain_list_folder(
     if not uids:
         return
     uids = uids[: acc.max_list_per_run]
-    pending: list[tuple[int, str]] = []
+    # (uid, Message-ID or "", body SHA-256 or None). The SHA is what proves a
+    # destination copy is this exact message; oversize/empty bodies have none
+    # and are always MOVEd.
+    pending: list[tuple[int, str, str | None]] = []
     for uid, data, oversize in fetch_under_cap(client, uids):
         if SHUTDOWN.is_set():
             return
@@ -4391,29 +4422,29 @@ def _drain_list_folder(
             _log_skipped_oversize(
                 db, log, uid=uid, folder=folder, size=_rfc822_size(data),
             )
-            pending.append((uid, msgid))
+            pending.append((uid, msgid, None))
             continue
         raw = _body_bytes(data)
         if not raw:
             log.info("list drain uid=%s: empty body, routing to %s", uid, dest)
-            pending.append((uid, msgid))
+            pending.append((uid, msgid, None))
             continue
         parsed_msgid, _subject, sender = parse_envelope(raw)
         msgid = parsed_msgid or ""
+        sha = body_sha256(raw)
         if not sender:
             log.info("list drain uid=%s: empty From, routing to %s", uid, dest)
-            pending.append((uid, msgid))
+            pending.append((uid, msgid, sha))
             continue
         try:
             parsed = parse_list_line(sender, allow_domain=False)
         except ValueError as ex:
             log.info("list drain uid=%s from=%r: %s", uid, sender, ex)
-            pending.append((uid, msgid))
+            pending.append((uid, msgid, sha))
             continue
         if parsed is None:
-            pending.append((uid, msgid))
+            pending.append((uid, msgid, sha))
             continue
-        sha = body_sha256(raw)
         with db.tx():
             db.upsert_imap_message(
                 folder, uv, uid,
@@ -4452,11 +4483,11 @@ def _drain_list_folder(
             )
             if not ok:
                 continue
-        pending.append((uid, msgid))
+        pending.append((uid, msgid, sha))
     if not pending:
         return
-    already_in_dest = _message_ids_in_folder(
-        client, dest, {m for _, m in pending if m}, log,
+    already_in_dest = _identical_copies_in_folder(
+        client, dest, {(m, s) for _, m, s in pending if m and s}, log,
         password=acc.password,
     )
     try:
@@ -4467,8 +4498,11 @@ def _drain_list_folder(
             folder, redact_log(str(ex), acc.password),
         )
         return
-    to_move = [uid for uid, msgid in pending if not msgid or msgid not in already_in_dest]
-    to_clear = [uid for uid, msgid in pending if msgid and msgid in already_in_dest]
+    to_clear = [
+        uid for uid, msgid, sha in pending
+        if msgid and sha and (msgid, sha) in already_in_dest
+    ]
+    to_move = [uid for uid, _msgid, _sha in pending if uid not in to_clear]
     if to_move:
         try:
             _move_clearing_source(
@@ -4483,7 +4517,7 @@ def _drain_list_folder(
             return
         dest_label = "inbox" if kind == "allow" else "junk"
         with db.tx():
-            for uid, msgid in pending:
+            for uid, msgid, _sha in pending:
                 if uid not in to_move:
                     continue
                 db.update_imap_message(
@@ -4494,7 +4528,8 @@ def _drain_list_folder(
                 db.log_event(f"list_drain_{dest_label}", msgid or None)
     if to_clear:
         log.info(
-            "list drain: %d uid(s) already in %s; expunging leftover copies in %s",
+            "list drain: %d uid(s) have a byte-identical copy in %s; "
+            "expunging leftover copies in %s",
             len(to_clear), dest, folder,
         )
         _expunge_source_uids(client, to_clear, log, password=acc.password)
