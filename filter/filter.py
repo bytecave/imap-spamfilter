@@ -2980,8 +2980,9 @@ class AccountState:
     last_junk_poll: float = 0.0
     last_retention: float = 0.0
     scan_fail_streak: int = 0
-    # (folder, uidvalidity, uid) -> (consecutive failures, monotonic first)
-    scan_failures: dict[tuple[str, int, int], tuple[int, float]] = field(
+    # (folder, uidvalidity, uid) -> (consecutive failures, monotonic first
+    # failure, rspamd probe already succeeded on an earlier failing pass)
+    scan_failures: dict[tuple[str, int, int], tuple[int, float, bool]] = field(
         default_factory=dict
     )
 
@@ -3353,21 +3354,28 @@ def _scan_giveup(
     Returns True when the object is poison and the caller should treat it
     as terminal (advance past it, leave the message where it is). Without
     state, behaviour is the historic "halt and retry next pass".
+
+    With `probe`, give-up needs the health probe to succeed on two
+    consecutive failing passes: rspamd recovering in the instant between a
+    failed scan and the probe must not condemn a legitimate message.
     """
     if state is None:
         return False
     key = (folder, uv, uid)
     now = time.monotonic()
-    count, first = state.scan_failures.get(key, (0, now))
+    count, first, confirmed = state.scan_failures.get(key, (0, now, False))
     count += 1
-    state.scan_failures[key] = (count, first)
+    state.scan_failures[key] = (count, first, confirmed)
     if len(state.scan_failures) > SCAN_POISON_TRACK_MAX:
         oldest = min(state.scan_failures, key=lambda k: state.scan_failures[k][1])
         state.scan_failures.pop(oldest, None)
     if count < SCAN_POISON_ATTEMPTS or now - first < SCAN_POISON_MIN_AGE_S:
         return False
-    if probe and not rspamd_probe_ok(acc):
-        return False
+    if probe:
+        healthy = rspamd_probe_ok(acc)
+        if not (healthy and confirmed):
+            state.scan_failures[key] = (count, first, healthy)
+            return False
     state.scan_failures.pop(key, None)
     detail = f"reason={reason} folder={folder} uid={uid} attempts={count}"
     log.error(

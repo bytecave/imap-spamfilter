@@ -77,7 +77,9 @@ def test_poison_inbox_uid_is_given_up_and_later_mail_scored(
         bodies={n: _raw(n) for n in (1, 2, 3)},
     )
     state = f.AccountState()
-    for _ in range(2):
+    # 3 attempts reach the threshold; the probe must then succeed on two
+    # consecutive failing passes before the UID is given up.
+    for _ in range(3):
         f.scan_inbox(client, db, LOG, acc, FMAP, state)
     assert db.get_scan_bookmark("INBOX", 1) == 1  # still retrying
     f.scan_inbox(client, db, LOG, acc, FMAP, state)
@@ -167,7 +169,7 @@ def test_poison_junk_uid_does_not_block_later_user_move_learn(
         bodies={4: _raw(4), 5: user_moved},
     )
     state = f.AccountState()
-    for _ in range(3):
+    for _ in range(4):
         f.poll_junk(client, db, LOG, acc, FMAP, state)
     assert db.get_scan_bookmark("Junk", 1) == 5
     assert db.get_imap_message("Junk", 1, 4)["our_action"] == "scan_giveup"
@@ -800,3 +802,27 @@ def test_due_moves_respect_remaining_hourly_quota(tmp_path):
     f.execute_due_moves(client, db, LOG, acc, FMAP)
     assert client.moved == [([1, 2], "Junk")]
     assert [r["uid"] for r in db.due_pending_moves("INBOX", 1, 0)] == [3]
+
+
+def test_probe_recovering_right_after_a_failed_scan_is_not_poison(
+        tmp_path, monkeypatch, fast_poison):
+    """rspamd down for every real scan of UID 2 but up for one probe (it
+    recovered in between): one healthy probe alone must not give up."""
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="shadow")
+    with db.tx():
+        db.set_scan_bookmark("INBOX", 1, 1)
+    probes = iter([True, False, True, False, True, False])
+
+    def scan(raw, *a, **k):
+        if raw == f._RSPAMD_PROBE_RAW:
+            return f.ScanResult(1.0, (), None) if next(probes) else None
+        return None
+
+    monkeypatch.setattr(f, "rspamd_scan_detail", scan)
+    client = CapIMAP(existing=_all_existing(), uids=[2], bodies={2: _raw(2)})
+    state = f.AccountState()
+    for _ in range(8):
+        f.scan_inbox(client, db, LOG, acc, FMAP, state)
+    assert db.get_scan_bookmark("INBOX", 1) == 1
+    assert _events(db, "scan_giveup") == []
