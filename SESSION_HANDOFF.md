@@ -1,6 +1,6 @@
 # Session handoff — imap-spamfilter (ByteLord VPS)
 
-**Last updated:** 2026-09-25 evening (review fixes **deployed** by the operator; Cursor verifies next)  
+**Last updated:** 2026-09-25 late night (Pacific) — Train-* leftover fix live; third Bayes retrain done  
 **Repo:** `/opt/bytelord/projects/imap-spamfilter`  
 **Remote:** `github.com:bytecave/imap-spamfilter.git` (branch `main`)  
 **Upstream fork of:** marcelverdult/imap-spamfilter  
@@ -15,7 +15,8 @@ A new agent **must** do all three before exploring code or proposing fixes:
 2. **Read [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) in full** — architecture, policy, live VPS, remediation, What’s next. This handoff is the short continuity note; that file is the durable map. If they disagree, **trust `IMPLEMENTATION_STATUS.md` for product facts** and this file for “continue here.”
 3. **Search Supermemory** (MCP `plugin-cursor-supermemory-supermemory`, `container=project`) before answering “why / what next / how scoring works.” Do not rely on chat memory. Useful seeds:
    - `IMAP-path remediation buckets A B C mx.microsoft.com`
-   - `Bayes retrain bytelord Delivered-To Rcpt`
+   - `Bayes retrain bytelord Delivered-To Rcpt rescue_below`
+   - `Train leftover MOVE-as-COPY expunge`
    - `dashboard Trained rescore score_detail`
    - `imap-spamfilter shadow dashboard 8099`
    Also `supermemory_list` (recent project memories). After decisions or live deploys, `supermemory_add` with `container=project`.
@@ -24,31 +25,26 @@ Also read `/home/bytecave/.claude/CLAUDE.md` (Cursor user rule) and use Agent Ma
 
 ---
 
-## Where we left off (2026-09-25 evening) — review fixes DEPLOYED; Cursor verifies, then human testing
+## Where we left off (2026-09-25 late night Pacific) — CONTINUE HERE
 
-A full code/security review was done by Claude Code (Opus 5.5) in a cloud session. The fixes are committed, and **the operator deployed them on 2026-09-25**.
+Cursor finished the Opus deploy verification, then shipped two live product changes and rebuilt Bayes from corrected Trained-* folders.
 
-- **Findings:** [`CLAUDE_OPUS5.5_EXTRA_CODE_REVIEW.md`](CLAUDE_OPUS5.5_EXTRA_CODE_REVIEW.md): 29 traced findings (4 High, 12 Medium, 13 Low). OPUS-CR-029 (fuzzy) was found *during* the deploy.
-- **What was fixed and what was not:** [`CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md`](CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md). That covers 15 code fixes, each in its own commit with tests, and two rspamd config fixes: CR-004 turns neural `autotrain` off, and CR-029 switches to the stock fuzzy rule. It also covers the allowlisted-spoof flag and the compose `TZ`/`stop_grace_period`. The "Not fixed" table explains every deferral.
-- **Deployed:** the operator ran the runbook below over SSH: steps 1–7, plus "4b", which installed `fuzzy_check.conf`. They report that every output matched "Expect". Facts from their output:
-  - 4 neural keys were deleted (3 `rn_*` and 1 `rn3_*`), and 0 remain.
-  - The Bayes `RS*` key count was **78042** after the wipe, matching step 3.
-  - `configdump neural` shows `autotrain = false`.
-  - Deployed `main` = `1d04635`. Later commits are docs-only unless `git log` says otherwise.
-- **Tests:** `cd filter && python -m pytest -q` gives **401 passed** (was 349). New tests are mostly in `filter/test_opus_review_fixes.py`.
-- **Scope of change:**
-  - Code: `filter/filter.py`, `filter/dashboard.py`, tests, `README.md`.
-  - Unraid: `unraid/bootstrap.sh`, `unraid/bootstrap.version` (12).
-  - rspamd config: `rspamd/local.d/neural.conf` (`autotrain = false`), `rspamd/local.d/fuzzy_check.conf` (comments only, so the stock rule applies).
-  - Compose: `deploy/bytelord-compose.yaml` (`TZ: America/Los_Angeles`, `stop_grace_period: 90s`).
-  - **No `accounts.yml` changes.** The only data change was deleting the neural keys, done after a Redis backup at `/home/bytecave/spamfilter-redis-before-neural-wipe-*.rdb`.
-- **Scoring changes to expect:** `NEURAL_*` no longer fires. `FUZZY_*` fires for the first time ever: `FUZZY_DENIED` up to +12, `FUZZY_PROB` up to +5, `FUZZY_WHITE` down to −2.1.
-- **New operator-requested feature:** an **allowlisted** Inbox message that Microsoft's trusted Authentication-Results marks as **spoofed** stays in Inbox, but gets a **red follow-up flag** in Outlook (flag/move modes) and an `allowlisted_spoof_suspect` event. Shadow mode only logs `[shadow] would flag allowlisted spoof suspect`.
-- **Neural stays off by decision.** The reasons, and the only way to revisit it, are in IMPLEMENTATION_STATUS § "Neural: why it stays off".
-- **Accounts remain `mode: shadow`.** Do not promote anyone because of this review alone.
-- The cloud session had no Supermemory, Agent Mail, graphify, or VPS access. The first Cursor session should run `supermemory_add` with a summary of the review and the deploy (container=project), then run `graphify update .`.
+### Done tonight (after the Opus deploy)
 
-## Cursor: first job — verify the 2026-09-25 deploy (read-only)
+1. **V1–V7 verification (read-only):** Pass except V3 Bayes `RS*` count was **60919** (not ≥78042). Notebook itself was intact (`rspamc stat` ~226 spam / ~2428 ham). Neural keys = 0. Fuzzy stock rule loaded. No NEURAL_* on sample scores.
+2. **`rescue_below` (commit `ddca9c8`, deployed):** Provider Junk → Inbox only when the **first** score is **&lt; 4** (`accounts.yml` `rescue_below`, default 4). Inbox → Junk still uses `threshold` (default 8). Mid-band 4–8 stays put. User Inbox↔Junk drags are fingerprint-detected and never automoved back. Allow/block still override; spoofed allowlisted mail is not rescued from Junk. Rspamd `actions.conf` labels stay cosmetic.
+3. **Train-* leftover cleanup (commit `0b982e9`, deployed):** Confirmed live: Exchange MOVE-as-COPY left dozens of copies in Train-* after learn→Trained-*. Drain now uses `_move_clearing_source` and `_clear_train_leftovers` (expunge only after a byte-identical copy is verified in Trained-*). Tests: **406 passed**.
+4. **Third Bayes wipe + in-place relearn (retrain3):** Cause of earlier “spam in Trained-Ham”: morning one-shot `/tmp/rescore_trained_spam.py` had moved **981** Trained-Spam messages to Trained-Ham when Bayes was empty (score &lt; 6). Script deleted. Operator corrected folders by hand. Wipe: Redis bak `dump.rdb.bak-20260924-retrain3` inside the redis container; only `bytelord` Bayes keys deleted. After restart of rspamd, learns = 0, then `bootstrap_train.py --all-trained` **in place** (no score-based moves). Final Bayes: **spam ≈ 940**, **ham ≈ 1595**. Fuzzy hits in Trained-*: **3** (`FUZZY_DENIED`), all in `rich_rjmetalfab` Trained-Spam. Dashboard Trained-* rescored (rich_rjmetalfab spam folder needed a second pass with `spamfilter` stopped).
+5. **Running image** matches `0b982e9` (`filter.py` hash equal host↔container). All accounts **`mode: shadow`**. Neural stays off.
+
+### Next for a new agent
+
+1. Human testing table below (esp. #1 list-drain, #6 Train-* leftover after a drag, #9 fuzzy FP watch). Stay in shadow.
+2. Open operator decisions: CR-019 `Rcpt`; optional `DASHBOARD_TRUSTED_PROXIES`; CR-014 Inbox→Junk leftover check before promoting anyone to `move`.
+3. Do **not** wipe Bayes again or run any score-based Trained-* mover unless the operator asks.
+4. Do **not** re-run the Opus neural/fuzzy deploy runbook (kept below for reference only).
+
+## Cursor: first job — verify the 2026-09-25 deploy (read-only) — DONE 2026-09-24 night
 
 The operator already ran the deploy runbook (below). Your job is to **confirm independently** that each step took effect, then report a pass/fail table to the operator.
 
