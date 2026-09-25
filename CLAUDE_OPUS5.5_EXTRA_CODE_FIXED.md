@@ -62,3 +62,8 @@ New `_learn_budget()` = `max_learns_per_hour` minus learns recorded in the last 
 
 Before, a 500-message Train-Spam drop, or a mass Inbox→Junk move, was fully re-downloaded through the proxy on every backoff tick just to be refused after 50 learns.
 Tests: `test_train_drain_fetches_no_bodies_when_budget_exhausted`, `test_train_drain_fetches_only_what_budget_allows`, `test_pending_learns_defer_without_fetch_when_budget_exhausted`.
+
+### OPUS-CR-014 — Train-* never re-MOVEs a leftover copy (Medium; Inbox→Junk still needs live verification)
+`_drain_train_folder` skips any Train-* UID whose DB row already shows `current_folder == Trained-*`. That means the filter learned and MOVEd it, but the server kept the source (Exchange MOVE-as-COPY, which the 2026-09-21 list-drain code already handles). Before, every pass (~30 s) MOVEd the same leftover into Trained-* again. It logs one warning per account/folder per process and **does not expunge**. Deleting outside the list-folder exception stays an operator decision.
+**Not changed (verify live before `move` mode):** whether Exchange leaves the source copy for `execute_due_moves` (Inbox→Junk) and `execute_due_rescues`. If it does, spam would stay visible in Inbox. See the handoff checklist.
+Test: `test_train_leftover_after_move_as_copy_is_not_moved_twice` (the old code moves the leftover again on every pass).

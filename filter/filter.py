@@ -4399,11 +4399,21 @@ def _drain_train_folder(
         )
         return
     due_uids: list[int] = []
+    leftovers = 0
     for uid in uids:
-        if _learn_retry_due(db.get_imap_message(folder, uv, uid)):
+        row = db.get_imap_message(folder, uv, uid)
+        if row is not None and row["current_folder"] == fmap[dst_key]:
+            # Already learned and MOVEd by us, yet still present: the server
+            # executed MOVE as COPY. Never MOVE it again (that duplicates
+            # into Trained-* every pass); leave the copy for the operator.
+            leftovers += 1
+            continue
+        if _learn_retry_due(row):
             due_uids.append(uid)
             if len(due_uids) >= per_run:
                 break
+    if leftovers:
+        _warn_train_leftovers(log, acc.name, folder, fmap[dst_key], leftovers)
     uids = due_uids
     if not uids:
         return
@@ -4461,6 +4471,26 @@ def _drain_train_folder(
         )
         return
     log.info("%s: learned+moved %d", log_tag, len(learned_uids))
+
+
+_TRAIN_LEFTOVER_WARNED: set[tuple[str, str]] = set()
+_TRAIN_LEFTOVER_LOCK = threading.Lock()
+
+
+def _warn_train_leftovers(
+    log: logging.Logger, account: str, folder: str, dest: str, count: int
+) -> None:
+    """Warn once per process per (account, folder); debug afterwards."""
+    with _TRAIN_LEFTOVER_LOCK:
+        first = (account, folder) not in _TRAIN_LEFTOVER_WARNED
+        _TRAIN_LEFTOVER_WARNED.add((account, folder))
+    level = logging.WARNING if first else logging.DEBUG
+    log.log(
+        level,
+        "%s still holds %d uid(s) already moved to %s (server kept a copy "
+        "after MOVE); not moving them again",
+        folder, count, dest,
+    )
 
 
 def drain_train_spam(

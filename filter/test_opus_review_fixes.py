@@ -587,3 +587,24 @@ def test_pending_learns_defer_without_fetch_when_budget_exhausted(tmp_path, monk
         row = db.get_imap_message("Junk", 1, uid)
         assert row["pending_learn"] == "spam"
         assert row["learn_retry_count"] == 1
+
+
+# ----- OPUS-CR-014: a Train-* leftover copy is never re-moved --------------
+
+
+def test_train_leftover_after_move_as_copy_is_not_moved_twice(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account()
+    monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: "learned")
+    client = RecordingIMAP(
+        existing=_all_existing(),
+        search_uids=[1],
+        fetch_by_uid={1: {b"BODY[]": _raw(1), b"FLAGS": ()}},
+        move_leaves_copies=True,
+    )
+    f.drain_train_spam(client, db, LOG, acc, FMAP)
+    assert client.moved == [([1], FMAP["trained_spam"])]
+    for _ in range(3):
+        f.drain_train_spam(client, db, LOG, acc, FMAP)
+    assert client.moved == [([1], FMAP["trained_spam"])]
+    assert client.expunged == []  # never deletes the leftover
