@@ -1,6 +1,6 @@
 # Session handoff — imap-spamfilter (ByteLord VPS)
 
-**Last updated:** 2026-09-25 (Claude Opus 5.5 extra code review + fixes)  
+**Last updated:** 2026-09-25 evening (review fixes **deployed** by the operator; Cursor verifies next)  
 **Repo:** `/opt/bytelord/projects/imap-spamfilter`  
 **Remote:** `github.com:bytecave/imap-spamfilter.git` (branch `main`)  
 **Upstream fork of:** marcelverdult/imap-spamfilter  
@@ -24,18 +24,134 @@ Also read `/home/bytecave/.claude/CLAUDE.md` (Cursor user rule) and use Agent Ma
 
 ---
 
-## Where we left off (2026-09-25) — code review + fixes COMPLETE, awaiting human testing
+## Where we left off (2026-09-25 evening) — review fixes DEPLOYED; Cursor verifies, then human testing
 
-A full code/security review (IMPLEMENTATION_STATUS "What's next" item 3) was done by Claude Code (Opus 5.5) in a cloud session, and the fixes that passed review are committed.
+A full code/security review was done by Claude Code (Opus 5.5) in a cloud session. The fixes are committed, and **the operator deployed them on 2026-09-25**.
 
-- **Findings:** [`CLAUDE_OPUS5.5_EXTRA_CODE_REVIEW.md`](CLAUDE_OPUS5.5_EXTRA_CODE_REVIEW.md): 28 traced findings (4 High, 11 Medium, 13 Low).
-- **What was fixed:** [`CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md`](CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md): 15 fixes, one commit each, plus new tests and README corrections.
-- **Git:** everything is on **`main`** (pushed 2026-09-25). `git pull` in `/opt/bytelord/projects/imap-spamfilter` picks it up. **Nothing is deployed live yet.**
-- **Tests:** `cd filter && python -m pytest -q` → **401 passed** (was 349). New tests are mostly in `filter/test_opus_review_fixes.py`.
-- **Scope of change:** `filter/filter.py`, `filter/dashboard.py`, `unraid/bootstrap.sh`, `unraid/bootstrap.version` (11), `rspamd/local.d/neural.conf` (`autotrain = false`), `deploy/bytelord-compose.yaml` (`TZ: America/Los_Angeles`, `stop_grace_period: 90s`), `README.md`, tests. **No `accounts.yml` changes; the only data change is the neural-key delete in the runbook.**
-- **New operator-requested feature:** an **allowlisted** Inbox message that Microsoft's trusted Authentication-Results marks as **spoofed** stays in Inbox but gets a **red follow-up flag** in Outlook (flag/move modes) plus an `allowlisted_spoof_suspect` event. Shadow only logs `[shadow] would flag allowlisted spoof suspect`.
-- **Accounts remain `mode: shadow`.** Do not promote because of this review alone.
-- This cloud session had no Supermemory, Agent Mail, graphify, or VPS access. The next Cursor session should `supermemory_add` a summary of this review (container=project) and run `graphify update .`.
+- **Findings:** [`CLAUDE_OPUS5.5_EXTRA_CODE_REVIEW.md`](CLAUDE_OPUS5.5_EXTRA_CODE_REVIEW.md): 29 traced findings (4 High, 12 Medium, 13 Low). OPUS-CR-029 (fuzzy) was found *during* the deploy.
+- **What was fixed and what was not:** [`CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md`](CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md). That covers 15 code fixes, each in its own commit with tests, and two rspamd config fixes: CR-004 turns neural `autotrain` off, and CR-029 switches to the stock fuzzy rule. It also covers the allowlisted-spoof flag and the compose `TZ`/`stop_grace_period`. The "Not fixed" table explains every deferral.
+- **Deployed:** the operator ran the runbook below over SSH: steps 1–7, plus "4b", which installed `fuzzy_check.conf`. They report that every output matched "Expect". Facts from their output:
+  - 4 neural keys were deleted (3 `rn_*` and 1 `rn3_*`), and 0 remain.
+  - The Bayes `RS*` key count was **78042** after the wipe, matching step 3.
+  - `configdump neural` shows `autotrain = false`.
+  - Deployed `main` = `1d04635`. Later commits are docs-only unless `git log` says otherwise.
+- **Tests:** `cd filter && python -m pytest -q` gives **401 passed** (was 349). New tests are mostly in `filter/test_opus_review_fixes.py`.
+- **Scope of change:**
+  - Code: `filter/filter.py`, `filter/dashboard.py`, tests, `README.md`.
+  - Unraid: `unraid/bootstrap.sh`, `unraid/bootstrap.version` (12).
+  - rspamd config: `rspamd/local.d/neural.conf` (`autotrain = false`), `rspamd/local.d/fuzzy_check.conf` (comments only, so the stock rule applies).
+  - Compose: `deploy/bytelord-compose.yaml` (`TZ: America/Los_Angeles`, `stop_grace_period: 90s`).
+  - **No `accounts.yml` changes.** The only data change was deleting the neural keys, done after a Redis backup at `/home/bytecave/spamfilter-redis-before-neural-wipe-*.rdb`.
+- **Scoring changes to expect:** `NEURAL_*` no longer fires. `FUZZY_*` fires for the first time ever: `FUZZY_DENIED` up to +12, `FUZZY_PROB` up to +5, `FUZZY_WHITE` down to −2.1.
+- **New operator-requested feature:** an **allowlisted** Inbox message that Microsoft's trusted Authentication-Results marks as **spoofed** stays in Inbox, but gets a **red follow-up flag** in Outlook (flag/move modes) and an `allowlisted_spoof_suspect` event. Shadow mode only logs `[shadow] would flag allowlisted spoof suspect`.
+- **Neural stays off by decision.** The reasons, and the only way to revisit it, are in IMPLEMENTATION_STATUS § "Neural: why it stays off".
+- **Accounts remain `mode: shadow`.** Do not promote anyone because of this review alone.
+- The cloud session had no Supermemory, Agent Mail, graphify, or VPS access. The first Cursor session should run `supermemory_add` with a summary of the review and the deploy (container=project), then run `graphify update .`.
+
+## Cursor: first job — verify the 2026-09-25 deploy (read-only)
+
+The operator already ran the deploy runbook (below). Your job is to **confirm independently** that each step took effect, then report a pass/fail table to the operator.
+
+**Rules for this section:**
+- **Read-only.** Do not stop, restart, or recreate containers. Do not edit live config, touch Redis keys, or change `accounts.yml`. Do **not** re-run the runbook.
+- **If a check fails,** stop, show the operator the exact output, and propose a fix. Do not apply it without their approval.
+- **Never print secrets.** Do not `cat` the secrets file, print the container's full environment, or echo `REDISCLI_AUTH`.
+- Run everything from `/opt/bytelord/projects/imap-spamfilter` as `bytecave`.
+
+**V1: code (runbook step 1)**
+```bash
+cd /opt/bytelord/projects/imap-spamfilter
+git status --short                                     # Expect: no output
+git fetch -q origin main && git status -sb | head -1   # Expect: "## main...origin/main" with no [behind N]
+git log --oneline -5                                   # Expect: 1d04635 "Use rspamd's stock fuzzy rule ..." at the top, or below docs-only commits
+```
+
+**V2: live rspamd config (steps 2, 4, and 4b)**
+```bash
+LIVE=/opt/bytelord/data/imap-spamfilter/rspamd/local.d
+for f in rspamd/local.d/*; do n=$(basename "$f"); case "$n" in *.template) continue;; esac; cmp -s "$f" "$LIVE/$n" || echo "DIFFERS: $n"; done
+# Expect: no output (every live file matches the repo)
+docker exec spamfilter-rspamd rspamadm configtest
+# Expect: "syntax OK", and no "bad encryption key value" line
+docker exec spamfilter-rspamd rspamadm configdump neural | grep -i autotrain
+# Expect: autotrain = false;
+docker exec spamfilter-rspamd rspamadm configdump fuzzy_check | grep -E "encryption_key|servers"
+# Expect: key icy63itbhhni8bq15ntp5n5symuixf73s1kpjh6skaq4e7nx5fiy and servers service=fuzzy+rspamd.com
+docker logs --since 24h spamfilter-rspamd 2>&1 | grep -i fuzzy | tail -20
+# Expect: no repeated timeout/"cannot" errors. If there are, outbound UDP 11335 to rspamd.com is probably
+# blocked: fuzzy then silently scores nothing. That is not a false-positive risk, but tell the operator.
+```
+
+**V3: Redis backup and neural keys (steps 3 and 4)**
+```bash
+ls -la /home/bytecave/spamfilter-redis-before-neural-wipe-*.rdb
+# Expect: at least one file, mode -rw-------, several MB
+export REDISCLI_AUTH="$(sed -nE 's/^(export[[:space:]]+)?REDIS_PASSWORD=//p' /opt/bytelord/secrets/imap-spamfilter.env | tail -n1 | tr -d "\"'\r")"
+docker exec -e REDISCLI_AUTH spamfilter-redis sh -c 'redis-cli --scan --pattern "rn_*"; redis-cli --scan --pattern "rn[0-9]*"' | wc -l
+# Expect: 0. With autotrain off, rspamd 4.2.0 writes no neural keys; a non-zero count means something is training neural.
+docker exec -e REDISCLI_AUTH spamfilter-redis sh -c 'redis-cli --scan --pattern "RS*" | wc -l'
+# Expect: 78042 or more (it grows as the operator trains). A large DROP means Bayes data was lost: stop and report.
+unset REDISCLI_AUTH
+```
+
+**V4: compose file, time zone, and shutdown grace (step 5)**
+```bash
+cmp deploy/bytelord-compose.yaml /opt/bytelord/compose/imap-spamfilter/compose.yaml && echo SAME   # Expect: SAME
+ls -la /opt/bytelord/compose/imap-spamfilter/compose.yaml.bak.*       # Expect: the pre-deploy backup exists
+docker inspect -f '{{.Config.StopTimeout}}' spamfilter                # Expect: 90
+docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' spamfilter | grep '^TZ='
+# Expect: TZ=America/Los_Angeles  (only ever grep this output; the full environment contains secrets)
+date; docker exec spamfilter date                                     # Expect: both in Pacific time (PDT/PST)
+```
+
+**V5: the new code is what's running (step 6)**
+```bash
+sha256sum filter/filter.py filter/dashboard.py
+docker exec spamfilter sha256sum /app/filter.py /app/dashboard.py
+# Expect: the same two hashes. A mismatch means the image is older than the checkout, so ask the operator before rebuilding.
+docker exec spamfilter grep -c "allowlisted_spoof_suspect" /app/filter.py   # Expect: a number greater than 0
+```
+
+**V6: health (step 7)**
+```bash
+docker compose -f /opt/bytelord/compose/imap-spamfilter/compose.yaml ps
+# Expect: all four containers Up; spamfilter shows (healthy)
+docker logs spamfilter 2>&1 | grep -c "connected, delimiter"
+# Expect: 10 or more (one per account per connect)
+docker logs --since 24h spamfilter 2>&1 | grep -iE "unhandled|database is locked|Traceback|giving up on" | tail -20
+# Expect: nothing, or something you can explain to the operator
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8099/login   # Expect: 200
+docker exec -i spamfilter python - <<'EOF'
+import sqlite3, time
+c = sqlite3.connect("file:/state/spamfilter.db?mode=ro", uri=True)
+for ev, n in c.execute("SELECT event, COUNT(*) FROM events WHERE ts > ? GROUP BY event ORDER BY 2 DESC", (int(time.time()) - 86400,)):
+    print(f"{n:6d}  {ev}")
+EOF
+# Expect: scan-type events dominate. scan_giveup should be absent (see test #2 if present).
+# allowlisted_spoof_suspect / no_message_id may appear occasionally; list those to the operator.
+```
+
+**V7: scores (neural gone, fuzzy present)**
+```bash
+docker exec spamfilter python explain_score.py <account> --uid <recent Inbox UID>
+# <account> is a name from accounts.yml; take a UID from the dashboard Messages page.
+# Expect: no NEURAL_SPAM / NEURAL_HAM lines. FUZZY_* lines are new and may appear on some mail.
+```
+Repeat V7 on 3–5 recent messages, including one obvious spam and one normal message.
+
+**Then:**
+- Report the V1–V7 results to the operator as a table.
+- `supermemory_add` (container=project): "2026-09-25 Opus review deployed and verified", with the facts above.
+- Move on to the reading list and the test table.
+
+### Reading list for Cursor (what changed, what didn't)
+
+1. `CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md`, section **Fixes**: every change, with the tests that cover it.
+2. `CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md`, section **Not fixed — recommendations for the operator**: what was deliberately left alone, and why.
+3. `CLAUDE_OPUS5.5_EXTRA_CODE_REVIEW.md`: the full evidence for any finding you need to understand.
+4. "Decisions" below, and IMPLEMENTATION_STATUS § "Current product policy" (including "Neural: why it stays off").
+
+## After verification: testing, decisions, and the deploy record
 
 ### Test these first (highest risk / most behavior change)
 
@@ -49,16 +165,23 @@ A full code/security review (IMPLEMENTATION_STATUS "What's next" item 3) was don
 | 6 | **CR-014** Train-* leftover guard | After Train-* drains, confirm Train-* is empty and Trained-* has **no duplicates**. A `still holds N uid(s) already moved` warning means Exchange kept a source copy after MOVE. |
 | 7 | **CR-006** scan `Delivered-To` | ByteLord's bare `bytelord` path is byte-identical. Spot-check `explain_score.py <acct> --uid <n>`: `BAYES_*` symbols should look the same as before. |
 | 8 | **CR-003 / CR-007 / CR-008 / CR-009** rescue + retention guards | These only act in `flag`/`move` modes. Before promoting anyone, run **one test mailbox** in `move` mode and check: <br>• a spoof of an allowlisted vendor that Microsoft junked (`compauth=fail`) stays in Junk (`rescue_skipped m365_spoof_verdict`);<br>• old Archive mail dragged into Junk stays there (`rescue_skipped old_internaldate`);<br>• re-junking a rescued message produces `pending_spam` → `learn_spam`;<br>• allowlisted provider-Junk is never sent to Trash by retention in `flag` mode. |
+| 9 | **CR-029** fuzzy now scores | Over the next few days, `FUZZY_DENIED` (up to +12) or `FUZZY_PROB` (up to +5) should show up on some spam in `explain_score.py` or the dashboard's "why" column, and `FUZZY_WHITE` (−2.1) on some bulk ham. **Any `FUZZY_DENIED` on mail the operator considers legitimate:** report it with the UID. It is a false-positive risk that did not exist before. |
+| 10 | **CR-004** neural off | No `NEURAL_SPAM`/`NEURAL_HAM` in any new score; V3's neural key count stays 0. |
+| 11 | Allowlisted spoof flag (shadow) | Look for `allowlisted_spoof_suspect` events or `[shadow] would flag allowlisted spoof suspect` log lines. For each one, check the headers: is it really a spoof of an allowlisted sender? A legitimate allowlisted sender triggering this is a false alarm to report. |
+| 12 | `TZ` Pacific | Dashboard times and per-day buckets match the operator's local clock. |
 
 ### Decisions needed from the operator (not changed by the review)
 
-1. **CR-004 (High) — Rspamd neural autotrain: decided 2026-09-25 (operator approved).** `rspamd/local.d/neural.conf` now has `train { autotrain = false; }` (`bootstrap.version` 11), and the runbook above deletes only the neural `rn_*` / `rn3_*` Redis keys, with a Redis backup first. Neural will add no score until someone deliberately retrains it. Bayes and fuzzy are untouched.
+1. **CR-004 (High) — Rspamd neural autotrain: done and deployed 2026-09-25.** `autotrain = false`; neural keys deleted after a Redis backup. Neural adds no score. It **stays off by decision**: see IMPLEMENTATION_STATUS § "Neural: why it stays off" before proposing to turn it back on.
 2. **CR-014 (live check before `move` mode):** does Exchange leave the Inbox copy after the filter's `UID MOVE` Inbox→Junk (and Junk→Inbox for rescues)? If it does, spam stays visible in Inbox in move mode, so decide whether to detect it or expunge.
 3. **CR-003 (Inbox side):** decided. Allowlisted spoof suspects stay in Inbox but are flagged (see above).
 4. **CR-019:** HTTP `Rcpt` on scans is the first To/Cc address, not the mailbox as earlier docs claimed. Switching to the mailbox is more truthful but may add `FORGED_RECIPIENTS` points to list/BCC ham.
-5. **CR-022/023 (compose):** `TZ` (Pacific) and `stop_grace_period: 90s` are now in `deploy/bytelord-compose.yaml`; **copy it to the live path** (below). `env_file` was deliberately left as is (low value, some risk). Optionally set `DASHBOARD_TRUSTED_PROXIES` to the Docker bridge gateway so login throttling sees real client IPs behind Caddy.
+5. **CR-022/023 (compose):** `TZ` (Pacific) and `stop_grace_period: 90s` are deployed (live compose = repo, verified by V4). `env_file` was deliberately left as is (low value, some risk). Optionally set `DASHBOARD_TRUSTED_PROXIES` to the Docker bridge gateway so login throttling sees real client IPs behind Caddy.
+6. **CR-029 — fuzzy: fixed and deployed 2026-09-25.** Stock `rspamd.com` rule; watch for `FUZZY_DENIED` on legitimate mail (test #9).
 
-### Deploy runbook (copy/paste over SSH as `bytecave`; no Cursor needed)
+### Deploy runbook — DONE by the operator 2026-09-25 (kept for reference; do not re-run)
+
+**Already executed.** Cursor verifies it with V1–V7 above and must not re-run it (steps 3–4 stop services and delete Redis keys). The runbook is kept as the pattern for future deploys.
 
 Run each step, look at the output, and only continue if it matches "Expect". If anything looks different, stop and paste the output to your assistant. The filter and dashboard are down only between steps 4 and 6 (a few minutes).
 
@@ -188,12 +311,13 @@ Messages tab reads SQLite `our_score` / `score_detail`. Inbox and top-level Junk
 
 ## Next steps (do these, in order)
 
-1. **Run the deploy runbook above** (pull, neural config and key wipe, compose, rebuild), then work through the "Test these first" table (Cursor can help).
-2. Watch scores for a few days now that neural no longer contributes.
-3. **Stay in shadow.** Keep teaching content spam via Train-Spam (5Tool-style cold pitch, Chelsea, iPic). Before `flag`/`move`, run one test mailbox in `move` mode to check the rescue/retention guards and the live Exchange MOVE semantics (CR-014).
-4. **Do not** wipe Bayes again unless the operator asks.
-5. Later: CR-016 supply chain; the Low items listed in `CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md` "Not fixed"; more mailboxes only when asked.
-6. Optional later: bulk-rescore Inbox/Junk dashboard rows (not done; the operator excluded them).
+1. **Cursor: run V1–V7** ("Cursor: first job" above) and report to the operator. The deploy itself is done.
+2. **Work through "Test these first"** with the operator (rows 1–7 and 9–12 in shadow; row 8 needs one test mailbox in `move` mode).
+3. Watch scores for a few days: `NEURAL_*` is gone and `FUZZY_*` is new. Report any legitimate mail whose score jumped because of `FUZZY_DENIED`.
+4. **Stay in shadow.** Keep teaching content spam via Train-Spam (5Tool-style cold pitch, Chelsea, iPic). Before `flag`/`move`, run one test mailbox in `move` mode to check the rescue/retention guards and the live Exchange MOVE semantics (CR-014).
+5. **Do not** wipe Bayes again unless the operator asks. **Do not** turn neural back on (see IMPLEMENTATION_STATUS).
+6. Later: CR-016 supply chain; the Low items listed in `CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md` "Not fixed"; more mailboxes only when asked.
+7. Optional later: bulk-rescore Inbox/Junk dashboard rows (not done; the operator excluded them).
 
 ---
 
@@ -225,14 +349,14 @@ Recreate filter with `SPAMFILTER_UID=1001 SPAMFILTER_GID=1001`. **Do not** `comp
 |---|---|
 | `IMPLEMENTATION_STATUS.md` | **Mandatory** durable map |
 | `SESSION_HANDOFF.md` | This file |
-| `CLAUDE_OPUS5.5_EXTRA_CODE_REVIEW.md` | 2026-09-25 review: 28 traced findings |
-| `CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md` | What was fixed (15), what was deferred and why |
+| `CLAUDE_OPUS5.5_EXTRA_CODE_REVIEW.md` | 2026-09-25 review: 29 traced findings |
+| `CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md` | What was fixed (15 code + 2 rspamd config), what was deferred and why |
 | `filter/test_opus_review_fixes.py` | Regression tests for those fixes |
 | `filter/filter.py` | Scan/learn; `rspamd_scan_detail`; `apply_m365_auth_trust` |
 | `filter/explain_score.py` | Re-score one UID and print symbols |
 | `filter/bootstrap_train.py` | `--all-trained` Trained-* re-feed |
 | `filter/dashboard.py` | Messages “why” from `score_detail` |
-| `rspamd/local.d/` | `hfilter_group.conf`, `actions.conf` (cosmetic 4/6/15) |
+| `rspamd/local.d/` | `hfilter_group.conf`, `actions.conf` (cosmetic 4/6/15), `neural.conf` (autotrain off), `fuzzy_check.conf` (comments only → stock rule) |
 | `README.md` | Operator docs (IMAP-path limitation section) |
 | `design-arch/slice6_rspamd_scan_metadata.md` | Locked: no fake `Ip`/`Helo` |
 
