@@ -664,3 +664,139 @@ def test_bootstrap_fallback_version_matches_version_file():
     fallback = re.search(r"\|\| echo (\d+)\)", text).group(1)
     current = (BOOTSTRAP.parent / "bootstrap.version").read_text().strip()
     assert fallback == current
+
+
+# ----- OPUS-CR-015: previously uncovered core learning / move paths --------
+
+
+def test_user_inbox_to_junk_without_keyword_learns_after_grace(tmp_path, monkeypatch):
+    """README training rule 1: Inbox -> Junk = learn spam after the grace."""
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="shadow", learn_grace_seconds=0)
+    raw = _raw(5)
+    with db.tx():
+        db.set_scan_bookmark("Junk", 1, 4)
+        db.upsert_imap_message(
+            "INBOX", 1, 40, message_id="m5@example.com", body_sha256=f.body_sha256(raw),
+        )
+    learned = []
+    monkeypatch.setattr(
+        f, "rspamd_learn", lambda r, kind, user: learned.append(kind) or "learned",
+    )
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: pytest.fail("user move is not scanned"),
+    )
+    client = CapIMAP(existing=_all_existing(), uids=[5], bodies={5: raw})
+    f.poll_junk(client, db, LOG, acc, FMAP)
+    assert learned == ["spam"]
+    row = db.get_imap_message("Junk", 1, 5)
+    assert row["learned_as"] == "spam"
+    assert row["pending_learn"] is None
+    assert "pending_spam" in _events(db) and "learn_spam" in _events(db)
+
+
+def test_junk_to_inbox_revert_learns_ham_after_grace(tmp_path, monkeypatch):
+    """README training rule 2: Junk -> Inbox = learn ham after the grace."""
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="shadow", learn_grace_seconds=0)
+    raw = _raw(6)
+    with db.tx():
+        db.set_scan_bookmark("INBOX", 1, 0)
+        db.upsert_imap_message(
+            "Junk", 1, 9, message_id="m6@example.com", body_sha256=f.body_sha256(raw),
+        )
+    learned = []
+    monkeypatch.setattr(
+        f, "rspamd_learn", lambda r, kind, user: learned.append(kind) or "learned",
+    )
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: pytest.fail("revert is not scanned"),
+    )
+    client = CapIMAP(existing=_all_existing(), uids=[1], bodies={1: raw})
+    f.scan_inbox(client, db, LOG, acc, FMAP, f.AccountState())
+    row = db.get_imap_message("INBOX", 1, 1)
+    assert row["pending_learn"] == "ham"
+    assert db.get_scan_bookmark("INBOX", 1) == 1
+    f.process_pending_learns(client, db, LOG, acc, FMAP)
+    assert learned == ["ham"]
+    assert db.get_imap_message("INBOX", 1, 1)["learned_as"] == "ham"
+
+
+def test_notjunk_keyword_revert_learns_immediately(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="shadow", learn_grace_seconds=3600)
+    raw = _raw(6)
+    with db.tx():
+        db.set_scan_bookmark("INBOX", 1, 0)
+        db.upsert_imap_message(
+            "Junk", 1, 9, message_id="m6@example.com", body_sha256=f.body_sha256(raw),
+        )
+    learned = []
+    monkeypatch.setattr(
+        f, "rspamd_learn", lambda r, kind, user: learned.append(kind) or "learned",
+    )
+    client = CapIMAP(
+        existing=_all_existing(), uids=[1], bodies={1: raw},
+        flags={1: (b"$NotJunk",)},
+    )
+    f.scan_inbox(client, db, LOG, acc, FMAP, f.AccountState())
+    assert learned == ["ham"]
+
+
+def test_pending_spam_moved_out_during_grace_is_lost_not_learned(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="shadow", learn_grace_seconds=0)
+    with db.tx():
+        db.upsert_imap_message("Junk", 1, 5, message_id="m5@example.com")
+        db.update_imap_message("Junk", 1, 5, pending_learn="spam", pending_learn_at=1)
+    monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: pytest.fail("no learn"))
+
+    class GoneIMAP(CapIMAP):
+        # A real server returns no FETCH data for a UID that is gone
+        # (CapIMAP would still invent FLAGS for it).
+        def fetch(self, uids, parts):
+            return {u: d for u, d in super().fetch(uids, parts).items() if u in self.uids}
+
+    client = GoneIMAP(existing=_all_existing(), uids=[], bodies={})
+    f.process_pending_learns(client, db, LOG, acc, FMAP)
+    assert db.get_imap_message("Junk", 1, 5)["pending_learn"] is None
+    assert "pending_lost" in _events(db)
+
+
+def test_unseen_over_cap_enters_and_leaves_safe_mode(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="move", safe_mode_unseen_cap=2)
+    with db.tx():
+        db.set_scan_bookmark("INBOX", 1, 0)
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(1.0, (), None),
+    )
+    client = CapIMAP(
+        existing=_all_existing(), uids=[1, 2, 3],
+        bodies={n: _raw(n) for n in (1, 2, 3)},
+    )
+    f.scan_inbox(client, db, LOG, acc, FMAP, f.AccountState())
+    assert db.in_safe_mode("all")
+    assert db.get_scan_bookmark("INBOX", 1) == 0
+    client.flags = {1: (b"\\Seen",), 2: (b"\\Seen",)}
+    f.scan_inbox(client, db, LOG, acc, FMAP, f.AccountState())
+    assert not db.in_safe_mode("all")
+    assert db.get_scan_bookmark("INBOX", 1) == 3
+
+
+def test_due_moves_respect_remaining_hourly_quota(tmp_path):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="move", move_grace_seconds=0, max_moves_per_hour=3)
+    with db.tx():
+        db.record_rate("move")
+        for uid in (1, 2, 3):
+            db.upsert_imap_message("INBOX", 1, uid, message_id=f"m{uid}@example.com")
+            db.update_imap_message("INBOX", 1, uid, our_score=9.0, our_action="pending_move")
+            db.add_pending_move(1, uid, f"m{uid}@example.com", folder="INBOX")
+    client = CapIMAP(
+        existing=_all_existing(), uids=[1, 2, 3],
+        bodies={n: _raw(n) for n in (1, 2, 3)},
+    )
+    f.execute_due_moves(client, db, LOG, acc, FMAP)
+    assert client.moved == [([1, 2], "Junk")]
+    assert [r["uid"] for r in db.due_pending_moves("INBOX", 1, 0)] == [3]

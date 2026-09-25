@@ -75,3 +75,14 @@ Test: `test_allow_hit_without_pending_move_logs_no_cancellation`; ChatGPT CR-001
 ### OPUS-CR-017 — Bootstrap renders secret configs owner-only from the first byte (Low)
 `unraid/bootstrap.sh` `render_subst` now runs awk in a `umask 077` subshell. The rendered `worker-controller.inc` and both Redis configs are created 0600 and only then widened to the intended 0640 by `verify_secret_file`; before, under the caller's umask (usually 022) they were briefly world-readable. The single-file-paste fallback version now matches `unraid/bootstrap.version` (10, not 9), and a test keeps them in lockstep.
 Tests: `test_render_subst_creates_rendered_secret_owner_only` (extracts and runs the real bash function under umask 022), `test_bootstrap_fallback_version_matches_version_file`. `bash -n` is clean.
+
+### OPUS-CR-015 — Core learning and move-mode paths now have tests (Medium; partially closed)
+New tests exercise paths the suite never ran:
+- the non-keyword user Inbox→Junk move → grace → `learn_spam`;
+- Junk→Inbox revert → `pending_ham` → `learn_ham`, and `$NotJunk` learning immediately;
+- a pending spam learn whose message left Junk during grace → `pending_lost`;
+- UNSEEN over the cap → safe-mode "all" with no bookmark advance, then automatic exit;
+- `execute_due_moves` honoring the remaining hourly move quota.
+
+Together with the per-fix tests, `filter.py` branch coverage rose from **72% to 78%** (total 75% → 79%), and the suite from 349 to 396 tests. The shared `CapIMAP`/`RecordingIMAP` fakes return `FLAGS` for UIDs that don't exist, unlike a real server; the lost-UID test uses a realistic fake instead, and this is worth fixing in the shared fakes. Still recommended (not added): a scripted `_run_account` call-order test, and retention SEARCH/MOVE failure branches.
+Tests: `test_user_inbox_to_junk_without_keyword_learns_after_grace`, `test_junk_to_inbox_revert_learns_ham_after_grace`, `test_notjunk_keyword_revert_learns_immediately`, `test_pending_spam_moved_out_during_grace_is_lost_not_learned`, `test_unseen_over_cap_enters_and_leaves_safe_mode`, `test_due_moves_respect_remaining_hourly_quota`.
