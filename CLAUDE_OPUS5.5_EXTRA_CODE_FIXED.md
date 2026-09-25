@@ -116,5 +116,5 @@ These passed verification but are policy, scoring, or ops decisions, or too mino
 - `cd filter && python -m pytest -q` → **397 passed** (baseline was 349).
 - Branch coverage: `filter.py` 72% → 78%; total 75% → 79%.
 - `python -m compileall -q filter` is clean; `bash -n deploy/*.sh unraid/*.sh` is clean.
-- Each new regression test was checked to **fail on the pre-fix code** where it's feasible (CR-001, 005, 011, 012, 014, 017, and the CR-002 give-up sequence).
+- **Every fix-specific regression test fails against the original `ff9461e` code**, either on its assertions or, for the new helpers (`m365_spoof_verdict`, the poison constants), because they don't exist yet. For example, the backoff test sees gaps `[5, 5, 5]` and the list-drain collision test sees an EXPUNGE with no MOVE. The review's reproduction script confirmed CR-002's old behavior (bookmark stuck after 20 passes). The six CR-015 coverage tests and the "unchanged behavior" controls pass on both versions, as intended.
 - There was no live IMAP or Rspamd here: everything was verified with the repo's IMAP/Rspamd fakes and against upstream Rspamd 4.2.0, waitress 3.0.2, and imapclient 3.1.0 source. The live-verification checklist is in `SESSION_HANDOFF.md`.
