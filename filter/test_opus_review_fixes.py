@@ -598,7 +598,7 @@ def test_pending_learns_defer_without_fetch_when_budget_exhausted(tmp_path, monk
 # ----- OPUS-CR-014: a Train-* leftover copy is never re-moved --------------
 
 
-def test_train_leftover_after_move_as_copy_is_not_moved_twice(tmp_path, monkeypatch):
+def test_train_leftover_after_move_as_copy_is_expunged_once(tmp_path, monkeypatch):
     db = _mk_db(tmp_path)
     acc = _mk_account()
     monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: "learned")
@@ -610,10 +610,56 @@ def test_train_leftover_after_move_as_copy_is_not_moved_twice(tmp_path, monkeypa
     )
     f.drain_train_spam(client, db, LOG, acc, FMAP)
     assert client.moved == [([1], FMAP["trained_spam"])]
+    assert client.expunged == [[1]]
     for _ in range(3):
         f.drain_train_spam(client, db, LOG, acc, FMAP)
     assert client.moved == [([1], FMAP["trained_spam"])]
-    assert client.expunged == []  # never deletes the leftover
+    assert client.expunged == [[1]]
+
+
+def _seed_train_leftover(db, raw):
+    with db.tx():
+        db.upsert_imap_message(
+            FMAP["spam_train"], 1, 1,
+            message_id="<m1@example.com>", body_sha256=f.body_sha256(raw),
+        )
+        db.update_imap_message(
+            FMAP["spam_train"], 1, 1,
+            current_folder=FMAP["trained_spam"], learned_as="spam",
+        )
+
+
+def test_old_train_leftover_with_verified_copy_is_expunged(tmp_path, monkeypatch):
+    raw = _raw(1)
+    db = _mk_db(tmp_path)
+    _seed_train_leftover(db, raw)
+    monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: pytest.fail("no learn"))
+    client = RecordingIMAP(
+        existing=_all_existing(),
+        search_uids=[1],
+        fetch_by_uid={1: {b"BODY[]": raw, b"FLAGS": ()}},
+    )
+    client.inbox_message_ids = {"m1@example.com"}
+    f.drain_train_spam(client, db, LOG, _mk_account(), FMAP)
+    assert client.moved == []
+    assert client.expunged == [[1]]
+    assert (FMAP["trained_spam"], True) in client.selects
+    assert "train_leftover_expunged" in _events(db)
+
+
+def test_old_train_leftover_without_copy_is_kept(tmp_path, monkeypatch):
+    raw = _raw(1)
+    db = _mk_db(tmp_path)
+    _seed_train_leftover(db, raw)
+    monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: pytest.fail("no learn"))
+    client = RecordingIMAP(
+        existing=_all_existing(),
+        search_uids=[1],
+        fetch_by_uid={1: {b"BODY[]": raw, b"FLAGS": ()}},
+    )
+    f.drain_train_spam(client, db, LOG, _mk_account(), FMAP)
+    assert client.moved == []
+    assert client.expunged == []
 
 
 # ----- OPUS-CR-016: no phantom pending_move_canceled events -----------------

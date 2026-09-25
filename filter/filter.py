@@ -4466,6 +4466,22 @@ def _drain_train_folder(
     uids = client.search(["ALL"])
     if not uids:
         return
+    candidates: list[tuple[int, Any]] = []
+    leftovers: list[tuple[int, str | None, str | None]] = []
+    for uid in uids:
+        row = db.get_imap_message(folder, uv, uid)
+        if row is not None and row["current_folder"] == fmap[dst_key]:
+            # Already learned and MOVEd by us, yet still present: the server
+            # executed MOVE as COPY. Never MOVE it again (that duplicates
+            # into Trained-* every pass).
+            leftovers.append((uid, row["message_id"], row["body_sha256"]))
+            continue
+        candidates.append((uid, row))
+    if leftovers:
+        if not _clear_train_leftovers(
+            client, db, log, acc, folder, fmap[dst_key], leftovers,
+        ):
+            return
     per_run = min(acc.max_train_per_run, _learn_budget(db, acc))
     if per_run <= 0:
         log.debug(
@@ -4473,21 +4489,11 @@ def _drain_train_folder(
         )
         return
     due_uids: list[int] = []
-    leftovers = 0
-    for uid in uids:
-        row = db.get_imap_message(folder, uv, uid)
-        if row is not None and row["current_folder"] == fmap[dst_key]:
-            # Already learned and MOVEd by us, yet still present: the server
-            # executed MOVE as COPY. Never MOVE it again (that duplicates
-            # into Trained-* every pass); leave the copy for the operator.
-            leftovers += 1
-            continue
+    for uid, row in candidates:
         if _learn_retry_due(row):
             due_uids.append(uid)
             if len(due_uids) >= per_run:
                 break
-    if leftovers:
-        _warn_train_leftovers(log, acc.name, folder, fmap[dst_key], leftovers)
     uids = due_uids
     if not uids:
         return
@@ -4527,7 +4533,10 @@ def _drain_train_folder(
     if not learned_uids:
         return
     try:
-        client.move(learned_uids, fmap[dst_key])
+        _move_clearing_source(
+            client, learned_uids, fmap[dst_key], log,
+            password=acc.password, src_label=folder,
+        )
     except IMAPClientError as ex:
         log.warning("move %s -> %s failed: %s", folder, fmap[dst_key], redact_log(str(ex), acc.password))
         return
@@ -4545,6 +4554,51 @@ def _drain_train_folder(
         )
         return
     log.info("%s: learned+moved %d", log_tag, len(learned_uids))
+
+
+def _clear_train_leftovers(
+    client: IMAPClient,
+    db: Db,
+    log: logging.Logger,
+    acc: Account,
+    folder: str,
+    dest: str,
+    leftovers: list[tuple[int, str | None, str | None]],
+) -> bool:
+    """Expunge Train-* copies already learned and moved to `dest`.
+
+    Only a leftover whose byte-identical twin is in `dest` is expunged;
+    one without a stored Message-ID/SHA or without a verified twin stays
+    and is warned about. Returns False if `folder` cannot be re-selected.
+    """
+    wanted = {(m, s) for _, m, s in leftovers if m and s}
+    verified = _identical_copies_in_folder(
+        client, dest, wanted, log, password=acc.password,
+    )
+    try:
+        select_with_uidvalidity_check(client, db, folder, log)
+    except IMAPClientError as ex:
+        log.warning(
+            "train drain: cannot re-select %s after copy check: %s",
+            folder, redact_log(str(ex), acc.password),
+        )
+        return False
+    clear = [uid for uid, m, s in leftovers if m and s and (m, s) in verified]
+    keep = len(leftovers) - len(clear)
+    if clear:
+        log.info(
+            "%s: %d uid(s) already in %s; expunging leftover copies",
+            folder, len(clear), dest,
+        )
+        _expunge_source_uids(client, clear, log, password=acc.password)
+        with db.tx():
+            db.log_event(
+                "train_leftover_expunged",
+                detail=f"{folder} -> {dest} n={len(clear)}",
+            )
+    if keep:
+        _warn_train_leftovers(log, acc.name, folder, dest, keep)
+    return True
 
 
 _TRAIN_LEFTOVER_WARNED: set[tuple[str, str]] = set()

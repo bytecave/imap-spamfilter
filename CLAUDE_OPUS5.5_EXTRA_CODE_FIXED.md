@@ -65,6 +65,8 @@ Tests: `test_train_drain_fetches_no_bodies_when_budget_exhausted`, `test_train_d
 
 ### OPUS-CR-014 — Train-* never re-MOVEs a leftover copy (Medium; Inbox→Junk still needs live verification)
 `_drain_train_folder` skips any Train-* UID whose DB row already shows `current_folder == Trained-*`. That means the filter learned and MOVEd it, but the server kept the source (Exchange MOVE-as-COPY, which the 2026-09-21 list-drain code already handles). Before, every pass (~30 s) MOVEd the same leftover into Trained-* again. It logs one warning per account/folder per process and **does not expunge**. Deleting outside the list-folder exception stays an operator decision.
+
+**2026-09-24 follow-up (Cursor, operator-approved):** confirmed live. The operator had to delete dozens of Train-* leftovers by hand in every `rich@*` mailbox. The Train-* drain now moves with `_move_clearing_source`, like the list drains, so a leftover is expunged right after MOVE. On later passes, `_clear_train_leftovers` expunges an older leftover only when its stored Message-ID and body SHA-256 match a copy verified in Trained-*. Leftovers with no verified copy are kept and warned about. Inbox→Junk and rescue moves are unchanged.
 **Not changed (verify live before `move` mode):** whether Exchange leaves the source copy for `execute_due_moves` (Inbox→Junk) and `execute_due_rescues`. If it does, spam would stay visible in Inbox. See the handoff checklist.
 Test: `test_train_leftover_after_move_as_copy_is_not_moved_twice` (the old code moves the leftover again on every pass).
 

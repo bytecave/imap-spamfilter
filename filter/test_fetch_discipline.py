@@ -71,6 +71,8 @@ class CapIMAP:
 
     def move(self, uids, dest):
         self.moved.append((list(uids), dest))
+        gone = set(uids)
+        self.uids = [u for u in self.uids if u not in gone]
 
     def add_flags(self, uid, flags):
         self.flags_added.append((uid, flags))
