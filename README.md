@@ -26,8 +26,10 @@ Per-account operating modes (set in `accounts.yml`, promoted manually):
   auto-junked or auto-rescued in shadow.
 - **flag**    - shadow + sets `\Flagged` on suspect Inbox mail; retention on
 - **move**    - flag + after `move_grace_seconds`, MOVEs Inbox → Junk.
-  Provider-delivered Junk (never seen in Inbox) is scored; under-threshold
-  or allowlisted mail is MOVEd back to Inbox after the same grace.
+  Provider-delivered Junk (never seen in Inbox) is scored the first time;
+  mail under `rescue_below` (default 4), or allowlisted mail, is MOVEd
+  back to Inbox after the same grace. A score between `rescue_below` and
+  `threshold` stays in Junk. A user drag Inbox ↔ Junk is not moved back.
   Blocklisted provider-Junk stays. Auto-rescue never Bayes-learns. Rescue
   is refused when Microsoft's trusted `Authentication-Results` marks the
   message as spoofed (`compauth=fail`, or `dmarc=fail` without compauth),
@@ -535,7 +537,8 @@ user's mailbox.
 | Key | Default | Notes |
 | --- | --- | --- |
 | `mode` | `shadow` | `shadow` (no Inbox/Junk/Trash writes; Train-* drain allowed) \| `flag` \| `move` |
-| `threshold` | `8.0` | rspamd score >= this counts as spam |
+| `threshold` | `8.0` | Inbox score >= this is moved to Junk in move mode |
+| `rescue_below` | `4.0` | provider Junk is moved to Inbox only when the first score is below this |
 | `min_threshold_allowed` | `5.0` | startup refuses to run if `threshold` is below this |
 | `reject_score_above` | `100.0` | scores outside `±this` are treated as failed scan |
 

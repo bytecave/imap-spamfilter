@@ -558,6 +558,11 @@ class Account:
     # value across multiple accounts to pool their Bayes training.
     bayes_user: str | None = None
 
+    # Provider-Junk → Inbox only when the first score is under this.
+    # Inbox → Junk still uses `threshold`. A user drag either way is
+    # recognized by body fingerprint and is not moved back.
+    rescue_below: float = 4.0
+
     # Shared immutable roster from YAML; empty if list_domains omitted.
     list_roster: ListRoster = field(default_factory=ListRoster)
 
@@ -603,6 +608,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "blocklist": "INBOX/Blocklist",
     "mode": "shadow",
     "threshold": 8.0,
+    "rescue_below": 4.0,
     "min_threshold_allowed": 5.0,
     "reject_score_above": 100.0,
     "move_grace_seconds": 60,
@@ -1085,6 +1091,9 @@ def load_accounts(path: Path) -> list[Account]:
                     merged["reject_score_above"], key="reject_score_above",
                     account=name,
                 ),
+                rescue_below=_parse_finite_float(
+                    merged["rescue_below"], key="rescue_below", account=name,
+                ),
                 move_grace_seconds=_parse_int(
                     merged["move_grace_seconds"], key="move_grace_seconds",
                     account=name,
@@ -1225,7 +1234,7 @@ def validate_account(acc: Account) -> None:
             raise ConfigError(f"{acc.name}: actual_name is required")
     if not 1 <= acc.imap_port <= 65535:
         raise ConfigError(f"{acc.name}: imap_port out of range ({acc.imap_port})")
-    for key in ("threshold", "min_threshold_allowed", "reject_score_above"):
+    for key in ("threshold", "rescue_below", "min_threshold_allowed", "reject_score_above"):
         value = getattr(acc, key)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
             raise ConfigError(f"{acc.name}: {key} must be a finite non-boolean number")
@@ -1238,6 +1247,11 @@ def validate_account(acc: Account) -> None:
         raise ConfigError(
             f"{acc.name}: threshold {acc.threshold} below min_threshold_allowed "
             f"{acc.min_threshold_allowed}"
+        )
+    if acc.rescue_below <= 0 or acc.rescue_below > acc.threshold:
+        raise ConfigError(
+            f"{acc.name}: rescue_below {acc.rescue_below} must be > 0 and "
+            f"<= threshold {acc.threshold}"
         )
     if acc.reject_score_above < acc.threshold:
         raise ConfigError(
@@ -4048,7 +4062,7 @@ def execute_due_rescues(
         row = db.get_imap_message(junk, uv, uid)
         score = _finite_score(row["our_score"] if row is not None else None)
         allow = hit is not None and hit.decision == "allow"
-        if not allow and (score is None or score >= acc.threshold):
+        if not allow and (score is None or score >= acc.rescue_below):
             with db.tx():
                 db.drop_pending_move(junk, uv, uid)
                 db.update_imap_message(junk, uv, uid, our_action=None)
@@ -4264,9 +4278,11 @@ def poll_junk(
                             )
                         last_terminal = uid
                         continue
-                # Allow hit, or unlisted and under threshold: a rescue
+                # Allow hit, or unlisted and under rescue_below: a rescue
                 # candidate, unless evidence says it must stay in Junk.
-                if hit is not None or score < acc.threshold:
+                # Inbox → Junk uses acc.threshold, which is higher, so a
+                # mid-band score stays in whichever folder it arrived in.
+                if hit is not None or score < acc.rescue_below:
                     blocked = _rescue_blocker(
                         raw, received_at=_internaldate_ts(data),
                     )

@@ -676,6 +676,73 @@ def test_provider_junk_low_score_rescues_in_move_mode(tmp_path, monkeypatch):
     assert "rescued_to_inbox" in evs
 
 
+def test_provider_junk_mid_score_stays(tmp_path, monkeypatch):
+    """6 is under the Inbox spam line (8) but not confident ham (< 4)."""
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="move", move_grace_seconds=0, threshold=8.0)
+    with db.tx():
+        db.set_scan_bookmark("Junk", 1, 3)
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(6.0, (), None),
+    )
+    client = CapIMAP(
+        existing=_all_existing(), uids=[4], bodies={4: _raw(4)},
+    )
+    f.poll_junk(client, db, LOG, acc, FMAP)
+    assert client.moved == []
+    row = db.get_imap_message("Junk", 1, 4)
+    assert row["our_score"] == 6.0
+    assert row["our_action"] is None
+    evs = [r["event"] for r in db.conn.execute("SELECT event FROM events")]
+    assert "would_rescue" not in evs
+    assert "pending_rescue" not in evs
+
+
+def test_user_drag_to_junk_is_not_rescued(tmp_path, monkeypatch):
+    raw = _raw(4)
+    db = _mk_db(tmp_path)
+    _seed_inbox_sibling(db, raw)
+    with db.tx():
+        db.set_scan_bookmark("Junk", 1, 3)
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(1.0, (), None),
+    )
+    client = CapIMAP(
+        existing=_all_existing(), uids=[4], bodies={4: raw},
+    )
+    f.poll_junk(
+        client, db, LOG,
+        _mk_account(mode="move", move_grace_seconds=0), FMAP,
+    )
+    assert client.moved == []
+    assert db.get_imap_message("Junk", 1, 4)["our_action"] != "rescued_to_inbox"
+
+
+def test_user_drag_to_inbox_is_not_moved_back(tmp_path, monkeypatch):
+    raw = _raw(1)
+    db = _mk_db(tmp_path)
+    with db.tx():
+        db.set_scan_bookmark("INBOX", 1, 0)
+        db.upsert_imap_message(
+            "Junk", 1, 9,
+            message_id="<mid1@example.com>", body_sha256=f.body_sha256(raw),
+        )
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(20.0, (), None),
+    )
+    client = CapIMAP(
+        existing=_all_existing(), uids=[1], bodies={1: raw},
+    )
+    f.scan_inbox(
+        client, db, LOG,
+        _mk_account(mode="move", move_grace_seconds=0), FMAP,
+    )
+    assert client.moved == []
+    row = db.get_imap_message("INBOX", 1, 1)
+    assert row["our_action"] != "pending_move"
+    assert row["pending_learn"] == "ham"
+
+
 def test_provider_junk_high_score_stays(tmp_path, monkeypatch):
     db = _mk_db(tmp_path)
     acc = _mk_account(mode="move", move_grace_seconds=0, threshold=8.0)

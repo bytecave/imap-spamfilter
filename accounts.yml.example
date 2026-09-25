@@ -99,7 +99,8 @@ accounts:
 # template env (DEFAULT_JUNK_RETENTION_DAYS / DEFAULT_TRAINED_RETENTION_DAYS).
 # Those env vars apply only when the corresponding YAML key is omitted.
 # defaults:
-#   threshold: 9.0
+#   threshold: 9.0          # Inbox → Junk when score >= this
+#   rescue_below: 4.0       # provider Junk → Inbox only when score < this
 #   junk_retention_days: 30
 #   flip_flop_cooldown_seconds: 1   # 0 disables; default 600
 #   max_list_per_run: 100           # IMAP list-folder drain cap (slice 11)
