@@ -3,6 +3,7 @@
 Run: STATE_DIR=/tmp/x python -m pytest test_opus_review_fixes.py
 """
 
+import datetime as dt
 import logging
 import os
 import tempfile
@@ -301,3 +302,47 @@ def test_filter_move_of_rescued_message_is_still_not_learned(tmp_path, monkeypat
     row = db.get_imap_message("Junk", 1, 9)
     assert row["pending_learn"] is None
     assert "pending_spam" not in _events(db)
+
+
+# ----- OPUS-CR-008: do not bounce the user's old mail back out of Junk ------
+
+
+class _DatedIMAP(CapIMAP):
+    def __init__(self, *, dates, **kw):
+        super().__init__(**kw)
+        self.dates = dict(dates)
+
+    def fetch(self, uids, parts):
+        out = super().fetch(uids, parts)
+        wanted = [p if isinstance(p, bytes) else str(p).encode() for p in parts]
+        if b"INTERNALDATE" in wanted:
+            for u in out:
+                out[u][b"INTERNALDATE"] = self.dates.get(u)
+        return out
+
+
+@pytest.mark.parametrize(
+    ("age", "rescued"),
+    [
+        (dt.timedelta(days=90), False),
+        (dt.timedelta(hours=1), True),
+    ],
+)
+def test_rescue_respects_internaldate_age(tmp_path, monkeypatch, age, rescued):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="move", move_grace_seconds=0)
+    with db.tx():
+        db.set_scan_bookmark("Junk", 1, 3)
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(1.0, (), None),
+    )
+    client = _DatedIMAP(
+        existing=_all_existing(), uids=[4], bodies={4: _raw(4)},
+        dates={4: dt.datetime.now() - age},
+    )
+    f.poll_junk(client, db, LOG, acc, FMAP)
+    if rescued:
+        assert client.moved == [([4], "INBOX")]
+    else:
+        assert client.moved == []
+        assert "old_internaldate" in _events(db, "rescue_skipped")[0]

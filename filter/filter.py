@@ -164,6 +164,11 @@ UNSCORED_INBOX_CATCHUP_CAP = 50
 SCAN_POISON_ATTEMPTS = 5
 SCAN_POISON_MIN_AGE_S = 600
 SCAN_POISON_TRACK_MAX = 256
+# Provider-Junk rescue only applies to mail that arrived recently. IMAP MOVE
+# keeps INTERNALDATE, so an old message that just appeared in Junk is the
+# user junking it from Archive (or pre-install Inbox), not a fresh provider
+# delivery, and must not be bounced back to Inbox. 3 days covers downtime.
+RESCUE_MAX_AGE_S = 3 * 86400
 RECONNECT_MIN_BACKOFF = 5
 RECONNECT_MAX_BACKOFF = 300
 HTTP_TIMEOUT = 30
@@ -3865,15 +3870,19 @@ def execute_due_moves(client: IMAPClient, db: Db, log: logging.Logger, acc: Acco
     log.info("moved %d message(s) inbox->junk", len(to_move))
 
 
-def _rescue_blocker(raw: bytes) -> str | None:
+def _rescue_blocker(raw: bytes, *, received_at: int | None = None) -> str | None:
     """Reason a Junk message must not be rescued to Inbox, or None.
 
     Rescue overrides the provider's Junk decision, and allow hits match the
     spoofable From/Sender headers. Never pull out a message Microsoft's
-    trusted Authentication-Results marks as spoofed.
+    trusted Authentication-Results marks as spoofed. When `received_at`
+    (INTERNALDATE) is given, refuse messages older than RESCUE_MAX_AGE_S:
+    those were moved into Junk by the user, not delivered there.
     """
     if m365_spoof_verdict(raw):
         return "m365_spoof_verdict"
+    if received_at is not None and time.time() - received_at > RESCUE_MAX_AGE_S:
+        return "old_internaldate"
     return None
 
 
@@ -4185,7 +4194,9 @@ def poll_junk(
                 # Allow hit, or unlisted and under threshold: a rescue
                 # candidate, unless evidence says it must stay in Junk.
                 if hit is not None or score < acc.threshold:
-                    blocked = _rescue_blocker(raw)
+                    blocked = _rescue_blocker(
+                        raw, received_at=_internaldate_ts(data),
+                    )
                     if blocked is not None:
                         detail = f"{blocked} score={_score_log(score)} mode={acc.mode}"
                         log.info("rescue skipped for %s: %s", msgid, detail)
