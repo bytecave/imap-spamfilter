@@ -94,3 +94,27 @@ The README now:
 - describes the Bayes identity accurately: `Delivered-To` is always prepended, an address is also `Rcpt`, and for a bare name `Rcpt` is the message's **first To/Cc recipient**, not "the mailbox" as it said before.
 
 Whether `Rcpt` *should* be the mailbox (CR-019) is a scoring decision I left for the operator. The slice 9–12 status tables and their pre-2026-09-21 "skip /checkv2" wording are unchanged, since those design docs are the operator's record.
+
+## Not fixed — recommendations for the operator
+
+These passed verification but are policy, scoring, or ops decisions, or too minor to justify the churn:
+
+| ID | Why it was not changed here |
+|---|---|
+| OPUS-CR-004 (High) | Neural autotraining on unadjusted scores is a **scoring-policy and Redis-data decision**. The recommended steps are in the review (set `train { autotrain = false; }` or `frozen = true;` in `rspamd/local.d/neural.conf`, bump `unraid/bootstrap.version`, and after an explicit go-ahead delete only the `rn_*` Redis keys). Nothing was changed in config or data. |
+| OPUS-CR-003 (Inbox side) | Whether an allow hit should keep a Microsoft-flagged spoof in Inbox. Changing it could junk mail the user explicitly trusts (Outlook Safe Senders). |
+| OPUS-CR-014 (Inbox→Junk, rescues) | Whether Exchange leaves a source copy after `UID MOVE` from Inbox or Junk has to be observed on the live tenant before deciding to detect or expunge. |
+| OPUS-CR-018 | Dashboard catch-rate semantics (needs a folder in the `scan` event detail, or a relabel). |
+| OPUS-CR-019 | Whether HTTP `Rcpt` should be the mailbox. That is a scoring change (`FORGED_RECIPIENTS` on list and BCC mail); the README now documents the real behavior. |
+| OPUS-CR-020 | Double learns after Allow/Block drags. Harmless to Bayes (Rspamd 208) and only inflates counters. |
+| OPUS-CR-021, 024, 025, 026, 027 | Low-impact validation, diagnostics, and UX items; details and recommended changes are in the review. |
+| OPUS-CR-022, 023 | ByteLord Compose/ops settings (`TZ`, `env_file`, `stop_grace_period`, `DASHBOARD_TRUSTED_PROXIES`). They live in the manually synced deploy copy, which is the operator's to change. |
+| OPUS-CR-028 (rest) | The slice 9–12 status tables and superseded "skip /checkv2" text belong to the operator's design record. |
+
+## Final validation
+
+- `cd filter && python -m pytest -q` → **397 passed** (baseline was 349).
+- Branch coverage: `filter.py` 72% → 78%; total 75% → 79%.
+- `python -m compileall -q filter` is clean; `bash -n deploy/*.sh unraid/*.sh` is clean.
+- Each new regression test was checked to **fail on the pre-fix code** where it's feasible (CR-001, 005, 011, 012, 014, 017, and the CR-002 give-up sequence).
+- There was no live IMAP or Rspamd here: everything was verified with the repo's IMAP/Rspamd fakes and against upstream Rspamd 4.2.0, waitress 3.0.2, and imapclient 3.1.0 source. The live-verification checklist is in `SESSION_HANDOFF.md`.
