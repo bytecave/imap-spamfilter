@@ -484,3 +484,47 @@ def test_tx_holds_write_lock_from_begin(tmp_path):
     finally:
         other.close()
     assert "inside_tx" in _events(db)
+
+
+# ----- OPUS-CR-012: backoff is not reset by a connect alone -----------------
+
+
+def test_reconnect_backoff_grows_when_every_pass_fails(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="shadow")
+    connects: list[int] = []
+    sleeps: list[float] = []
+
+    class Client:
+        def has_capability(self, _cap):
+            return True
+
+        def logout(self):
+            return None
+
+    def connect(_acc, timeout=60):
+        connects.append(len(sleeps))
+        if len(connects) > 3:
+            f.SHUTDOWN.set()
+            raise OSError("stop test")
+        return Client()
+
+    def failing_scan(*_a, **_k):
+        raise f.IMAPClientError("STORE failed on one message")
+
+    monkeypatch.setattr(f, "connect_imap", connect)
+    monkeypatch.setattr(f, "detect_delimiter", lambda _c: "/")
+    monkeypatch.setattr(f, "apply_special_use_remap", lambda *a, **k: None)
+    monkeypatch.setattr(f, "ensure_folders", lambda *a, **k: None)
+    for name in (
+        "drain_train_spam", "drain_train_ham", "drain_list_allow", "drain_list_block",
+    ):
+        monkeypatch.setattr(f, name, lambda *a, **k: None)
+    monkeypatch.setattr(f, "scan_inbox", failing_scan)
+    monkeypatch.setattr(f.time, "sleep", lambda s: sleeps.append(s))
+    try:
+        f._run_account(acc, db)
+    finally:
+        f.SHUTDOWN.clear()
+    gaps = [b - a for a, b in zip(connects, connects[1:])]
+    assert gaps == [5, 10, 20]

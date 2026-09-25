@@ -50,3 +50,7 @@ Tests: `test_inbox_without_message_id_is_scored_and_routed[flag|move]`, `test_us
 ### OPUS-CR-011 — SQLite transactions take the write lock up front (Medium)
 `Db.tx()` now issues `BEGIN IMMEDIATE`. In WAL mode, a deferred transaction that reads first (`log_event`'s subject lookup, `_set_learn_retry`) fails *at once* with `SQLITE_BUSY` when it upgrades to a write after another of the ~11 connections committed; the 30 s busy handler doesn't apply to a stale snapshot. That error used to reach `_run_account`'s generic handler and force an IMAP reconnect, sometimes right after a MOVE whose DB update was then lost. `IMMEDIATE` waits on the busy timeout instead.
 Test: `test_tx_holds_write_lock_from_begin` (fails with deferred `BEGIN`, passes with `IMMEDIATE`).
+
+### OPUS-CR-012 — Reconnect backoff no longer resets on a bare connect (Medium)
+`_run_account` now resets `backoff` to the 5 s minimum only after a full pass (drains → scan → moves → rescues → junk poll → retention) has completed, just before the IDLE wait. It used to reset right after connecting, so a failure that recurs every pass (for example a server error on one message) re-logged into Microsoft 365 through the OAuth proxy every ~5 s indefinitely. The backoff now grows 5 → 10 → 20 … 300 s. I also made the dashboard's waitress end-to-end test shut its server thread down deterministically.
+Test: `test_reconnect_backoff_grows_when_every_pass_fails` (the old code gives gaps of 5, 5, 5).

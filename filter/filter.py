@@ -4895,7 +4895,6 @@ def _run_account(acc: Account, db: Db) -> None:
                     "server %s does not advertise IMAP IDLE; new mail is "
                     "detected by the %ds poll, not instant push",
                     acc.imap_host, acc.poll_interval)
-            backoff = RECONNECT_MIN_BACKOFF
 
             while not SHUTDOWN.is_set():
                 heartbeat()
@@ -4965,6 +4964,10 @@ def _run_account(acc: Account, db: Db) -> None:
                 # any server-side IDLE cap (RFC 2177 mentions 29 min).
                 with db.tx():
                     db.touch_heartbeat_ok()
+                # Reset only after a whole pass succeeded. Resetting on
+                # connect let a failure that recurs every pass re-login
+                # through the OAuth proxy every ~5 s indefinitely.
+                backoff = RECONNECT_MIN_BACKOFF
                 wait_between_scans(client, acc, idle_cap=idle_cap, log=log)
         except (IMAPClientError, OSError) as ex:
             detail = redact_log(str(ex), acc.password)

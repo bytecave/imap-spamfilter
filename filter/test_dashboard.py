@@ -425,7 +425,13 @@ def test_real_waitress_accepts_large_list_post_but_not_large_login(monkeypatch):
         d.app, host="127.0.0.1", port=port, threads=2,
         max_request_body_size=served["max_request_body_size"],
     )
-    runner = threading.Thread(target=srv.run, daemon=True)
+    def run_until_closed():
+        try:
+            srv.run()
+        except Exception:  # noqa: BLE001 - socket torn down by close()
+            pass
+
+    runner = threading.Thread(target=run_until_closed, daemon=True)
     runner.start()
 
     class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -458,6 +464,8 @@ def test_real_waitress_accepts_large_list_post_but_not_large_login(monkeypatch):
         assert status == 413
     finally:
         srv.close()
+        srv.task_dispatcher.shutdown()
+        runner.join(timeout=5)
 
 
 def test_legacy_login_performs_dummy_kdf(monkeypatch):
