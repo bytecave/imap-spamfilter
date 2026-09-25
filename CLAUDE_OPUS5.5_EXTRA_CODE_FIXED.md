@@ -101,6 +101,8 @@ Whether `Rcpt` *should* be the mailbox (CR-019) is a scoring decision I left for
 - **CR-022 (partial), `deploy/bytelord-compose.yaml`:** `TZ: America/Los_Angeles` (US Pacific, auto PST/PDT) and `stop_grace_period: 90s` on `spamfilter`, so Docker doesn't kill the filter mid-MOVE after the default 10 s. `env_file` is deliberately unchanged (see below). These only take effect once the file is copied to the live compose path.
 
 - **CR-004 (operator approved):** `rspamd/local.d/neural.conf` sets `train { autotrain = false; }` and `unraid/bootstrap.version` is bumped to 11 (the paste-only fallback matches). I checked rspamd 4.2.0's `neural.lua`: the legacy top-level `train {}` block becomes the `default` rule; with `autotrain = false` no training vectors are stored; neural keys are prefixed `rn_` **and** `rn3_`. The neural-only key delete (with a Redis backup and a Bayes-count check) is step 4 of the `SESSION_HANDOFF.md` runbook, run manually by the operator.
+- **CR-029 (found during deploy):** `rspamd/local.d/fuzzy_check.conf` is now comments only, so rspamd uses its stock `rspamd.com` fuzzy rule (real public key, SRV server discovery, stock `hits_limit`s). `bootstrap.version` is 12. The old file had an invalid key, so rspamd dropped the only fuzzy rule and fuzzy never scored. **Expect a scoring change:** mail matching rspamd.com's community hashes will now get `FUZZY_DENIED` / `FUZZY_PROB` (spam) or `FUZZY_WHITE` (ham) at rspamd's stock weights. Check a few scores in shadow before promoting. Verification: `rspamadm configtest` is clean and `configdump fuzzy_check` shows the `icy63…` key.
+
 
 ## Not fixed — recommendations for the operator
 

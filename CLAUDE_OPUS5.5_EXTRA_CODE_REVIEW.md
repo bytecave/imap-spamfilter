@@ -56,6 +56,7 @@
 | OPUS-CR-026 | Low | UI | `filter/lists.js:28-33, 126-130` | After a 400, Cancel restores the rejected text, not the saved list | Recommend |
 | OPUS-CR-027 | Low | Maintainability | `filter/filter.py:1418-1587, 4024-4025, 4662`; `filter/dashboard.py:1906` | Unpruned `_dashboard` events, non-atomic legacy migration, duplicate rescue call | Recommend |
 | OPUS-CR-028 | Low | Docs drift | `README.md`, `design-arch/*` | Stale folder count, status tables, and "skip /checkv2" statements | Recommend |
+| OPUS-CR-029 | Medium | Scoring config | `rspamd/local.d/fuzzy_check.conf` | Invalid fuzzy `encryption_key` made rspamd drop the rspamd.com fuzzy rule; fuzzy never scored (found during deploy) | Fixed |
 
 **Counts:** 4 High, 11 Medium, 13 Low.
 
@@ -404,6 +405,10 @@ An Allowlist drag learns ham, then MOVEs to Inbox. If the message came from Junk
 - README "Folder discovery" says the filter cares about **seven** folders; it now manages nine (Allowlist/Blocklist).
 - The status tables in `design-arch/allow_block_sliced_plan.md` and slices 9–12 still say "ready to implement".
 - Slice 10 §7, slice 12, and the parent plan say list hits skip `/checkv2`. That was superseded on 2026-09-21. IMPLEMENTATION_STATUS says to trust the code, but the slice docs are what a new agent reads first.
+
+### OPUS-CR-029 — The rspamd.com fuzzy rule never loaded (Medium; found during deploy)
+
+Found on 2026-09-25 while the operator ran the deploy runbook. I missed it in the original pass because I read the rspamd `local.d` files for policy and did not validate their values. `rspamadm configdump` printed `bad encryption key value: ftcvm5dg…`. `rspamd/local.d/fuzzy_check.conf` (added 2026-08-26) overrode the stock `rspamd.com` rule with an `encryption_key` that is not a real rspamd key. It contains `v`, which is not in rspamd's zbase32 alphabet, and the stock key is `icy63itbhhni8bq15ntp5n5symuixf73s1kpjh6skaq4e7nx5fiy`. In rspamd 4.2.0, `fuzzy_parse_rule()` returns -1 on a bad key before the rule is added to `fuzzy_rules` (`src/plugins/fuzzy_check.c`, "bad encryption key value" then `g_ptr_array_add` only at the end), so the only fuzzy rule was silently dropped. **No `FUZZY_*` symbol has ever fired.** The same file also replaced the stock SRV discovery (`service=fuzzy+rspamd.com`) with a hand-written host, and used the legacy `max` key, which in 4.x means "hits to saturate", not points.
 
 ---
 

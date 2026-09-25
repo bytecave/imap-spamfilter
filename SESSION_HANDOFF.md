@@ -71,15 +71,18 @@ git pull
 git log --oneline -1      # Expect: "Turn off rspamd neural self-training ..." (or newer)
 ```
 
-**Step 2 — install the new neural config into the live rspamd config folder**
+**Step 2 — install the new neural and fuzzy configs into the live rspamd config folder**
 
 ```bash
 LIVE=/opt/bytelord/data/imap-spamfilter/rspamd/local.d
 for f in rspamd/local.d/*; do n=$(basename "$f"); case "$n" in *.template) continue;; esac; cmp -s "$f" "$LIVE/$n" || echo "DIFFERS: $n"; done
-# Expect exactly one line: DIFFERS: neural.conf   (anything else: STOP)
+# Expect exactly two lines: DIFFERS: fuzzy_check.conf and DIFFERS: neural.conf   (anything else: STOP)
 cp rspamd/local.d/neural.conf "$LIVE/neural.conf"
+cp rspamd/local.d/fuzzy_check.conf "$LIVE/fuzzy_check.conf"
 grep autotrain "$LIVE/neural.conf"     # Expect: autotrain = false;
 ```
+
+(2026-09-25: the operator ran steps 1–4 before the fuzzy fix existed; the fuzzy file was then installed as "step 4b", see OPUS-CR-029 in `CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md`.)
 
 **Step 3 — back up Redis and look at the neural keys (read-only)**
 
@@ -105,6 +108,9 @@ unset REDISCLI_AUTH
 docker start spamfilter-rspamd
 sleep 10
 docker exec spamfilter-rspamd rspamadm configdump neural | grep -i autotrain   # Expect: autotrain = false;
+docker exec spamfilter-rspamd rspamadm configtest   # Expect: syntax OK, and no "bad encryption key value" line
+docker exec spamfilter-rspamd rspamadm configdump fuzzy_check | grep -E "encryption_key|servers"
+# Expect: encryption_key = "icy63itbhhni8bq15ntp5n5symuixf73s1kpjh6skaq4e7nx5fiy"; and servers = "service=fuzzy+rspamd.com";
 ```
 
 **Step 5 — install the new compose file (Pacific time, 90 s shutdown grace)**
