@@ -3073,6 +3073,17 @@ def _learn_retry_due(row: sqlite3.Row | None) -> bool:
     return retry_at is None or int(retry_at) <= int(time.time())
 
 
+def _learn_budget(db: Db, acc: Account) -> int:
+    """Learns still allowed in the rolling hour (max_learns_per_hour).
+
+    Checked before downloading bodies: try_learn enforces the same limit,
+    but only after the full message has been fetched, so a Train-* or
+    pending-learn backlog was re-downloaded on every pass just to be
+    refused.
+    """
+    return acc.max_learns_per_hour - db.rate_count("learn", 3600)
+
+
 def try_learn(
     db: Db,
     log: logging.Logger,
@@ -4250,6 +4261,28 @@ def process_pending_learns(
     for row in candidates:
         folder_groups.setdefault(row["folder"], []).append(row)
 
+    handled: set[tuple[str, int, int]] = set()
+
+    def _defer_unhandled() -> None:
+        # Out of learn budget: record retry state without fetching bodies.
+        # A non-zero retry count also keeps prune_stale_pending_learn from
+        # dropping these user moves before the budget frees up.
+        deferred = [
+            r for r in candidates
+            if (r["folder"], int(r["uidvalidity"]), int(r["uid"])) not in handled
+        ]
+        if not deferred:
+            return
+        log.info(
+            "hourly learn budget exhausted; deferring %d pending learn(s)",
+            len(deferred),
+        )
+        with db.tx():
+            for r in deferred:
+                _set_learn_retry(
+                    db, r["folder"], int(r["uidvalidity"]), int(r["uid"]),
+                )
+
     for folder, rows in folder_groups.items():
         # Reconfirm folder still expected for the kind.
         try:
@@ -4262,6 +4295,10 @@ def process_pending_learns(
         for r in rows:
             if SHUTDOWN.is_set():
                 return
+            if acc.learn_from_moves and _learn_budget(db, acc) <= 0:
+                _defer_unhandled()
+                return
+            handled.add((folder, int(r["uidvalidity"]), int(r["uid"])))
             msgid = r["message_id"]
             kind = r["pending_learn"]
             uv = int(r["uidvalidity"])
@@ -4355,11 +4392,17 @@ def _drain_train_folder(
     uids = client.search(["ALL"])
     if not uids:
         return
+    per_run = min(acc.max_train_per_run, _learn_budget(db, acc))
+    if per_run <= 0:
+        log.debug(
+            "drain %s: hourly learn budget exhausted; not fetching bodies", folder,
+        )
+        return
     due_uids: list[int] = []
     for uid in uids:
         if _learn_retry_due(db.get_imap_message(folder, uv, uid)):
             due_uids.append(uid)
-            if len(due_uids) >= acc.max_train_per_run:
+            if len(due_uids) >= per_run:
                 break
     uids = due_uids
     if not uids:

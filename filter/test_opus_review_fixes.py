@@ -13,7 +13,7 @@ os.environ.setdefault("STATE_DIR", tempfile.mkdtemp(prefix="sf_test_"))
 import pytest  # noqa: E402
 
 import filter as f  # noqa: E402
-from test_fetch_discipline import CapIMAP  # noqa: E402
+from test_fetch_discipline import CapIMAP, _body_fetch_uids  # noqa: E402
 from test_shadow_mode import (  # noqa: E402
     FMAP,
     RecordingIMAP,
@@ -528,3 +528,62 @@ def test_reconnect_backoff_grows_when_every_pass_fails(tmp_path, monkeypatch):
         f.SHUTDOWN.clear()
     gaps = [b - a for a, b in zip(connects, connects[1:])]
     assert gaps == [5, 10, 20]
+
+
+# ----- OPUS-CR-013: learn budget is checked before fetching bodies ----------
+
+
+def _spend_learn_budget(db, n):
+    with db.tx():
+        for _ in range(n):
+            db.record_rate("learn")
+
+
+def test_train_drain_fetches_no_bodies_when_budget_exhausted(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(max_learns_per_hour=3)
+    _spend_learn_budget(db, 3)
+    monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: pytest.fail("no learn"))
+    client = CapIMAP(
+        existing=_all_existing(), uids=[1, 2, 3],
+        bodies={n: _raw(n) for n in (1, 2, 3)},
+    )
+    f.drain_train_spam(client, db, LOG, acc, FMAP)
+    assert _body_fetch_uids(client) == []
+    assert client.moved == []
+
+
+def test_train_drain_fetches_only_what_budget_allows(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(max_learns_per_hour=5)
+    _spend_learn_budget(db, 3)
+    monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: "learned")
+    client = CapIMAP(
+        existing=_all_existing(), uids=[1, 2, 3, 4, 5],
+        bodies={n: _raw(n) for n in range(1, 6)},
+    )
+    f.drain_train_spam(client, db, LOG, acc, FMAP)
+    assert _body_fetch_uids(client) == [1, 2]
+    assert client.moved == [([1, 2], FMAP["trained_spam"])]
+
+
+def test_pending_learns_defer_without_fetch_when_budget_exhausted(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(max_learns_per_hour=2, learn_grace_seconds=0)
+    _spend_learn_budget(db, 2)
+    with db.tx():
+        for uid in (7, 8):
+            db.upsert_imap_message("Junk", 1, uid, message_id=f"p{uid}@x")
+            db.update_imap_message(
+                "Junk", 1, uid, pending_learn="spam", pending_learn_at=1,
+            )
+    monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: pytest.fail("no learn"))
+    client = CapIMAP(
+        existing=_all_existing(), uids=[7, 8], bodies={7: _raw(7), 8: _raw(8)},
+    )
+    f.process_pending_learns(client, db, LOG, acc, FMAP)
+    assert _body_fetch_uids(client) == []
+    for uid in (7, 8):
+        row = db.get_imap_message("Junk", 1, uid)
+        assert row["pending_learn"] == "spam"
+        assert row["learn_retry_count"] == 1

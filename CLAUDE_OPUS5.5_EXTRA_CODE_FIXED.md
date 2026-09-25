@@ -54,3 +54,11 @@ Test: `test_tx_holds_write_lock_from_begin` (fails with deferred `BEGIN`, passes
 ### OPUS-CR-012 — Reconnect backoff no longer resets on a bare connect (Medium)
 `_run_account` now resets `backoff` to the 5 s minimum only after a full pass (drains → scan → moves → rescues → junk poll → retention) has completed, just before the IDLE wait. It used to reset right after connecting, so a failure that recurs every pass (for example a server error on one message) re-logged into Microsoft 365 through the OAuth proxy every ~5 s indefinitely. The backoff now grows 5 → 10 → 20 … 300 s. I also made the dashboard's waitress end-to-end test shut its server thread down deterministically.
 Test: `test_reconnect_backoff_grows_when_every_pass_fails` (the old code gives gaps of 5, 5, 5).
+
+### OPUS-CR-013 — The learn budget is checked before bodies are downloaded (Medium)
+New `_learn_budget()` = `max_learns_per_hour` minus learns recorded in the last hour.
+- `_drain_train_folder` now fetches at most `min(max_train_per_run, budget)` UIDs, and none once the budget is used up.
+- `process_pending_learns` stops before the next `BODY.PEEK[]` when the budget reaches 0. It records DB-only retry state on the remaining rows, the same way `try_learn`'s rate refusal did, so `prune_stale_pending_learn` still keeps them.
+
+Before, a 500-message Train-Spam drop, or a mass Inbox→Junk move, was fully re-downloaded through the proxy on every backoff tick just to be refused after 50 learns.
+Tests: `test_train_drain_fetches_no_bodies_when_budget_exhausted`, `test_train_drain_fetches_only_what_budget_allows`, `test_pending_learns_defer_without_fetch_when_budget_exhausted`.
