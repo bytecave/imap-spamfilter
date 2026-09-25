@@ -2368,12 +2368,17 @@ def rspamd_scan_detail(
 ) -> ScanResult | None:
     """POST to /checkv2. Return score + symbol breakdown, or None on error.
 
-    `bayes_user`, when it contains `@`, is sent as the HTTP `Rcpt`
-    header so rspamd's per-user classifier looks up that identity.
+    The Bayes identity (`bayes_user`, else `recipient`) is always
+    prepended as `Delivered-To:`, exactly as `rspamd_learn` does. Rspamd
+    takes the per-user Bayes key from the *first* `Delivered-To:` header
+    ahead of HTTP `Rcpt` (rspamd 4.2 mime_headers.c / task.c), so without
+    the prefix a message that already carries its own `Delivered-To:`
+    (Postfix, Dovecot LMTP, Gmail) would be classified against that
+    address's notebook instead of the one learning writes to.
+    `bayes_user`, when it contains `@`, is also sent as the HTTP `Rcpt`.
     A bare name such as `bytelord` is not an email address: putting it
-    in `Rcpt` makes rspamd set BROKEN_HEADERS. In that case `Rcpt` is
-    the real recipient, and the same `Delivered-To` prefix used when
-    learning selects the shared notebook.
+    in `Rcpt` makes rspamd set BROKEN_HEADERS, so `Rcpt` is then the
+    real recipient.
 
     HTTP `From` is the message From address (rspamd treats it as
     envelope-from for SPF/DMARC). It is omitted when From is empty.
@@ -2382,12 +2387,12 @@ def rspamd_scan_detail(
     submission and skips DKIM/DMARC failure symbols.
     """
     try:
-        posted = raw
+        identity = bayes_user or recipient
+        posted = f"Delivered-To: {identity}\r\n".encode() + raw
         if bayes_user and "@" not in bayes_user:
             rcpt = recipient
-            posted = f"Delivered-To: {bayes_user}\r\n".encode() + raw
         else:
-            rcpt = bayes_user or recipient
+            rcpt = identity
         headers: dict[str, str] = {"Rcpt": rcpt}
         _msgid, _subject, sender = parse_envelope(raw)
         if sender:

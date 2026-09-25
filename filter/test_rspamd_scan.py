@@ -76,7 +76,9 @@ def test_address_bayes_user_stays_in_rcpt(monkeypatch):
         RAW_WITH_FROM, "u@example.com", 100.0, bayes_user="pool@example.com"
     )
     assert captured["headers"]["Rcpt"] == "pool@example.com"
-    assert not captured["data"].startswith(b"Delivered-To:")
+    # OPUS-CR-006: scan must select the same notebook learning writes to.
+    # Rspamd prefers the first Delivered-To over Rcpt for the Bayes key.
+    assert captured["data"].startswith(b"Delivered-To: pool@example.com\r\n")
 
 
 def test_scan_omits_from_when_missing(monkeypatch):
@@ -295,3 +297,20 @@ def test_parse_envelope_decodes_rfc2047_subject():
     assert msgid == "x@example.com"
     assert subject == "Hello World"
     assert sender == "a@example.com"
+
+
+def test_scan_identity_precedes_message_delivered_to(monkeypatch):
+    """A message that already carries Delivered-To (Postfix/Dovecot/Gmail)
+    must still be classified under the configured identity (OPUS-CR-006)."""
+    captured = _capture_post(monkeypatch)
+    raw = b"Delivered-To: someone-else@example.net\r\n" + RAW_WITH_FROM
+    f.rspamd_scan(raw, "u@example.com", 100.0, bayes_user="u@example.com")
+    first = captured["data"].split(b"\r\n", 1)[0]
+    assert first == b"Delivered-To: u@example.com"
+    assert captured["headers"]["Rcpt"] == "u@example.com"
+
+
+def test_scan_without_bayes_user_prefixes_recipient_identity(monkeypatch):
+    captured = _capture_post(monkeypatch)
+    f.rspamd_scan(RAW_WITH_FROM, "u@example.com", 100.0)
+    assert captured["data"].startswith(b"Delivered-To: u@example.com\r\n")
