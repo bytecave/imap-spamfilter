@@ -608,3 +608,25 @@ def test_train_leftover_after_move_as_copy_is_not_moved_twice(tmp_path, monkeypa
         f.drain_train_spam(client, db, LOG, acc, FMAP)
     assert client.moved == [([1], FMAP["trained_spam"])]
     assert client.expunged == []  # never deletes the leftover
+
+
+# ----- OPUS-CR-016: no phantom pending_move_canceled events -----------------
+
+
+def test_allow_hit_without_pending_move_logs_no_cancellation(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="move", actual_name="Rich")
+    parsed = f.ParsedPattern("s1@example.com", "address")
+    with db.tx():
+        db.set_scan_bookmark("INBOX", 1, 0)
+        db.list_upsert_address(
+            "person", "Rich", "allow", parsed, source="imap", max_entries=1000,
+        )
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(1.0, (), None),
+    )
+    client = CapIMAP(existing=_all_existing(), uids=[1], bodies={1: _raw(1)})
+    f.scan_inbox(client, db, LOG, acc, FMAP, f.AccountState())
+    evs = _events(db)
+    assert "allowlisted" in evs
+    assert "pending_move_canceled" not in evs

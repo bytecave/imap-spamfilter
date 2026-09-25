@@ -67,3 +67,7 @@ Tests: `test_train_drain_fetches_no_bodies_when_budget_exhausted`, `test_train_d
 `_drain_train_folder` skips any Train-* UID whose DB row already shows `current_folder == Trained-*`. That means the filter learned and MOVEd it, but the server kept the source (Exchange MOVE-as-COPY, which the 2026-09-21 list-drain code already handles). Before, every pass (~30 s) MOVEd the same leftover into Trained-* again. It logs one warning per account/folder per process and **does not expunge**. Deleting outside the list-folder exception stays an operator decision.
 **Not changed (verify live before `move` mode):** whether Exchange leaves the source copy for `execute_due_moves` (Inbox→Junk) and `execute_due_rescues`. If it does, spam would stay visible in Inbox. See the handoff checklist.
 Test: `test_train_leftover_after_move_as_copy_is_not_moved_twice` (the old code moves the leftover again on every pass).
+
+### OPUS-CR-016 — `pending_move_canceled` is logged only for a real cancellation (Low)
+`Db.drop_pending_move` now returns the number of rows it deleted, and the `scan_inbox` allow branch logs `pending_move_canceled` only when a queued move was actually dropped. Before, every allowlisted Inbox message produced a phantom cancellation event, which hid real ones in the audit trail. The `execute_due_moves` allow re-check always has a real pending row and still logs it.
+Test: `test_allow_hit_without_pending_move_logs_no_cancellation`; ChatGPT CR-001 cancellation tests still pass.

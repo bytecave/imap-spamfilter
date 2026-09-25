@@ -2088,14 +2088,15 @@ class Db:
         )
         return list(cur.fetchall())
 
-    def drop_pending_move(self, folder: str, uidvalidity: int, uid: int) -> None:
-        self.conn.execute(
+    def drop_pending_move(self, folder: str, uidvalidity: int, uid: int) -> int:
+        cur = self.conn.execute(
             """
             DELETE FROM pending_move
              WHERE account=? AND folder=? AND uidvalidity=? AND uid=?
             """,
             (self.account, folder, uidvalidity, uid),
         )
+        return int(cur.rowcount)
 
     # ----- scan bookmark ----------------------------------------------------
 
@@ -3663,14 +3664,15 @@ def _scan_inbox_uid_batch(
                 _log_list_hit(log, acc, hit, msgid, subject, hit_detail)
                 if hit.decision == "allow":
                     with db.tx():
-                        db.drop_pending_move(fmap["inbox"], uv, uid)
+                        canceled = db.drop_pending_move(fmap["inbox"], uv, uid)
                         db.update_imap_message(
                             fmap["inbox"], uv, uid, our_action="allowlisted"
                         )
                         db.log_event("allowlisted", msgid, detail=hit_detail)
-                        db.log_event(
-                            "pending_move_canceled", msgid, detail=hit_detail
-                        )
+                        if canceled:
+                            db.log_event(
+                                "pending_move_canceled", msgid, detail=hit_detail
+                            )
                         if hit.conflict:
                             db.log_event("list_conflict", msgid, detail=hit_detail)
                     last_terminal = uid
