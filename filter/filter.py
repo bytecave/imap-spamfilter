@@ -3358,8 +3358,12 @@ def _scan_giveup(
     return True
 
 
+# Sibling actions meaning "the filter put this content into Junk (or is
+# about to move it)". A completed rescue (rescued_to_inbox) is deliberately
+# absent: the filter moved that copy OUT of Junk, so a later arrival of the
+# same bytes in Junk is the user junking it again and must be learned.
 _FILTER_OWNED_JUNK_ACTIONS = frozenset({
-    "pending_move", "moved_to_junk", "pending_rescue", "rescued_to_inbox",
+    "pending_move", "moved_to_junk", "pending_rescue",
 })
 
 

@@ -255,3 +255,49 @@ def test_due_rescue_rechecks_spoof_verdict(tmp_path, monkeypatch):
     assert client.moved == []
     assert db.due_pending_moves("Junk", 1, 0) == []
     assert _events(db, "pending_rescue_canceled") == ["m365_spoof_verdict"]
+
+
+# ----- OPUS-CR-007: user re-junk of a rescued message is learned ------------
+
+
+def _rescued_then_seen_in_inbox(db, raw):
+    sha = f.body_sha256(raw)
+    with db.tx():
+        db.set_scan_bookmark("Junk", 1, 8)
+        db.upsert_imap_message("Junk", 1, 4, message_id="m9@example.com", body_sha256=sha)
+        db.update_imap_message(
+            "Junk", 1, 4, our_action="rescued_to_inbox", current_folder="INBOX",
+        )
+        db.upsert_imap_message("INBOX", 1, 50, message_id="m9@example.com", body_sha256=sha)
+        db.update_imap_message("INBOX", 1, 50, our_score=1.0)
+
+
+def test_user_rejunk_of_rescued_message_is_learned(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="move", move_grace_seconds=0)
+    raw = _raw(9)
+    _rescued_then_seen_in_inbox(db, raw)
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: pytest.fail("user move is not scanned"),
+    )
+    client = CapIMAP(existing=_all_existing(), uids=[9], bodies={9: raw})
+    f.poll_junk(client, db, LOG, acc, FMAP)
+    row = db.get_imap_message("Junk", 1, 9)
+    assert row["pending_learn"] == "spam"
+    assert client.moved == []
+
+
+def test_filter_move_of_rescued_message_is_still_not_learned(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="move", move_grace_seconds=0)
+    raw = _raw(9)
+    _rescued_then_seen_in_inbox(db, raw)
+    with db.tx():
+        db.update_imap_message(
+            "INBOX", 1, 50, our_action="moved_to_junk", current_folder="Junk",
+        )
+    client = CapIMAP(existing=_all_existing(), uids=[9], bodies={9: raw})
+    f.poll_junk(client, db, LOG, acc, FMAP)
+    row = db.get_imap_message("Junk", 1, 9)
+    assert row["pending_learn"] is None
+    assert "pending_spam" not in _events(db)

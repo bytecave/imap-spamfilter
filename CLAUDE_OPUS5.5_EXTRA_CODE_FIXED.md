@@ -25,3 +25,7 @@ Tests: `test_waitress_rejects_large_body_before_wsgi` (updated), `test_real_wait
 ### OPUS-CR-006 — Scan-time Bayes identity now matches learning (Medium; latent on ByteLord)
 `rspamd_scan_detail` always prepends `Delivered-To: <bayes_user or recipient>`, the same prefix `rspamd_learn` uses. The HTTP `Rcpt` choice is unchanged, so no other Rspamd rules shift. I confirmed in the rspamd 4.2.0 source that the first MIME `Delivered-To:` outranks `Rcpt` for the per-user Bayes key, so messages that already carry one (Postfix, Dovecot, Gmail) were classified against the wrong notebook for address/default identities. ByteLord's bare `bytelord` path is byte-for-byte unchanged.
 Tests: `test_address_bayes_user_stays_in_rcpt` (updated to expect the prefix), `test_scan_identity_precedes_message_delivered_to`, `test_scan_without_bayes_user_prefixes_recipient_identity`.
+
+### OPUS-CR-007 — Re-junking a filter-rescued message is learned as spam (Medium)
+`rescued_to_inbox` is no longer in `_FILTER_OWNED_JUNK_ACTIONS`. A completed rescue means the filter moved that copy *out* of Junk, so the same bytes arriving in Junk again are the user correcting the filter. The rescued row (`current_folder=INBOX`) now counts as an Inbox sibling and follows the normal user-move spam-learn path. Filter-initiated moves (`pending_move`/`moved_to_junk`) and in-flight rescues (`pending_rescue`) are still excluded, so the rescue itself never trains.
+Tests: `test_user_rejunk_of_rescued_message_is_learned`, `test_filter_move_of_rescued_message_is_still_not_learned`.
