@@ -28,7 +28,11 @@ Per-account operating modes (set in `accounts.yml`, promoted manually):
 - **move**    - flag + after `move_grace_seconds`, MOVEs Inbox → Junk.
   Provider-delivered Junk (never seen in Inbox) is scored; under-threshold
   or allowlisted mail is MOVEd back to Inbox after the same grace.
-  Blocklisted provider-Junk stays. Auto-rescue never Bayes-learns.
+  Blocklisted provider-Junk stays. Auto-rescue never Bayes-learns. Rescue
+  is refused when Microsoft's trusted `Authentication-Results` marks the
+  message as spoofed (`compauth=fail`, or `dmarc=fail` without compauth),
+  and when its INTERNALDATE is more than 3 days old (the user moved old
+  mail into Junk; it was not delivered there).
 
 Move-based training (no special folders needed in daily use):
 - Inbox -> Junk = learn as spam (after `learn_grace_seconds`, default 300s)
@@ -56,9 +60,10 @@ Hard rules:
 
 ## Folder discovery and naming
 
-The filter cares about seven folders per account: **Inbox**, **Junk**,
+The filter cares about nine folders per account: **Inbox**, **Junk**,
 **Trash**, **Junk/Train-Spam**, **Junk/Trained-Spam**, **Junk/Train-Ham**,
-**Junk/Trained-Ham**. Day one most users don't need to touch any of them.
+**Junk/Trained-Ham**, **INBOX/Allowlist**, **INBOX/Blocklist**. Day one
+most users don't need to touch any of them.
 
 ### Hierarchy delimiter (auto)
 
@@ -561,7 +566,7 @@ user's mailbox.
 
 | Key | Default | Notes |
 | --- | --- | --- |
-| `junk_retention_days` | `10` | Junk -> Trash after N days, `0` disables |
+| `junk_retention_days` | `10` | Junk -> Trash after N days, `0` disables. Skips mail the Junk poll has not processed yet, pending spam learns, and allowlisted provider-Junk |
 | `trained_retention_days` | `7` | Trained-Spam **and** Trained-Ham -> Trash after N days |
 | `learn_from_moves` | `true` | set `false` to disable all learning (scan-only) |
 
@@ -588,7 +593,7 @@ in `accounts.yml` trains its own Bayes namespace keyed by its `user`.
 
 | Key | Default | Notes |
 | --- | --- | --- |
-| `bayes_user` | unset | Shared Bayes key. An address is HTTP `Rcpt` on scan. A bare name is `Delivered-To` on scan and learn (real mailbox stays in `Rcpt`) |
+| `bayes_user` | unset | Shared Bayes key. Always prepended as `Delivered-To` on scan and learn (that header selects the rspamd notebook). An address is also HTTP `Rcpt` on scan; a bare name is not (it would set `BROKEN_HEADERS`) |
 
 Use `bayes_user` to pool training across mailboxes. Accounts that omit
 the field stay isolated under their own IMAP user. Allow/block lists
@@ -892,10 +897,13 @@ Restore is the reverse: stop the four containers, extract the tar over
   or `Helo` to `/checkv2`. RBL `from` lookups, SPF, and DMARC envelope
   alignment are degraded; they rely on `Received:` chains in the message
   plus Bayes/fuzzy/neural. HTTP `From` is the message From (not the IMAP
-  recipient). A `bayes_user` that is an address is HTTP `Rcpt`. A bare
-  name such as `bytelord` is prepended as `Delivered-To` (the same prefix
-  learning uses) and `Rcpt` stays the mailbox address, so rspamd does not
-  treat the Bayes key as a broken recipient. `HFILTER_HOSTNAME_UNKNOWN` and `RDNS_NONE` are weighted
+  recipient). The Bayes identity (`bayes_user`, else the mailbox) is always
+  prepended as `Delivered-To`, the same prefix learning uses; rspamd keys
+  per-user Bayes on the first `Delivered-To` ahead of `Rcpt`. A
+  `bayes_user` that is an address is also HTTP `Rcpt`. For a bare name
+  such as `bytelord`, HTTP `Rcpt` is the message's first To/Cc recipient
+  (falling back to the mailbox), so rspamd does not treat the Bayes key as
+  a broken recipient. `HFILTER_HOSTNAME_UNKNOWN` and `RDNS_NONE` are weighted
   0 (`rspamd/local.d/hfilter_group.conf`) because there is no client IP.
   Failure symbols `R_DKIM_REJECT`, `R_SPF_FAIL`, `DMARC_POLICY_*`, and
   `BLACKLIST_DMARC` are zeroed only from the outermost
@@ -920,6 +928,14 @@ Restore is the reverse: stop the four containers, extract the tar over
   server drops idle connections faster.
 - **No multi-host coordination.** Don't run two filter instances against
   the same mailbox.
+- **A message rspamd rejects on every pass is eventually given up.** After
+  5 failed passes spanning at least 10 minutes, and only if a tiny probe
+  message still scores (so rspamd itself is up), the UID is logged as
+  `scan_giveup`, left where it is, and scanning moves past it. A real
+  rspamd outage never gives anything up; the scan waits for recovery.
+- **Messages without a Message-ID are filtered normally.** They are scored,
+  list-matched, and moved by IMAP identity; a `no_message_id` event is
+  still logged for audit.
 - **Messages larger than 5 MiB are not fully downloaded.** They stay in
   place, are never auto-moved or scored, and are logged as
   `skipped_oversize`. Train-* oversize is moved to Trained-* unlearned

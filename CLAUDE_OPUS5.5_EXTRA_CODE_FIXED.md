@@ -86,3 +86,11 @@ New tests exercise paths the suite never ran:
 
 Together with the per-fix tests, `filter.py` branch coverage rose from **72% to 78%** (total 75% → 79%), and the suite from 349 to 396 tests. The shared `CapIMAP`/`RecordingIMAP` fakes return `FLAGS` for UIDs that don't exist, unlike a real server; the lost-UID test uses a realistic fake instead, and this is worth fixing in the shared fakes. Still recommended (not added): a scripted `_run_account` call-order test, and retention SEARCH/MOVE failure branches.
 Tests: `test_user_inbox_to_junk_without_keyword_learns_after_grace`, `test_junk_to_inbox_revert_learns_ham_after_grace`, `test_notjunk_keyword_revert_learns_immediately`, `test_pending_spam_moved_out_during_grace_is_lost_not_learned`, `test_unseen_over_cap_enters_and_leaves_safe_mode`, `test_due_moves_respect_remaining_hourly_quota`.
+
+### OPUS-CR-028 (partial) and CR-019 (docs only) — README matches the code
+The README now:
+- lists the nine managed folders (was "seven");
+- documents the rescue spoof/age guards, the Junk-retention exclusions, poison give-up, and filtering of mail without a Message-ID;
+- describes the Bayes identity accurately: `Delivered-To` is always prepended, an address is also `Rcpt`, and for a bare name `Rcpt` is the message's **first To/Cc recipient**, not "the mailbox" as it said before.
+
+Whether `Rcpt` *should* be the mailbox (CR-019) is a scoring decision I left for the operator. The slice 9–12 status tables and their pre-2026-09-21 "skip /checkv2" wording are unchanged, since those design docs are the operator's record.
