@@ -14,7 +14,7 @@ Four containers on a shared `spamnet` Docker network:
 | ------------------ | ---------------------- | ---- |
 | spamfilter-redis   | `redis:8-alpine`       | Persists rspamd Bayes tokens, fuzzy hashes, neural weights (AOF + RDB). |
 | spamfilter-unbound | `mvance/unbound:1.22.0`| Local recursive DNS. Keeps DNSBL lookups out of shared-resolver quotas. |
-| spamfilter-rspamd  | `rspamd/rspamd:4.2.0` | Scores messages: Bayes / fuzzy / neural / RBL. No autolearn. |
+| spamfilter-rspamd  | `rspamd/rspamd:4.2.0` | Scores messages: Bayes / fuzzy / RBL (neural is present but not self-training). No autolearn. |
 | spamfilter         | this repo (custom)     | Python service. One thread per account, IDLE on Inbox, polls Junk, scores, moves, learns. |
 
 Per-account operating modes (set in `accounts.yml`, promoted manually):
@@ -896,7 +896,7 @@ Restore is the reverse: stop the four containers, extract the tar over
 - **IMAP scoring has no SMTP client IP.** The filter does not send `Ip`
   or `Helo` to `/checkv2`. RBL `from` lookups, SPF, and DMARC envelope
   alignment are degraded; they rely on `Received:` chains in the message
-  plus Bayes/fuzzy/neural. HTTP `From` is the message From (not the IMAP
+  plus Bayes/fuzzy. HTTP `From` is the message From (not the IMAP
   recipient). The Bayes identity (`bayes_user`, else the mailbox) is always
   prepended as `Delivered-To`, the same prefix learning uses; rspamd keys
   per-user Bayes on the first `Delivered-To` ahead of `Rcpt`. A
@@ -936,6 +936,12 @@ Restore is the reverse: stop the four containers, extract the tar over
   `allowlisted_spoof_suspect` event so the user checks it first. Shadow
   only logs it. Exchange IMAP has no custom keywords or colours, so the
   flag is the only visible marker.
+- **Rspamd's neural network does not train itself.** `rspamd/local.d/neural.conf`
+  sets `train { autotrain = false; }`: on this IMAP path Rspamd's own score
+  still includes the Microsoft auth-recheck noise the filter removes
+  afterwards, so self-training taught neural that legitimate mail was spam.
+  With no trained model in Redis (`rn_*` / `rn3_*` keys), `NEURAL_*` symbols
+  do not fire.
 - **A message rspamd rejects on every pass is eventually given up.** After
   5 failed passes spanning at least 10 minutes, and only if a tiny probe
   message still scores (so rspamd itself is up), the UID is logged as

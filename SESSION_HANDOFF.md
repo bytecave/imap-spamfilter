@@ -32,7 +32,7 @@ A full code/security review (IMPLEMENTATION_STATUS "What's next" item 3) was don
 - **What was fixed:** [`CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md`](CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md): 15 fixes, one commit each, plus new tests and README corrections.
 - **Git:** everything is on **`main`** (pushed 2026-09-25). `git pull` in `/opt/bytelord/projects/imap-spamfilter` picks it up. **Nothing is deployed live yet.**
 - **Tests:** `cd filter && python -m pytest -q` → **401 passed** (was 349). New tests are mostly in `filter/test_opus_review_fixes.py`.
-- **Scope of change:** `filter/filter.py`, `filter/dashboard.py`, `unraid/bootstrap.sh`, `deploy/bytelord-compose.yaml` (`TZ: America/Los_Angeles`, `stop_grace_period: 90s`), `README.md`, tests. **No Rspamd/Redis config, `accounts.yml`, or data changes.** `bootstrap.version` is not bumped (no `local.d` file changed).
+- **Scope of change:** `filter/filter.py`, `filter/dashboard.py`, `unraid/bootstrap.sh`, `unraid/bootstrap.version` (11), `rspamd/local.d/neural.conf` (`autotrain = false`), `deploy/bytelord-compose.yaml` (`TZ: America/Los_Angeles`, `stop_grace_period: 90s`), `README.md`, tests. **No `accounts.yml` changes; the only data change is the neural-key delete in the runbook.**
 - **New operator-requested feature:** an **allowlisted** Inbox message that Microsoft's trusted Authentication-Results marks as **spoofed** stays in Inbox but gets a **red follow-up flag** in Outlook (flag/move modes) plus an `allowlisted_spoof_suspect` event. Shadow only logs `[shadow] would flag allowlisted spoof suspect`.
 - **Accounts remain `mode: shadow`.** Do not promote because of this review alone.
 - This cloud session had no Supermemory, Agent Mail, graphify, or VPS access. The next Cursor session should `supermemory_add` a summary of this review (container=project) and run `graphify update .`.
@@ -52,29 +52,95 @@ A full code/security review (IMPLEMENTATION_STATUS "What's next" item 3) was don
 
 ### Decisions needed from the operator (not changed by the review)
 
-1. **CR-004 (High) — Rspamd neural autotrain.** `neural.conf` autotrains from every `/checkv2` using Rspamd's *unadjusted* score. Bucket-B zeroing happens later in Python, so legitimate M365 mail (Amazon/Google at 18–25 internally) and the 2026-09-24 Trained-* re-score keep teaching neural "spam", and the pre-remediation `rn_*` keys were kept. Recommended: set `train { autotrain = false; }` (or `frozen = true;`), bump `unraid/bootstrap.version`, re-run bootstrap, and, **only with explicit approval**, delete the `rn_*` Redis keys (neural only).
+1. **CR-004 (High) — Rspamd neural autotrain: decided 2026-09-25 (operator approved).** `rspamd/local.d/neural.conf` now has `train { autotrain = false; }` (`bootstrap.version` 11), and the runbook above deletes only the neural `rn_*` / `rn3_*` Redis keys, with a Redis backup first. Neural will add no score until someone deliberately retrains it. Bayes and fuzzy are untouched.
 2. **CR-014 (live check before `move` mode):** does Exchange leave the Inbox copy after the filter's `UID MOVE` Inbox→Junk (and Junk→Inbox for rescues)? If it does, spam stays visible in Inbox in move mode, so decide whether to detect it or expunge.
 3. **CR-003 (Inbox side):** decided. Allowlisted spoof suspects stay in Inbox but are flagged (see above).
 4. **CR-019:** HTTP `Rcpt` on scans is the first To/Cc address, not the mailbox as earlier docs claimed. Switching to the mailbox is more truthful but may add `FORGED_RECIPIENTS` points to list/BCC ham.
 5. **CR-022/023 (compose):** `TZ` (Pacific) and `stop_grace_period: 90s` are now in `deploy/bytelord-compose.yaml`; **copy it to the live path** (below). `env_file` was deliberately left as is (low value, some risk). Optionally set `DASHBOARD_TRUSTED_PROXIES` to the Docker bridge gateway so login throttling sees real client IPs behind Caddy.
 
-### Deploy when ready
+### Deploy runbook (copy/paste over SSH as `bytecave`; no Cursor needed)
 
-The filter image and the ByteLord compose file changed. The live compose copy does **not** auto-sync, so diff and copy it first:
+Run each step, look at the output, and only continue if it matches "Expect". If anything looks different, stop and paste the output to your assistant. The filter and dashboard are down only between steps 4 and 6 (a few minutes).
+
+**Step 1 — pull the code**
 
 ```bash
-cd /opt/bytelord/projects/imap-spamfilter && git pull
+cd /opt/bytelord/projects/imap-spamfilter
+git status --short        # Expect: no output. If files are listed, STOP.
+git pull
+git log --oneline -1      # Expect: "Turn off rspamd neural self-training ..." (or newer)
+```
+
+**Step 2 — install the new neural config into the live rspamd config folder**
+
+```bash
+LIVE=/opt/bytelord/data/imap-spamfilter/rspamd/local.d
+for f in rspamd/local.d/*; do n=$(basename "$f"); case "$n" in *.template) continue;; esac; cmp -s "$f" "$LIVE/$n" || echo "DIFFERS: $n"; done
+# Expect exactly one line: DIFFERS: neural.conf   (anything else: STOP)
+cp rspamd/local.d/neural.conf "$LIVE/neural.conf"
+grep autotrain "$LIVE/neural.conf"     # Expect: autotrain = false;
+```
+
+**Step 3 — back up Redis and look at the neural keys (read-only)**
+
+```bash
+export REDISCLI_AUTH="$(sed -nE 's/^(export[[:space:]]+)?REDIS_PASSWORD=//p' /opt/bytelord/secrets/imap-spamfilter.env | tail -n1 | tr -d "\"'\r")"
+docker exec -e REDISCLI_AUTH spamfilter-redis redis-cli SAVE          # Expect: OK
+docker cp spamfilter-redis:/data/dump.rdb ~/spamfilter-redis-before-neural-wipe-$(date +%Y%m%d-%H%M%S).rdb
+chmod 600 ~/spamfilter-redis-before-neural-wipe-*.rdb && ls -la ~/spamfilter-redis-before-neural-wipe-*.rdb
+docker exec -e REDISCLI_AUTH spamfilter-redis sh -c 'redis-cli --scan --pattern "RS*" | wc -l'   # Bayes key count: write it down
+docker exec -e REDISCLI_AUTH spamfilter-redis sh -c 'redis-cli --scan --pattern "rn_*"; redis-cli --scan --pattern "rn[0-9]*"' | head -20
+# Expect: only names starting with rn_ or rn3_ (for example rn_default_..., rn3_default_...)
+```
+
+**Step 4 — stop the filter and rspamd, delete only the neural keys, start rspamd**
+
+```bash
+docker stop -t 90 spamfilter
+docker stop spamfilter-rspamd
+docker exec -e REDISCLI_AUTH spamfilter-redis sh -c 'redis-cli --scan --pattern "rn_*" | xargs -r -n 100 redis-cli UNLINK; redis-cli --scan --pattern "rn[0-9]*" | xargs -r -n 100 redis-cli UNLINK'
+docker exec -e REDISCLI_AUTH spamfilter-redis sh -c 'redis-cli --scan --pattern "rn_*"; redis-cli --scan --pattern "rn[0-9]*"' | wc -l   # Expect: 0
+docker exec -e REDISCLI_AUTH spamfilter-redis sh -c 'redis-cli --scan --pattern "RS*" | wc -l'   # Expect: same Bayes count as step 3
+unset REDISCLI_AUTH
+docker start spamfilter-rspamd
+sleep 10
+docker exec spamfilter-rspamd rspamadm configdump neural | grep -i autotrain   # Expect: autotrain = false;
+```
+
+**Step 5 — install the new compose file (Pacific time, 90 s shutdown grace)**
+
+```bash
 diff -u /opt/bytelord/compose/imap-spamfilter/compose.yaml deploy/bytelord-compose.yaml
+# Expect: only the TZ line (Europe/Berlin -> America/Los_Angeles, plus a comment)
+# and a new stop_grace_period: 90s block under the spamfilter service.
 cp /opt/bytelord/compose/imap-spamfilter/compose.yaml \
    /opt/bytelord/compose/imap-spamfilter/compose.yaml.bak.$(date +%Y%m%d-%H%M%S)
 cp deploy/bytelord-compose.yaml /opt/bytelord/compose/imap-spamfilter/compose.yaml
-docker compose -f /opt/bytelord/compose/imap-spamfilter/compose.yaml config >/dev/null && echo OK
+docker compose -f /opt/bytelord/compose/imap-spamfilter/compose.yaml config >/dev/null && echo OK   # Expect: OK
+```
+
+**Step 6 — rebuild and start the filter with the new code**
+
+```bash
 export SPAMFILTER_UID=1001 SPAMFILTER_GID=1001
 docker compose -f /opt/bytelord/compose/imap-spamfilter/compose.yaml build spamfilter
 docker compose -f /opt/bytelord/compose/imap-spamfilter/compose.yaml up -d --force-recreate --no-deps spamfilter
 ```
 
-Leave `spamfilter-redis` and `spamfilter-rspamd` alone. Re-running `deploy/vps-bootstrap.sh` is optional (it only makes secret-config rendering umask-safe).
+**Step 7 — check it came back**
+
+```bash
+docker compose -f /opt/bytelord/compose/imap-spamfilter/compose.yaml ps
+# Expect: spamfilter and spamfilter-rspamd "Up" (spamfilter turns "healthy" within ~2 min)
+docker logs --since 5m spamfilter 2>&1 | grep -c "connected, delimiter"   # Expect: 10 (one per account)
+docker logs --since 5m spamfilter 2>&1 | grep -iE "error|unhandled|database is locked" | head
+# Expect: nothing alarming (a few "scan failed" lines right at startup are OK)
+date; docker exec spamfilter date   # Expect: both show Pacific time (PDT/PST)
+```
+
+Later, `docker exec spamfilter python explain_score.py rich_bytecave --uid <n>` on new mail should show no `NEURAL_SPAM`/`NEURAL_HAM` lines.
+
+**If something goes wrong:** keep the `~/spamfilter-redis-before-neural-wipe-*.rdb` backup and the `compose.yaml.bak.*` file, and ask for help before changing anything else. Redis runs with AOF enabled, so restoring from the RDB file is a deliberate procedure, not a copy.
 
 ---
 
@@ -116,8 +182,8 @@ Messages tab reads SQLite `our_score` / `score_detail`. Inbox and top-level Junk
 
 ## Next steps (do these, in order)
 
-1. **Pull `main`, sync compose, rebuild** the `spamfilter` image (see "Deploy when ready"), and work through the "Test these first" table above (Cursor can help).
-2. **Decide CR-004 (neural autotrain)** before trusting scores for promotion; see "Decisions needed" above.
+1. **Run the deploy runbook above** (pull, neural config and key wipe, compose, rebuild), then work through the "Test these first" table (Cursor can help).
+2. Watch scores for a few days now that neural no longer contributes.
 3. **Stay in shadow.** Keep teaching content spam via Train-Spam (5Tool-style cold pitch, Chelsea, iPic). Before `flag`/`move`, run one test mailbox in `move` mode to check the rescue/retention guards and the live Exchange MOVE semantics (CR-014).
 4. **Do not** wipe Bayes again unless the operator asks.
 5. Later: CR-016 supply chain; the Low items listed in `CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md` "Not fixed"; more mailboxes only when asked.

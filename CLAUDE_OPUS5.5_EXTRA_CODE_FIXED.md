@@ -100,13 +100,14 @@ Whether `Rcpt` *should* be the mailbox (CR-019) is a scoring decision I left for
 - **Allowlisted spoof suspects are flagged (CR-003, Inbox side).** Allow still wins, so the message stays in Inbox. If Microsoft's trusted outermost AR marks it as spoofed, the filter logs `allowlisted_spoof_suspect` and, in `flag`/`move` mode, sets IMAP `\Flagged` (the red follow-up flag in Outlook/OWA). Shadow only logs it, because Inbox stays read-only there. A flag failure is logged and never stops the scan. Tests: `test_allowlisted_spoof_suspect_is_flagged_and_kept[flag|move]`, `test_allowlisted_spoof_suspect_shadow_only_logs`, `test_allowlisted_clean_auth_is_not_flagged`.
 - **CR-022 (partial), `deploy/bytelord-compose.yaml`:** `TZ: America/Los_Angeles` (US Pacific, auto PST/PDT) and `stop_grace_period: 90s` on `spamfilter`, so Docker doesn't kill the filter mid-MOVE after the default 10 s. `env_file` is deliberately unchanged (see below). These only take effect once the file is copied to the live compose path.
 
+- **CR-004 (operator approved):** `rspamd/local.d/neural.conf` sets `train { autotrain = false; }` and `unraid/bootstrap.version` is bumped to 11 (the paste-only fallback matches). I checked rspamd 4.2.0's `neural.lua`: the legacy top-level `train {}` block becomes the `default` rule; with `autotrain = false` no training vectors are stored; neural keys are prefixed `rn_` **and** `rn3_`. The neural-only key delete (with a Redis backup and a Bayes-count check) is step 4 of the `SESSION_HANDOFF.md` runbook, run manually by the operator.
+
 ## Not fixed — recommendations for the operator
 
 These passed verification but are policy, scoring, or ops decisions, or too minor to justify the churn:
 
 | ID | Why it was not changed here |
 |---|---|
-| OPUS-CR-004 (High) | Neural autotraining on unadjusted scores is a **scoring-policy and Redis-data decision**. The recommended steps are in the review (set `train { autotrain = false; }` or `frozen = true;` in `rspamd/local.d/neural.conf`, bump `unraid/bootstrap.version`, and after an explicit go-ahead delete only the `rn_*` Redis keys). Nothing was changed in config or data. |
 | OPUS-CR-003 (Inbox side) | Allow still keeps a Microsoft-flagged spoof in Inbox (moving it to Junk could hide mail the user explicitly trusts). The message is now flagged instead; see the follow-up above. |
 | OPUS-CR-014 (Inbox→Junk, rescues) | Whether Exchange leaves a source copy after `UID MOVE` from Inbox or Junk has to be observed on the live tenant before deciding to detect or expunge. |
 | OPUS-CR-018 | Dashboard catch-rate semantics (needs a folder in the `scan` event detail, or a relabel). |
