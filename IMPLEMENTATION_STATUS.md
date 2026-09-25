@@ -1,6 +1,6 @@
 # Implementation status — imap-spamfilter (ByteLord)
 
-**Last updated:** 2026-09-24  
+**Last updated:** 2026-09-24 (evening)  
 **Audience:** brand-new agent sessions (Cursor / Claude Code / Codex) with no prior chat memory.  
 **Companion:** [`SESSION_HANDOFF.md`](SESSION_HANDOFF.md) (short “where we left off”; this file is the durable product/deploy/agent map).
 
@@ -20,7 +20,7 @@ Then follow **Agent onboarding** below.
 
 ## Snapshot in one paragraph
 
-Self-hosted IMAP spam filter (Python + Rspamd + Redis + Unbound) on ByteLord. Mailboxes authenticate through sibling **`email-oauth2-proxy`** (XOAUTH2 to M365); this filter speaks plain IMAP `LOGIN` to the proxy. Allow/block lists + one shared Bayes notebook (`defaults.bayes_user: bytelord`) are live. **All accounts remain `mode: shadow`** (scan/log; no auto Inbox→Junk), but Train-* and Allowlist/Blocklist drains still MOVE. **2026-09-21:** dashboard on **8099** / `https://spam.bytelord.net`; Messages Untrained + score-band filters; Inbox scores `\Seen` mail; list hits scored; provider-Junk score/rescue; Allow/Block learn+route. **2026-09-22:** Rspamd **4.2.0** live; `RSPAMD_WEBUI_URL` → `spam.bytelord.net/rspamd/`. **2026-09-23:** root cause of Google/Amazon ~18–22 false rejects documented — IMAP second-pass auth recheck vs M365 edge `Authentication-Results`; remediation buckets A/B/C locked. **2026-09-24:** buckets A+B are live. `HFILTER_HOSTNAME_UNKNOWN` and `RDNS_NONE` weight 0. Failure symbols for DKIM/SPF/DMARC/`BLACKLIST_DMARC` are zeroed only from the outermost `Authentication-Results` header when it is Microsoft's stamp: authserv-id `mx.microsoft.com`, or no authserv-id but `compauth=` in that header plus outermost `Received-SPF` receiver `protection.outlook.com`, and that method is a clean pass (`filter.py` `apply_m365_auth_trust`). A later header does not count. rspamd 4.2 `trusted_authserv_id` only reuses AR while signing ARC, so it cannot do this. Google payroll UID 140596 (rich_eizenhoefer) rescored **16.6 → 9.10** on 2026-09-24. **All accounts stay `mode: shadow`.** **`BROKEN_HEADERS` (bucket C) still pending** and still kept legit samples such as Amazon UID 235843 at 7.95 (was 21.95). Full filter pytest: **343 passed** (2026-09-24). **Next preferred step: bucket C `BROKEN_HEADERS` investigation**, then shadow→flag→move only when the operator asks.
+Self-hosted IMAP spam filter (Python + Rspamd + Redis + Unbound) on ByteLord. Mailboxes authenticate through sibling **`email-oauth2-proxy`** (XOAUTH2 to M365); this filter speaks plain IMAP `LOGIN` to the proxy. Allow/block lists + one shared Bayes notebook (`defaults.bayes_user: bytelord`) are live. **All accounts remain `mode: shadow`**. **2026-09-22:** Rspamd **4.2.0** live; dashboard WebUI link. **2026-09-24:** IMAP-path buckets **A+B+C live**. A zeros `HFILTER_HOSTNAME_UNKNOWN`/`RDNS_NONE`. B (`apply_m365_auth_trust`) zeros DKIM/SPF/DMARC/`BLACKLIST_DMARC` only from the outermost Microsoft AR (`mx.microsoft.com` or `compauth=` + `protection.outlook.com` Received-SPF). C: bare `bytelord` is `Delivered-To` on scan; mailbox is HTTP `Rcpt` (was the false `BROKEN_HEADERS` +8). Shared Bayes wiped and rebuilt from Trained-* (spam≈205, ham≈2410 after re-feed; Redis bak `dump.rdb.bak-20260924`). Dashboard Trained-* rows bulk-rescored into SQLite (~2897); Inbox/top Junk **not** bulk-rescored. Auth-passed content spam can still score low (operator will Train-Spam). Chelsea mistaken ham learn moved back to Trained-Spam. **Next: stay in shadow; promote only when asked.**
 
 ---
 
@@ -336,16 +336,16 @@ Only when the user asks. No force-push, no `--no-verify`, no secrets. Main sessi
 | **B — Auth recheck** | `R_DKIM_REJECT`, `R_SPF_FAIL`, `DMARC_POLICY_*`, `BLACKLIST_DMARC`, related | **Suppress failure weight only when** trusted `mx.microsoft.com` AR says the corresponding check **pass**. If AR says fail / missing / untrusted authserv → **keep** failure symbols. Do **not** blanket-disable auth scoring. Prefer rspamd mechanisms (`trusted_authserv_id`, ARC `whitelisted_signers_map` + `adjust_dmarc` for `microsoft.com`) over crude global score cuts. |
 | **C — Content / MIME** | Bayes, URLs, fuzzy, neural, lists, **`BROKEN_HEADERS`** | **Keep the symbol.** The Amazon/Google +8 was `Rcpt: bytelord` (not an address). Scan now uses the mailbox as `Rcpt` and `Delivered-To: bytelord` for the notebook. Smashed headers still score +8. |
 
-Ham training **cannot** cancel A/B auth-header symbols. Leaving shadow before A+B (and a decision on C) would auto-Junk a lot of good mail.
+Ham training **cannot** cancel A/B auth-header symbols when they still fire (untrusted AR / real fail). Leaving shadow before scores look sane would still auto-Junk some good Inbox mail that was never dashboard-rescored. Content spam that passes Microsoft auth must be taught via Train-Spam / block lists.
 
 ---
 
 ## What’s next (suggested order)
 
-1. **Bucket C false +8 is fixed** (2026-09-24). The Amazon/Google `BROKEN_HEADERS` was HTTP `Rcpt: bytelord`, not broken MIME. Scan now sends the mailbox as `Rcpt` and prepends `Delivered-To: bytelord` so the shared notebook still applies. Payroll UID 140596 is **3.65**; Amazon UID 235843 is **−2.05**. The symbol stays enabled: smashed headers still score +8.
-2. **Stay in `shadow`** until dashboard scores look sane after A+B (and any C decision); then promote carefully `flag` → `move` when the operator asks. Do **not** auto-promote from a code review alone.
+1. **Stay in `shadow`.** Watch scores after the A/B/C + Bayes rebuild. Operator will Train-Spam auth-passed content spam (5Tool-style cold pitch, Chelsea, iPic). Promote carefully `flag` → `move` only when asked. Do **not** auto-promote from a code review alone. Do **not** wipe Bayes again unless asked.
+2. **A/B/C + Bayes rebuild + Trained-* dashboard rescore are done** (2026-09-24). Inbox/top-level Junk dashboard rows were intentionally not bulk-rescored. Optional later if the operator asks.
 3. **Full code + security review** by Claude Code or Codex (`filter.py`, `dashboard.py`, list/Bayes, provider-Junk rescue, Allow/Block learn+MOVE, state permissions, compose/secrets, dashboard auth). Findings with severity + fixes; still no auto-promote out of shadow.
-4. **Rspamd 4.2.0 / WebUI-link deploy is done** (2026-09-22). A+B re-score is done (2026-09-24); 4.2.0’s `R_DKIM_ALIGNED` did not block the trusted-AR suppression.
+4. **Rspamd 4.2.0 / WebUI-link deploy is done** (2026-09-22).
 5. **CR-016 / supply-chain** (accepted risk): lock+hash deps, image digests, GHA SHA pins — when prioritized.
 6. More M365 mailboxes only with Exchange grant + proxy section + YAML. No generic IMAP for `bytelord.net` unless asked.
 7. Optional polish from CR disposition (fingerprint caps, SQLite CHECKs, etc.) — not release blockers.
@@ -357,7 +357,7 @@ Ham training **cannot** cancel A/B auth-header symbols. Leaving shadow before A+
 | File | Why |
 |---|---|
 | `IMPLEMENTATION_STATUS.md` | **Mandatory** — this file |
-| `SESSION_HANDOFF.md` | **Mandatory** — current continue-here note (2026-09-24) |
+| `SESSION_HANDOFF.md` | **Mandatory** — current continue-here note (2026-09-24 evening) |
 | `README.md` | Operator docs (modes, folders, dashboard, safe-mode) |
 | `CHATGPT_CODE_REVIEW.md` | Prior CR findings + disposition |
 | `design-arch/allow_block_sliced_plan.md` | List/Bayes product decisions (reopenable) |
