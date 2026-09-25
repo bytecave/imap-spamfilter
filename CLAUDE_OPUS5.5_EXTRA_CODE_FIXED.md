@@ -71,3 +71,7 @@ Test: `test_train_leftover_after_move_as_copy_is_not_moved_twice` (the old code 
 ### OPUS-CR-016 — `pending_move_canceled` is logged only for a real cancellation (Low)
 `Db.drop_pending_move` now returns the number of rows it deleted, and the `scan_inbox` allow branch logs `pending_move_canceled` only when a queued move was actually dropped. Before, every allowlisted Inbox message produced a phantom cancellation event, which hid real ones in the audit trail. The `execute_due_moves` allow re-check always has a real pending row and still logs it.
 Test: `test_allow_hit_without_pending_move_logs_no_cancellation`; ChatGPT CR-001 cancellation tests still pass.
+
+### OPUS-CR-017 — Bootstrap renders secret configs owner-only from the first byte (Low)
+`unraid/bootstrap.sh` `render_subst` now runs awk in a `umask 077` subshell. The rendered `worker-controller.inc` and both Redis configs are created 0600 and only then widened to the intended 0640 by `verify_secret_file`; before, under the caller's umask (usually 022) they were briefly world-readable. The single-file-paste fallback version now matches `unraid/bootstrap.version` (10, not 9), and a test keeps them in lockstep.
+Tests: `test_render_subst_creates_rendered_secret_owner_only` (extracts and runs the real bash function under umask 022), `test_bootstrap_fallback_version_matches_version_file`. `bash -n` is clean.

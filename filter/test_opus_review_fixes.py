@@ -6,7 +6,11 @@ Run: STATE_DIR=/tmp/x python -m pytest test_opus_review_fixes.py
 import datetime as dt
 import logging
 import os
+import re
+import shutil
+import subprocess
 import tempfile
+from pathlib import Path
 
 os.environ.setdefault("STATE_DIR", tempfile.mkdtemp(prefix="sf_test_"))
 
@@ -630,3 +634,33 @@ def test_allow_hit_without_pending_move_logs_no_cancellation(tmp_path, monkeypat
     evs = _events(db)
     assert "allowlisted" in evs
     assert "pending_move_canceled" not in evs
+
+
+# ----- OPUS-CR-017: bootstrap renders secrets privately ---------------------
+
+BOOTSTRAP = Path(__file__).resolve().parent.parent / "unraid" / "bootstrap.sh"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_render_subst_creates_rendered_secret_owner_only(tmp_path):
+    text = BOOTSTRAP.read_text()
+    func = re.search(r"^render_subst\(\) \{.*?^\}", text, re.M | re.S).group(0)
+    template = tmp_path / "t.template"
+    template.write_text('password = "${RSPAMD_PASSWORD}";\n')
+    pwfile = tmp_path / "pw"
+    pwfile.write_text("s3cret\n")
+    dest = tmp_path / "rendered.inc"
+    script = (
+        "set -euo pipefail\numask 022\n" + func + "\n"
+        f"render_subst '{template}' '{dest}' '${{RSPAMD_PASSWORD}}' '{pwfile}'\n"
+    )
+    subprocess.run(["bash", "-c", script], check=True)
+    assert dest.read_text() == 'password = "s3cret";\n'
+    assert dest.stat().st_mode & 0o777 == 0o600
+
+
+def test_bootstrap_fallback_version_matches_version_file():
+    text = BOOTSTRAP.read_text()
+    fallback = re.search(r"\|\| echo (\d+)\)", text).group(1)
+    current = (BOOTSTRAP.parent / "bootstrap.version").read_text().strip()
+    assert fallback == current

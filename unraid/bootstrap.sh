@@ -36,7 +36,7 @@ BOOTSTRAP_VERSION="$(tr -d '[:space:]' < "$SCRIPT_DIR/bootstrap.version" 2>/dev/
 if [ -z "$BOOTSTRAP_VERSION" ]; then
   # User Scripts often paste only this file. Keep the fallback in lockstep
   # with unraid/bootstrap.version so a re-paste can still trigger refresh.
-  BOOTSTRAP_VERSION="$(tr -d '[:space:]' < "$REPO_ROOT/unraid/bootstrap.version" 2>/dev/null || echo 9)"
+  BOOTSTRAP_VERSION="$(tr -d '[:space:]' < "$REPO_ROOT/unraid/bootstrap.version" 2>/dev/null || echo 10)"
 fi
 STAMP="$APP/.bootstrap.version"
 NEED_REFRESH=0
@@ -144,9 +144,11 @@ install_file() {
 render_subst() {
   # Substitute ${PLACEHOLDER} from a password file. awk -v pfile= puts
   # the path on argv, never the secret (unlike sed "s|...|$PW|").
+  # The rendered file holds a secret: create it 0600 (umask 077) so it is
+  # never world-readable before verify_secret_file sets the final 0640.
   local template="$1" dest="$2" placeholder="$3" pwfile="$4"
   local tmp="${dest}.tmp"
-  awk -v pfile="$pwfile" -v ph="$placeholder" '
+  ( umask 077 && awk -v pfile="$pwfile" -v ph="$placeholder" '
     function literal_gsub(str, find, repl, pos, pre, post) {
       while ((pos = index(str, find)) > 0) {
         pre = substr(str, 1, pos - 1)
@@ -162,7 +164,7 @@ render_subst() {
       sub(/\n$/, "", pw)
     }
     { print literal_gsub($0, ph, pw) }
-  ' "$template" > "$tmp"
+  ' "$template" > "$tmp" )
   mv "$tmp" "$dest"
 }
 
