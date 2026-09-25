@@ -2075,12 +2075,16 @@ def start() -> None:
 
     def _serve():
         try:
+            # Waitress rejects oversized bodies before WSGI, so its ceiling
+            # must admit the largest legitimate request (a list Save, up to
+            # LIST_POST_MAX). Flask's MAX_CONTENT_LENGTH still holds every
+            # other route, including /login, to LOGIN_REQUEST_MAX.
             serve(
                 app,
                 host="0.0.0.0",
                 port=DASHBOARD_PORT,
                 threads=4,
-                max_request_body_size=LOGIN_REQUEST_MAX,
+                max_request_body_size=LIST_POST_MAX,
             )
         except Exception as ex:  # noqa: BLE001
             logging.getLogger("dashboard").error("crashed: %s", ex)

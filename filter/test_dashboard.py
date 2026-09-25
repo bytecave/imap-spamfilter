@@ -6,7 +6,9 @@ Run: STATE_DIR=/tmp/x python -m pytest test_dashboard.py
 import os
 import sqlite3
 import tempfile
+import threading
 import time
+from types import SimpleNamespace
 from urllib.parse import urlparse
 
 import pytest
@@ -383,7 +385,79 @@ def test_waitress_rejects_large_body_before_wsgi(monkeypatch):
 
     d.start()
 
-    assert served["max_request_body_size"] == d.LOGIN_REQUEST_MAX
+    # Bounded before WSGI, but large enough for a full list Save
+    # (OPUS-CR-005). /login stays capped by Flask (test above).
+    assert served["max_request_body_size"] == d.LIST_POST_MAX
+
+
+def test_real_waitress_accepts_large_list_post_but_not_large_login(monkeypatch):
+    """End-to-end through waitress: a ~22 KiB list Save reaches Flask
+    (redirected to login here because the client is anonymous), while a
+    >16 KiB /login body is still refused."""
+    import socket
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    from waitress.server import create_server
+
+    user = d._User("admin", "plain:pw", True, frozenset())
+    served = {}
+
+    class ImmediateThread:
+        def __init__(self, *, target, **_kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(d, "_load_users", lambda: {"admin": user})
+    # Patch only the dashboard's reference: waitress needs real threads.
+    monkeypatch.setattr(d, "threading", SimpleNamespace(Thread=ImmediateThread))
+    monkeypatch.setattr(d, "serve", lambda _app, **kwargs: served.update(kwargs))
+    d.start()
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    srv = create_server(
+        d.app, host="127.0.0.1", port=port, threads=2,
+        max_request_body_size=served["max_request_body_size"],
+    )
+    runner = threading.Thread(target=srv.run, daemon=True)
+    runner.start()
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None
+
+    opener = urllib.request.build_opener(NoRedirect)
+
+    def post(path, fields):
+        body = urllib.parse.urlencode(fields).encode()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}{path}", data=body, method="POST",
+        )
+        try:
+            return opener.open(req, timeout=10).status, len(body)
+        except urllib.error.HTTPError as ex:
+            return ex.code, len(body)
+
+    try:
+        lines = "\n".join(f"user{i:04d}@vendor-example.com" for i in range(700))
+        status, size = post(
+            "/lists/users",
+            {"scope": "Rich", "kind": "allow", "body": lines, "csrf_token": "x"},
+        )
+        assert size > d.LOGIN_REQUEST_MAX
+        assert status != 413
+        status, size = post(
+            "/login", {"username": "admin", "password": "x" * d.LOGIN_REQUEST_MAX},
+        )
+        assert status == 413
+    finally:
+        srv.close()
 
 
 def test_legacy_login_performs_dummy_kdf(monkeypatch):
