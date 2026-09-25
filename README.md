@@ -928,6 +928,14 @@ Restore is the reverse: stop the four containers, extract the tar over
   server drops idle connections faster.
 - **No multi-host coordination.** Don't run two filter instances against
   the same mailbox.
+- **Allow/block lists match the From and Sender headers, which can be
+  forged.** When Microsoft's trusted `Authentication-Results` marks an
+  allowlisted Inbox message as spoofed (`compauth=fail`, or `dmarc=fail`
+  without compauth), it still stays in Inbox, but in `flag`/`move` mode it
+  gets a red follow-up flag (IMAP `\Flagged`) and an
+  `allowlisted_spoof_suspect` event so the user checks it first. Shadow
+  only logs it. Exchange IMAP has no custom keywords or colours, so the
+  flag is the only visible marker.
 - **A message rspamd rejects on every pass is eventually given up.** After
   5 failed passes spanning at least 10 minutes, and only if a tiny probe
   message still scores (so rspamd itself is up), the UID is logged as

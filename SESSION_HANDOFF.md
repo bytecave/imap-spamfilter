@@ -30,9 +30,10 @@ A full code/security review (IMPLEMENTATION_STATUS "What's next" item 3) was don
 
 - **Findings:** [`CLAUDE_OPUS5.5_EXTRA_CODE_REVIEW.md`](CLAUDE_OPUS5.5_EXTRA_CODE_REVIEW.md): 28 traced findings (4 High, 11 Medium, 13 Low).
 - **What was fixed:** [`CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md`](CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md): 15 fixes, one commit each, plus new tests and README corrections.
-- **Branch:** `claude/blissful-dijkstra-qzxvln` (pushed; **not merged to `main`**, and no PR was opened). Review the branch, merge, then rebuild the `spamfilter` image. **Nothing is deployed live yet.**
-- **Tests:** `cd filter && python -m pytest -q` → **397 passed** (was 349). New tests are mostly in `filter/test_opus_review_fixes.py`.
-- **Scope of change:** `filter/filter.py`, `filter/dashboard.py`, `unraid/bootstrap.sh`, `README.md`, tests. **No Rspamd/Redis config, `accounts.yml`, compose, or data changes.** `bootstrap.version` is not bumped (no `local.d` file changed).
+- **Git:** everything is on **`main`** (pushed 2026-09-25). `git pull` in `/opt/bytelord/projects/imap-spamfilter` picks it up. **Nothing is deployed live yet.**
+- **Tests:** `cd filter && python -m pytest -q` → **401 passed** (was 349). New tests are mostly in `filter/test_opus_review_fixes.py`.
+- **Scope of change:** `filter/filter.py`, `filter/dashboard.py`, `unraid/bootstrap.sh`, `deploy/bytelord-compose.yaml` (`TZ: America/Los_Angeles`, `stop_grace_period: 90s`), `README.md`, tests. **No Rspamd/Redis config, `accounts.yml`, or data changes.** `bootstrap.version` is not bumped (no `local.d` file changed).
+- **New operator-requested feature:** an **allowlisted** Inbox message that Microsoft's trusted Authentication-Results marks as **spoofed** stays in Inbox but gets a **red follow-up flag** in Outlook (flag/move modes) plus an `allowlisted_spoof_suspect` event. Shadow only logs `[shadow] would flag allowlisted spoof suspect`.
 - **Accounts remain `mode: shadow`.** Do not promote because of this review alone.
 - This cloud session had no Supermemory, Agent Mail, graphify, or VPS access. The next Cursor session should `supermemory_add` a summary of this review (container=project) and run `graphify update .`.
 
@@ -53,15 +54,21 @@ A full code/security review (IMPLEMENTATION_STATUS "What's next" item 3) was don
 
 1. **CR-004 (High) — Rspamd neural autotrain.** `neural.conf` autotrains from every `/checkv2` using Rspamd's *unadjusted* score. Bucket-B zeroing happens later in Python, so legitimate M365 mail (Amazon/Google at 18–25 internally) and the 2026-09-24 Trained-* re-score keep teaching neural "spam", and the pre-remediation `rn_*` keys were kept. Recommended: set `train { autotrain = false; }` (or `frozen = true;`), bump `unraid/bootstrap.version`, re-run bootstrap, and, **only with explicit approval**, delete the `rn_*` Redis keys (neural only).
 2. **CR-014 (live check before `move` mode):** does Exchange leave the Inbox copy after the filter's `UID MOVE` Inbox→Junk (and Junk→Inbox for rescues)? If it does, spam stays visible in Inbox in move mode, so decide whether to detect it or expunge.
-3. **CR-003 (Inbox side):** should an allowlist hit keep a message Microsoft marked as spoofed (`compauth=fail`) in Inbox? Currently yes; only the rescue path was hardened.
+3. **CR-003 (Inbox side):** decided. Allowlisted spoof suspects stay in Inbox but are flagged (see above).
 4. **CR-019:** HTTP `Rcpt` on scans is the first To/Cc address, not the mailbox as earlier docs claimed. Switching to the mailbox is more truthful but may add `FORGED_RECIPIENTS` points to list/BCC ham.
-5. **CR-022/023 (compose, manual sync):** `TZ: Europe/Berlin` (should be your zone), drop `env_file` (it puts `REDIS_PASSWORD` in the filter env), add `stop_grace_period: 60s`, and set `DASHBOARD_TRUSTED_PROXIES` to the Docker bridge gateway so login throttling sees real client IPs behind Caddy.
+5. **CR-022/023 (compose):** `TZ` (Pacific) and `stop_grace_period: 90s` are now in `deploy/bytelord-compose.yaml`; **copy it to the live path** (below). `env_file` was deliberately left as is (low value, some risk). Optionally set `DASHBOARD_TRUSTED_PROXIES` to the Docker bridge gateway so login throttling sees real client IPs behind Caddy.
 
-### Deploy when ready (after merge)
+### Deploy when ready
 
-Only the filter image changed. Diff and sync the compose copy as usual (it is unchanged by this review), then:
+The filter image and the ByteLord compose file changed. The live compose copy does **not** auto-sync, so diff and copy it first:
 
 ```bash
+cd /opt/bytelord/projects/imap-spamfilter && git pull
+diff -u /opt/bytelord/compose/imap-spamfilter/compose.yaml deploy/bytelord-compose.yaml
+cp /opt/bytelord/compose/imap-spamfilter/compose.yaml \
+   /opt/bytelord/compose/imap-spamfilter/compose.yaml.bak.$(date +%Y%m%d-%H%M%S)
+cp deploy/bytelord-compose.yaml /opt/bytelord/compose/imap-spamfilter/compose.yaml
+docker compose -f /opt/bytelord/compose/imap-spamfilter/compose.yaml config >/dev/null && echo OK
 export SPAMFILTER_UID=1001 SPAMFILTER_GID=1001
 docker compose -f /opt/bytelord/compose/imap-spamfilter/compose.yaml build spamfilter
 docker compose -f /opt/bytelord/compose/imap-spamfilter/compose.yaml up -d --force-recreate --no-deps spamfilter
@@ -109,7 +116,7 @@ Messages tab reads SQLite `our_score` / `score_detail`. Inbox and top-level Junk
 
 ## Next steps (do these, in order)
 
-1. **Review and merge** `claude/blissful-dijkstra-qzxvln`, rebuild the `spamfilter` image, and work through the "Test these first" table above (Cursor can help).
+1. **Pull `main`, sync compose, rebuild** the `spamfilter` image (see "Deploy when ready"), and work through the "Test these first" table above (Cursor can help).
 2. **Decide CR-004 (neural autotrain)** before trusting scores for promotion; see "Decisions needed" above.
 3. **Stay in shadow.** Keep teaching content spam via Train-Spam (5Tool-style cold pitch, Chelsea, iPic). Before `flag`/`move`, run one test mailbox in `move` mode to check the rescue/retention guards and the live Exchange MOVE semantics (CR-014).
 4. **Do not** wipe Bayes again unless the operator asks.

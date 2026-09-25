@@ -3671,6 +3671,12 @@ def _scan_inbox_uid_batch(
                 hit_detail = _list_hit_event_detail(hit, score)
                 _log_list_hit(log, acc, hit, msgid, subject, hit_detail)
                 if hit.decision == "allow":
+                    # The allow hit came from spoofable From/Sender headers.
+                    # If Microsoft's trusted AR says the message is spoofed,
+                    # keep it in Inbox (allow wins) but warn the user.
+                    spoof_suspect = m365_spoof_verdict(raw) and (
+                        prior is None or prior["our_action"] != "allowlisted"
+                    )
                     with db.tx():
                         canceled = db.drop_pending_move(fmap["inbox"], uv, uid)
                         db.update_imap_message(
@@ -3683,6 +3689,12 @@ def _scan_inbox_uid_batch(
                             )
                         if hit.conflict:
                             db.log_event("list_conflict", msgid, detail=hit_detail)
+                        if spoof_suspect:
+                            db.log_event(
+                                "allowlisted_spoof_suspect", msgid, detail=hit_detail,
+                            )
+                    if spoof_suspect:
+                        _flag_spoof_suspect(client, log, acc, uid, msgid, subject)
                     last_terminal = uid
                     continue
                 with db.tx():
@@ -3761,6 +3773,42 @@ def _scan_inbox_uid_batch(
                         )
             last_terminal = uid
     return halted, last_terminal
+
+
+def _flag_spoof_suspect(
+    client: IMAPClient,
+    log: logging.Logger,
+    acc: Account,
+    uid: int,
+    msgid: str | None,
+    subject: str,
+) -> None:
+    """Mark an allowlisted Inbox message that Microsoft flags as spoofed.
+
+    Sets \\Flagged (Outlook/OWA show a red follow-up flag) so the user
+    looks before trusting it. Exchange IMAP offers no custom keywords or
+    colours, so this is the only visible marker. Shadow never writes to
+    Inbox: it only logs what it would flag. A flag failure is logged and
+    never stops the scan.
+    """
+    if acc.mode == "shadow":
+        log.warning(
+            "[shadow] would flag allowlisted spoof suspect %s subj=%r",
+            msgid, subject[:80],
+        )
+        return
+    try:
+        client.add_flags(uid, [b"\\Flagged"])
+    except IMAPClientError as ex:
+        log.warning(
+            "could not flag allowlisted spoof suspect %s: %s",
+            msgid, redact_log(str(ex), acc.password),
+        )
+        return
+    log.warning(
+        "flagged allowlisted spoof suspect %s subj=%r (Microsoft: spoofed)",
+        msgid, subject[:80],
+    )
 
 
 def _catchup_unscored_inbox(

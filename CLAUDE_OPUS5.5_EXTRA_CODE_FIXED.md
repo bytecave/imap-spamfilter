@@ -95,6 +95,11 @@ The README now:
 
 Whether `Rcpt` *should* be the mailbox (CR-019) is a scoring decision I left for the operator. The slice 9–12 status tables and their pre-2026-09-21 "skip /checkv2" wording are unchanged, since those design docs are the operator's record.
 
+### Follow-up requested by the operator (2026-09-25)
+
+- **Allowlisted spoof suspects are flagged (CR-003, Inbox side).** Allow still wins, so the message stays in Inbox. If Microsoft's trusted outermost AR marks it as spoofed, the filter logs `allowlisted_spoof_suspect` and, in `flag`/`move` mode, sets IMAP `\Flagged` (the red follow-up flag in Outlook/OWA). Shadow only logs it, because Inbox stays read-only there. A flag failure is logged and never stops the scan. Tests: `test_allowlisted_spoof_suspect_is_flagged_and_kept[flag|move]`, `test_allowlisted_spoof_suspect_shadow_only_logs`, `test_allowlisted_clean_auth_is_not_flagged`.
+- **CR-022 (partial), `deploy/bytelord-compose.yaml`:** `TZ: America/Los_Angeles` (US Pacific, auto PST/PDT) and `stop_grace_period: 90s` on `spamfilter`, so Docker doesn't kill the filter mid-MOVE after the default 10 s. `env_file` is deliberately unchanged (see below). These only take effect once the file is copied to the live compose path.
+
 ## Not fixed — recommendations for the operator
 
 These passed verification but are policy, scoring, or ops decisions, or too minor to justify the churn:
@@ -102,18 +107,18 @@ These passed verification but are policy, scoring, or ops decisions, or too mino
 | ID | Why it was not changed here |
 |---|---|
 | OPUS-CR-004 (High) | Neural autotraining on unadjusted scores is a **scoring-policy and Redis-data decision**. The recommended steps are in the review (set `train { autotrain = false; }` or `frozen = true;` in `rspamd/local.d/neural.conf`, bump `unraid/bootstrap.version`, and after an explicit go-ahead delete only the `rn_*` Redis keys). Nothing was changed in config or data. |
-| OPUS-CR-003 (Inbox side) | Whether an allow hit should keep a Microsoft-flagged spoof in Inbox. Changing it could junk mail the user explicitly trusts (Outlook Safe Senders). |
+| OPUS-CR-003 (Inbox side) | Allow still keeps a Microsoft-flagged spoof in Inbox (moving it to Junk could hide mail the user explicitly trusts). The message is now flagged instead; see the follow-up above. |
 | OPUS-CR-014 (Inbox→Junk, rescues) | Whether Exchange leaves a source copy after `UID MOVE` from Inbox or Junk has to be observed on the live tenant before deciding to detect or expunge. |
 | OPUS-CR-018 | Dashboard catch-rate semantics (needs a folder in the `scan` event detail, or a relabel). |
 | OPUS-CR-019 | Whether HTTP `Rcpt` should be the mailbox. That is a scoring change (`FORGED_RECIPIENTS` on list and BCC mail); the README now documents the real behavior. |
 | OPUS-CR-020 | Double learns after Allow/Block drags. Harmless to Bayes (Rspamd 208) and only inflates counters. |
 | OPUS-CR-021, 024, 025, 026, 027 | Low-impact validation, diagnostics, and UX items; details and recommended changes are in the review. |
-| OPUS-CR-022, 023 | ByteLord Compose/ops settings (`TZ`, `env_file`, `stop_grace_period`, `DASHBOARD_TRUSTED_PROXIES`). They live in the manually synced deploy copy, which is the operator's to change. |
+| OPUS-CR-022 (`env_file`), 023 | `env_file` stays: it only exposes the passwords to people who already control Docker (effectively root), and removing it could break anything else the operator keeps in that file. `DASHBOARD_TRUSTED_PROXIES` needs the live Docker bridge gateway IP. |
 | OPUS-CR-028 (rest) | The slice 9–12 status tables and superseded "skip /checkv2" text belong to the operator's design record. |
 
 ## Final validation
 
-- `cd filter && python -m pytest -q` → **397 passed** (baseline was 349).
+- `cd filter && python -m pytest -q` → **401 passed** (baseline was 349).
 - Branch coverage: `filter.py` 72% → 78%; total 75% → 79%.
 - `python -m compileall -q filter` is clean; `bash -n deploy/*.sh unraid/*.sh` is clean.
 - **Every fix-specific regression test fails against the original `ff9461e` code**, either on its assertions or, for the new helpers (`m365_spoof_verdict`, the poison constants), because they don't exist yet. For example, the backoff test sees gaps `[5, 5, 5]` and the list-drain collision test sees an EXPUNGE with no MOVE. The review's reproduction script confirmed CR-002's old behavior (bookmark stuck after 20 passes). The six CR-015 coverage tests and the "unchanged behavior" controls pass on both versions, as intended.

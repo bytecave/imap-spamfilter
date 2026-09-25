@@ -71,6 +71,10 @@ services:
     container_name: spamfilter
     restart: unless-stopped
     logging: *log-rotate
+    # Time Docker waits after asking the filter to stop before killing it.
+    # The default 10 s can cut a MOVE off before its database update is
+    # written; account threads need up to ~30 s per step plus logout.
+    stop_grace_period: 90s
     depends_on: [spamfilter-rspamd]
     # Note: do not use YAML aliases like "*secrets-file:/path:ro" — go-yaml
     # rejects alias+suffix in sequence items. Keep the path literal here.
@@ -87,7 +91,9 @@ services:
       RSPAMD_WEBUI_URL: https://spam.bytelord.net/rspamd/
       STATE_DIR: /state
       LOG_LEVEL: INFO
-      TZ: Europe/Berlin
+      # Dashboard times and per-day buckets use this zone. America/Los_Angeles
+      # is US Pacific (covers WA) and switches PST/PDT automatically.
+      TZ: America/Los_Angeles
     user: "${SPAMFILTER_UID:-1001}:${SPAMFILTER_GID:-1001}"
     volumes:
       - /opt/bytelord/secrets/imap-spamfilter.env:/run/secrets/imap-spamfilter.env:ro

@@ -826,3 +826,46 @@ def test_probe_recovering_right_after_a_failed_scan_is_not_poison(
         f.scan_inbox(client, db, LOG, acc, FMAP, state)
     assert db.get_scan_bookmark("INBOX", 1) == 1
     assert _events(db, "scan_giveup") == []
+
+
+# ----- Allowlisted but Microsoft says spoofed: warn the user ----------------
+
+
+def _allowlisted_inbox(tmp_path, monkeypatch, mode, header):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode=mode, move_grace_seconds=0, actual_name="Rich")
+    parsed = f.ParsedPattern("ap@vendor.example", "address")
+    with db.tx():
+        db.set_scan_bookmark("INBOX", 1, 0)
+        db.list_upsert_address(
+            "person", "Rich", "allow", parsed, source="imap", max_entries=1000,
+        )
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(15.0, (), None),
+    )
+    raw = header + _raw(1, sender="ap@vendor.example")
+    client = CapIMAP(existing=_all_existing(), uids=[1], bodies={1: raw})
+    f.scan_inbox(client, db, LOG, acc, FMAP, f.AccountState())
+    return db, client
+
+
+@pytest.mark.parametrize("mode", ["flag", "move"])
+def test_allowlisted_spoof_suspect_is_flagged_and_kept(tmp_path, monkeypatch, mode):
+    db, client = _allowlisted_inbox(tmp_path, monkeypatch, mode, SPOOF_AR)
+    assert client.flags_added == [(1, [b"\\Flagged"])]
+    assert "allowlisted_spoof_suspect" in _events(db)
+    row = db.get_imap_message("INBOX", 1, 1)
+    assert row["our_action"] == "allowlisted"
+    assert db.due_pending_moves("INBOX", 1, 0) == []  # allow still wins
+
+
+def test_allowlisted_spoof_suspect_shadow_only_logs(tmp_path, monkeypatch):
+    db, client = _allowlisted_inbox(tmp_path, monkeypatch, "shadow", SPOOF_AR)
+    assert client.flags_added == []
+    assert "allowlisted_spoof_suspect" in _events(db)
+
+
+def test_allowlisted_clean_auth_is_not_flagged(tmp_path, monkeypatch):
+    db, client = _allowlisted_inbox(tmp_path, monkeypatch, "flag", FORWARDED_AR)
+    assert client.flags_added == []
+    assert "allowlisted_spoof_suspect" not in _events(db)
