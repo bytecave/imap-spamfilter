@@ -1656,7 +1656,12 @@ class Db:
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
-        self.conn.execute("BEGIN")
+        # IMMEDIATE takes the write lock up front, honouring busy_timeout.
+        # A deferred BEGIN that reads first (log_event's subject lookup,
+        # _set_learn_retry) fails at once with SQLITE_BUSY in WAL mode when
+        # another connection committed meanwhile: the busy handler is not
+        # used for a stale-snapshot upgrade.
+        self.conn.execute("BEGIN IMMEDIATE")
         try:
             yield self.conn
             self.conn.execute("COMMIT")

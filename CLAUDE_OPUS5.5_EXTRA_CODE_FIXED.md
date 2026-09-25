@@ -46,3 +46,7 @@ Tests: `test_junk_retention_waits_for_poll_junk_bookmark`, `test_junk_retention_
 ### OPUS-CR-010 — Mail without a Message-ID is filtered like any other (Medium)
 `scan_inbox` and `poll_junk` no longer skip messages without a Message-ID. The `no_message_id` audit event is still logged (once, when the UID is first seen), but the message is now stored (`message_id` NULL), scored, list-matched, flagged or queued for move, and learned from on user moves. `pending_move.message_id` is `NOT NULL`, so it stores `""`, and the due-move/rescue executors turn that back into NULL for events. This supersedes the "no Message-ID → permanent skip" rows in slices 3 and 5, which dated from when Message-ID was the primary key.
 Tests: `test_inbox_without_message_id_is_scored_and_routed[flag|move]`, `test_user_move_without_message_id_is_learned`.
+
+### OPUS-CR-011 — SQLite transactions take the write lock up front (Medium)
+`Db.tx()` now issues `BEGIN IMMEDIATE`. In WAL mode, a deferred transaction that reads first (`log_event`'s subject lookup, `_set_learn_retry`) fails *at once* with `SQLITE_BUSY` when it upgrades to a write after another of the ~11 connections committed; the 30 s busy handler doesn't apply to a stale snapshot. That error used to reach `_run_account`'s generic handler and force an IMAP reconnect, sometimes right after a MOVE whose DB update was then lost. `IMMEDIATE` waits on the busy timeout instead.
+Test: `test_tx_holds_write_lock_from_begin` (fails with deferred `BEGIN`, passes with `IMMEDIATE`).

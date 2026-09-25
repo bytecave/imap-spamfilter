@@ -460,3 +460,27 @@ def test_user_move_without_message_id_is_learned(tmp_path, monkeypatch):
     client = CapIMAP(existing=_all_existing(), uids=[4], bodies={4: RAW_NO_MSGID})
     f.poll_junk(client, db, LOG, acc, FMAP)
     assert db.get_imap_message("Junk", 1, 4)["pending_learn"] == "spam"
+
+
+# ----- OPUS-CR-011: transactions take the write lock up front ---------------
+
+
+def test_tx_holds_write_lock_from_begin(tmp_path):
+    import sqlite3
+
+    db = _mk_db(tmp_path)
+    other = sqlite3.connect(f.DB_PATH, isolation_level=None, timeout=0)
+    try:
+        with db.tx():
+            db.conn.execute("SELECT COUNT(*) FROM events").fetchone()
+            # A concurrent writer cannot slip in between our read and write
+            # (with deferred BEGIN it could, and our write would then fail).
+            with pytest.raises(sqlite3.OperationalError):
+                other.execute(
+                    "INSERT INTO events(account, ts, event) VALUES('o', 1, 'x')"
+                )
+            db.log_event("inside_tx")
+        other.execute("INSERT INTO events(account, ts, event) VALUES('o', 1, 'x')")
+    finally:
+        other.close()
+    assert "inside_tx" in _events(db)
