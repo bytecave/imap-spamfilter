@@ -1950,7 +1950,8 @@ def _list_page_render(
     allow_checked = " checked" if kind == "allow" else ""
     block_checked = " checked" if kind == "block" else ""
     hint = (
-        "One address or domain per line (user@host or @host)."
+        "One address or domain per line (user@host or @host). "
+        "A domain covers that host and its subdomains."
         if allow_domain else
         "One address per line (user@host only)."
     )

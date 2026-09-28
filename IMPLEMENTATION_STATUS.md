@@ -1,6 +1,6 @@
 # Implementation status — imap-spamfilter (ByteLord)
 
-**Last updated:** 2026-09-25 late night Pacific (Train-* leftover fix + third Bayes retrain live)  
+**Last updated:** 2026-09-28 01:34 Pacific (`rich_bytecave` in move mode; Trained-* retention has started)  
 **Audience:** brand-new agent sessions (Cursor / Claude Code / Codex) with no prior chat memory.  
 **Companion:** [`SESSION_HANDOFF.md`](SESSION_HANDOFF.md) (short “where we left off”; this file is the durable product/deploy/agent map).
 
@@ -20,7 +20,7 @@ Then follow **Agent onboarding** below.
 
 ## Snapshot in one paragraph
 
-Self-hosted IMAP spam filter (Python + Rspamd + Redis + Unbound) on ByteLord. Mailboxes authenticate through sibling **`email-oauth2-proxy`** (XOAUTH2 to M365); this filter speaks plain IMAP `LOGIN` to the proxy. Allow/block lists + one shared Bayes notebook (`defaults.bayes_user: bytelord`) are live. **All accounts remain `mode: shadow`**. **2026-09-22:** Rspamd **4.2.0** live; dashboard WebUI link. **2026-09-24:** IMAP-path buckets **A+B+C live**. A zeros `HFILTER_HOSTNAME_UNKNOWN`/`RDNS_NONE`. B (`apply_m365_auth_trust`) zeros DKIM/SPF/DMARC/`BLACKLIST_DMARC` only from the outermost Microsoft AR. C: bare `bytelord` is `Delivered-To` on scan; mailbox is HTTP `Rcpt`. **2026-09-25:** Opus review fixes deployed (neural off; stock fuzzy). Cursor verified V1–V7 (Bayes `RS*` count lower than the deploy note but notebook intact). **`rescue_below` (default 4)** for provider Junk→Inbox; Inbox→Junk stays at **`threshold` 8**. **Train-* drain** now expunges Exchange MOVE-as-COPY leftovers after verifying a byte-identical copy in Trained-* (`0b982e9`). Morning one-shot had moved 981 Trained-Spam→Trained-Ham while Bayes was empty (script deleted); operator corrected folders; **third wipe+relearn** (bak `dump.rdb.bak-20260924-retrain3`): Bayes **spam ≈ 940 / ham ≈ 1595**; fuzzy hits in Trained-*: **3** `FUZZY_DENIED`. Tests **406 passed**. Neural stays off. **Next: human testing table in SESSION_HANDOFF; stay in shadow; no more Bayes wipe unless asked.**
+Self-hosted IMAP spam filter (Python + Rspamd + Redis + Unbound) on ByteLord. Mailboxes authenticate through sibling **`email-oauth2-proxy`** (XOAUTH2 to M365); this filter speaks plain IMAP `LOGIN` to the proxy. Allow/block lists + one shared Bayes notebook (`defaults.bayes_user: bytelord`) are live. **`rich_bytecave` (rich@bytecave.net) is `mode: move` as of 2026-09-28 01:26 Pacific. The other nine accounts stay `shadow`.** `move_grace_seconds` is 0. Score-based moves do **not** train Bayes. **Retention is no longer skipped for that mailbox:** the first sweep moved **101** old Trained-Spam and **500** old Trained-Ham (the per-pass cap) to Deleted Items. Default `trained_retention_days` is 7. The next sweep is about an hour later. Bayes backup, taken first: Redis `/data/dump.rdb.bak-20260928-before-rich-move` plus `/data/appendonlydir.bak-20260928-before-rich-move`. **Working tree is dirty and uncommitted** (HEAD `c866599`). Subdomain `@host` matching is in the tree only; the running image was not rebuilt. Live rspamd has `url_suspect` `word_dots = false` (Apple “Green Dot Bank” false positive). Neural stays off. **Next: watch this one mailbox; do not promote others; do not wipe Bayes.**
 
 ---
 
@@ -64,7 +64,7 @@ Compose **source of truth in git:** `deploy/bytelord-compose.yaml`
 | `flag` | Shadow + `\Flagged` on over-threshold Inbox |
 | `move` | Flag + after `move_grace_seconds` MOVE Inbox→Junk when score ≥ `threshold`; provider-Junk rescue MOVEs when score &lt; `rescue_below` or allowlisted |
 
-Live config is still **shadow**. `learn_grace_seconds: 30` (was 15). **`accounts.yml` is loaded once at process start — restart `spamfilter` after YAML changes.**
+Live config: **`rich_bytecave` is `move`**; every other account is **shadow**. `learn_grace_seconds: 30`. `move_grace_seconds: 0`. **`accounts.yml` is loaded once at process start — restart `spamfilter` after YAML changes.** The image does not need a rebuild for a mode change (`accounts.yml` is bind-mounted). Move and flag modes run retention; shadow does not.
 
 ### Dashboard
 
@@ -204,7 +204,8 @@ Full plan at `~/.cursor/plans/rspamd_4.2.0_upgrade_and_webui_link_18e83c16.plan.
 |---|---|
 | List vs score | List hit **scores**; list **overrides routing**; list hit alone does **not** Bayes-learn |
 | Headers matched | From + Sender only (not Reply-To) |
-| Precedence | user address → user `@host` → domain address → domain `@host`; allow wins only on true tie |
+| Precedence | user address → user `@host` → domain address → domain `@host`; `@host` includes subdomains and the longer host wins within that step; allow wins only on true tie. **Coded 2026-09-28, not in the running image** until `spamfilter` is rebuilt. |
+| `URL_OBFUSCATED_TEXT` word-dot *(2026-09-28)* | **Live.** `rspamd/local.d/url_suspect.conf` sets `word_dots = false` so “Green Dot Bank” is not scored as a URL (+9). Other obfuscation patterns stay on. Uncommitted; live file copied by hand. |
 | Allowlist drag | Upsert/flip + **ham learn** + MOVE → **Inbox** |
 | Blocklist drag | Upsert/flip + **spam learn** + MOVE → **Junk** |
 | Provider Junk | Score; no spam-learn from “landed in Junk”; rescue when score **&lt; `rescue_below`** (default **4**) or allowlisted (**move** only); mid-band stays in Junk. Never train on rescue. *(2026-09-25)* Spoofed allowlisted mail is not rescued (`m365_spoof_verdict`); INTERNALDATE &gt; 3 days → no rescue. User re-junk of a rescued message **is** learned as spam. |
@@ -261,6 +262,8 @@ ls -la /opt/bytelord/data/imap-spamfilter/state
 
 **Do not** `compose down` redis/rspamd/unbound casually — Bayes lives in Redis.
 
+**Deployed 2026-09-28 01:26 Pacific:** `accounts.yml` only. `rich_bytecave` `mode: move`. Filter restarted, not rebuilt. Connected log shows `mode=move` for that account and `mode=shadow` for the other nine. Retention then moved old Trained-* mail to Deleted Items (see SESSION_HANDOFF). Bayes backup is in the Redis data directory, named `dump.rdb.bak-20260928-before-rich-move` and `appendonlydir.bak-20260928-before-rich-move`.
+
 **Deployed 2026-09-25 (operator, SESSION_HANDOFF runbook):**
 - Filter rebuilt from `main` `1d04635` (Opus review fixes).
 - Live compose = `deploy/bytelord-compose.yaml`, with `TZ=America/Los_Angeles` and `stop_grace_period: 90s`; the previous file is kept as `compose.yaml.bak.*`.
@@ -307,7 +310,7 @@ ssh -L 8099:127.0.0.1:8099 bytecave@bytelord
 
 ## Live accounts (`accounts.yml`, gitignored)
 
-All **`mode: shadow`**. Proxy LOGIN with `password: "Dummy"`, `imap_host: email-oauth2-proxy`, port **1993**, `tls_mode: none`, `allow_insecure_tls: true`.
+All accounts use proxy LOGIN with `password: "Dummy"`, `imap_host: email-oauth2-proxy`, port **1993**, `tls_mode: none`, `allow_insecure_tls: true`. **`rich_bytecave` is `mode: move` (2026-09-28). The other nine are `shadow`.**
 
 Notable defaults (verify in file — operators edit live YAML):
 
@@ -316,7 +319,7 @@ Notable defaults (verify in file — operators edit live YAML):
 - `junk_poll_interval: 30`
 - `move_grace_seconds: 0`
 - Roster domains: `bytecave.net`, `eizenhoefer.net`, `rjmetalfab.com`, `bytelord.net`
-- `# threshold: 14.0` commented — leave alone until leaving shadow
+- `# threshold: 14.0` commented — live junk line is the builtin **8**, rescue line is builtin **4**. `trained_retention_days` is unset, so the builtin **7** applies and is now active for `rich_bytecave`.
 
 | `name` | mailbox | `actual_name` |
 |---|---|---|
@@ -436,15 +439,15 @@ Ham training **cannot** cancel A/B auth-header symbols when they still fire (unt
 
 ## What’s next (suggested order)
 
-1. **Human testing** of the 2026-09-25 Opus deploy + tonight’s Train-* leftover fix — SESSION_HANDOFF "Test these first" (esp. #1 list-drain, #6 Train-* after a drag, #9 fuzzy FP watch). V1–V7 verification is done.
+1. **`rich_bytecave` is already in `move`.** First retention sweep (01:26 Pacific) moved 101 Trained-Spam and 500 Trained-Ham older than ~8 days to Deleted Items. Another 500 can go each hour until `trained_retention_days` is changed. Do not promote any other account. CR-014 Inbox→Junk leftover check is still open.
 2. **CR-004 / neural: done and closed.** It stays off. See "Neural: why it stays off" before proposing any change.
-3. **Stay in `shadow`.** Watch scores after retrain3 (spam/ham balance is healthier: ~940/~1595). Before `flag`/`move`, run **one test mailbox in `move` mode** to confirm rescue/retention guards, `rescue_below` behavior, and whether Exchange leaves Inbox copies after `UID MOVE` (CR-014 Inbox side). Promote only when asked.
-4. **Do not wipe Bayes again** unless asked. Do not run any score-based Trained-* mover. Inbox/top Junk dashboard rows were never bulk-rescored; optional later.
-5. **Operator decisions still open:** CR-019 `Rcpt` = mailbox vs first To/Cc; optional `DASHBOARD_TRUSTED_PROXIES`. (`TZ`/`stop_grace_period` done; `env_file` intentionally kept.)
-6. **Rspamd 4.2.0 / WebUI-link deploy is done** (2026-09-22).
+3. **Do not wipe Bayes again** unless asked. Restore point: `dump.rdb.bak-20260928-before-rich-move` and `appendonlydir.bak-20260928-before-rich-move` inside the Redis data volume. Do not run any score-based Trained-* mover.
+4. **Uncommitted, not deployed:** subdomain `@host` matching in `filter/filter.py`. **Live but uncommitted:** `url_suspect` word-dot off. Do not rebuild `spamfilter` unless asked.
+5. **Operator decisions still open:** CR-019 `Rcpt` = mailbox vs first To/Cc; optional `DASHBOARD_TRUSTED_PROXIES`.
+6. **Rspamd 4.2.0 / WebUI-link deploy is done** (2026-09-22). V1–V7 deploy verification is done.
 7. **ChatGPT CR-016 / supply chain** (accepted risk): lock and hash deps, image digests, GHA SHA pins — when prioritized.
 8. More M365 mailboxes only with an Exchange grant + proxy section + YAML. No generic IMAP for `bytelord.net` unless asked.
-9. Optional polish: ChatGPT CR disposition items, and the Low items under "Not fixed" in `CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md`. Not release blockers.
+9. Optional polish: ChatGPT CR disposition items, and the Low items under "Not fixed" in `CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md`. Not release blockers. Human testing table in SESSION_HANDOFF is still open, now against one live move-mode mailbox.
 
 ---
 
@@ -453,7 +456,7 @@ Ham training **cannot** cancel A/B auth-header symbols when they still fire (unt
 | File | Why |
 |---|---|
 | `IMPLEMENTATION_STATUS.md` | **Mandatory** — this file |
-| `SESSION_HANDOFF.md` | **Mandatory** — current continue-here note (2026-09-25 late night: retrain3 + Train leftover fix live; human testing next) |
+| `SESSION_HANDOFF.md` | **Mandatory** — current continue-here note (2026-09-28: `rich_bytecave` move mode, retention sweep, Bayes backup) |
 | `README.md` | Operator docs (modes, folders, dashboard, safe-mode) |
 | `CHATGPT_CODE_REVIEW.md` | Prior CR findings + disposition |
 | `CLAUDE_OPUS5.5_EXTRA_CODE_REVIEW.md` | 2026-09-25 review: 29 traced findings (OPUS-CR-001…029) |

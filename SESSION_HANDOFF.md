@@ -1,6 +1,6 @@
 # Session handoff — imap-spamfilter (ByteLord VPS)
 
-**Last updated:** 2026-09-25 late night (Pacific) — Train-* leftover fix live; third Bayes retrain done  
+**Last updated:** 2026-09-28 01:34 Pacific — `rich_bytecave` is in **move** mode; retention has started emptying old Trained-*  
 **Repo:** `/opt/bytelord/projects/imap-spamfilter`  
 **Remote:** `github.com:bytecave/imap-spamfilter.git` (branch `main`)  
 **Upstream fork of:** marcelverdult/imap-spamfilter  
@@ -17,7 +17,9 @@ A new agent **must** do all three before exploring code or proposing fixes:
    - `IMAP-path remediation buckets A B C mx.microsoft.com`
    - `Bayes retrain bytelord Delivered-To Rcpt rescue_below`
    - `Train leftover MOVE-as-COPY expunge`
-   - `dashboard Trained rescore score_detail`
+   - `rich_bytecave move mode trained_retention_days Deleted Items`
+   - `Bayes backup dump.rdb.bak-20260928-before-rich-move`
+   - `URL_OBFUSCATED_TEXT word_dots Green Dot Bank`
    - `imap-spamfilter shadow dashboard 8099`
    Also `supermemory_list` (recent project memories). After decisions or live deploys, `supermemory_add` with `container=project`.
 
@@ -25,24 +27,52 @@ Also read `/home/bytecave/.claude/CLAUDE.md` (Cursor user rule) and use Agent Ma
 
 ---
 
-## Where we left off (2026-09-25 late night Pacific) — CONTINUE HERE
+## Where we left off (2026-09-28 01:34 Pacific) — CONTINUE HERE
 
-Cursor finished the Opus deploy verification, then shipped two live product changes and rebuilt Bayes from corrected Trained-* folders.
+`rich@bytecave.net` (`rich_bytecave`) is the only account in **`mode: move`**. The other nine stay **`shadow`**. `move_grace_seconds` is **0**. The spamfilter image was **not** rebuilt (`accounts.yml` is bind-mounted). HEAD is still `c866599`. The working tree is dirty and **not committed**.
 
-### Done tonight (after the Opus deploy)
+### Urgent: retention is on for this mailbox
 
-1. **V1–V7 verification (read-only):** Pass except V3 Bayes `RS*` count was **60919** (not ≥78042). Notebook itself was intact (`rspamc stat` ~226 spam / ~2428 ham). Neural keys = 0. Fuzzy stock rule loaded. No NEURAL_* on sample scores.
-2. **`rescue_below` (commit `ddca9c8`, deployed):** Provider Junk → Inbox only when the **first** score is **&lt; 4** (`accounts.yml` `rescue_below`, default 4). Inbox → Junk still uses `threshold` (default 8). Mid-band 4–8 stays put. User Inbox↔Junk drags are fingerprint-detected and never automoved back. Allow/block still override; spoofed allowlisted mail is not rescued from Junk. Rspamd `actions.conf` labels stay cosmetic.
-3. **Train-* leftover cleanup (commit `0b982e9`, deployed):** Confirmed live: Exchange MOVE-as-COPY left dozens of copies in Train-* after learn→Trained-*. Drain now uses `_move_clearing_source` and `_clear_train_leftovers` (expunge only after a byte-identical copy is verified in Trained-*). Tests: **406 passed**.
-4. **Third Bayes wipe + in-place relearn (retrain3):** Cause of earlier “spam in Trained-Ham”: morning one-shot `/tmp/rescore_trained_spam.py` had moved **981** Trained-Spam messages to Trained-Ham when Bayes was empty (score &lt; 6). Script deleted. Operator corrected folders by hand. Wipe: Redis bak `dump.rdb.bak-20260924-retrain3` inside the redis container; only `bytelord` Bayes keys deleted. After restart of rspamd, learns = 0, then `bootstrap_train.py --all-trained` **in place** (no score-based moves). Final Bayes: **spam ≈ 940**, **ham ≈ 1595**. Fuzzy hits in Trained-*: **3** (`FUZZY_DENIED`), all in `rich_rjmetalfab` Trained-Spam. Dashboard Trained-* rescored (rich_rjmetalfab spam folder needed a second pass with `spamfilter` stopped).
-5. **Running image** matches `0b982e9` (`filter.py` hash equal host↔container). All accounts **`mode: shadow`**. Neural stays off.
+Shadow skips retention. Move mode does not. Default `trained_retention_days` is **7** (not set in `accounts.yml`). The first sweep after the mode change, at 01:26 Pacific, moved mail older than about 8 days to **Deleted Items**:
+
+- **101** from `Junk Email/Trained-Spam`
+- **500** from `Junk Email/Trained-Ham` (per-pass cap is 500, so more old ham remains)
+
+The next sweep is about **one hour** after that (`retention_check_interval` default 3600). Junk retention is 62 days and did not move anything on that pass. Bayes itself was not wiped. To stop further Trained-* moves, set `trained_retention_days: 0` on `rich_bytecave` (or a large number) and restart `spamfilter`. Do not do that unless the operator asks. Messages are in Deleted Items, not destroyed.
+
+### Bayes backup (before the mode change)
+
+Taken with `spamfilter` stopped, after a successful `BGSAVE`. Redis `requirepass` is quoted; a raw `sed` of that line fails `AUTH`. Inside the redis container:
+
+- `/data/dump.rdb.bak-20260928-before-rich-move` — 1,446,079 bytes, byte-identical to `dump.rdb` at 08:25 UTC
+- `/data/appendonlydir.bak-20260928-before-rich-move` — AOF is enabled, so a restore must stop Redis and put **both** back
+
+Host path of that volume: `/opt/bytelord/data/imap-spamfilter/redis/`. Do not `compose down` Redis. Do not wipe Bayes or run a score-based Trained-* mover unless asked.
+
+### What move mode does, and does not, teach
+
+Score moves do **not** train Bayes. Provider Junk with score **&lt; 4** is rescued to Inbox with no ham learn. Inbox score **≥ 8** goes to Junk with no spam learn. Mid-band 4–8 stays put. A drag Junk→Inbox schedules ham, and Inbox→Junk schedules spam, after `learn_grace_seconds` **30**. Undo before that drops the pending learn. The Inbox bookmark does **not** go back and re-junk mail already scored in shadow. New UIDs above the bookmark, plus up to 50 never-scored Inbox rows per pass, are acted on.
+
+### Uncommitted work (not all of it is live)
+
+| Change | Live? |
+|---|---|
+| `url_suspect` `word_dots = false` (`rspamd/local.d/url_suspect.conf`, copied to the data `local.d`, rspamd reloaded) | **Yes.** Stops “Green Dot Bank” → `URL_OBFUSCATED_TEXT` +9. Other obfuscation patterns stay on. `unraid/bootstrap.version` is **13** so the next bootstrap installs the file; the live stamp was not bumped. |
+| `@host` allow/block matches that host **and subdomains**; longer host wins inside a rank (`filter/filter.py`) | **No.** In the working tree only. Address-list tests passed (30). Running image is still `0b982e9`. |
+| Docs in this file and `IMPLEMENTATION_STATUS.md` | Working tree |
+
+Do not rebuild `spamfilter` unless asked: a rebuild would ship the subdomain matcher and any other dirty `filter/` files.
+
+### Also true from 2026-09-25 (still in force)
+
+Rescue line is `rescue_below` 4; junk line is `threshold` 8. Train-* drain expunges MOVE-as-COPY leftovers after a verified Trained-* copy (`0b982e9`). Retrain3 Bayes was about **940 spam / 1595 ham**. Neural stays off. Fuzzy is the stock rspamd.com rule. Dashboard Class=spam means a filter spam **action** or `learned_as=spam`, not “sitting in Junk.”
 
 ### Next for a new agent
 
-1. Human testing table below (esp. #1 list-drain, #6 Train-* leftover after a drag, #9 fuzzy FP watch). Stay in shadow.
-2. Open operator decisions: CR-019 `Rcpt`; optional `DASHBOARD_TRUSTED_PROXIES`; CR-014 Inbox→Junk leftover check before promoting anyone to `move`.
-3. Do **not** wipe Bayes again or run any score-based Trained-* mover unless the operator asks.
-4. Do **not** re-run the Opus neural/fuzzy deploy runbook (kept below for reference only).
+1. Tell the operator about the Trained-* retention sweep above before doing anything else that touches folders.
+2. Watch `rich_bytecave` move/rescue logs. Do not promote any other account.
+3. CR-014 (Inbox→Junk MOVE-as-COPY leftover) is still open. CR-019 `Rcpt` and `DASHBOARD_TRUSTED_PROXIES` are still open.
+4. Do not re-run the Opus neural/fuzzy deploy runbook (kept below for reference only). V1–V7 is done.
 
 ## Cursor: first job — verify the 2026-09-25 deploy (read-only) — DONE 2026-09-24 night
 
@@ -331,7 +361,8 @@ Self-hosted IMAP spam filter: Python (`filter/filter.py`) + Rspamd **4.2.0** + R
 | `deploy/bytelord-compose.yaml` | Compose **source of truth** |
 | `/opt/bytelord/compose/imap-spamfilter/compose.yaml` | **Live** compose — **does not auto-sync**; diff + `cp` before pull/recreate |
 | `/opt/bytelord/data/imap-spamfilter/state/` | SQLite `spamfilter.db` (0700/0600); retrain reports `bayes-retrain-20260924.tsv`, `google-amazon-20260924.tsv` |
-| `/opt/bytelord/data/imap-spamfilter/redis/dump.rdb.bak-20260924` | Pre-wipe Redis snapshot |
+| `/opt/bytelord/data/imap-spamfilter/redis/dump.rdb.bak-20260928-before-rich-move` | Bayes snapshot before `rich_bytecave` move mode (pair with `appendonlydir.bak-20260928-before-rich-move`) |
+| `/opt/bytelord/data/imap-spamfilter/redis/dump.rdb.bak-20260924-retrain3` | Snapshot before the third Bayes relearn |
 | `/opt/bytelord/secrets/imap-spamfilter.env` | Secrets — never commit |
 | `/opt/bytelord/projects/email-oauth2-proxy/` | OAuth/M365 bridge |
 
@@ -352,7 +383,7 @@ Recreate filter with `SPAMFILTER_UID=1001 SPAMFILTER_GID=1001`. **Do not** `comp
 | `filter/explain_score.py` | Re-score one UID and print symbols |
 | `filter/bootstrap_train.py` | `--all-trained` Trained-* re-feed |
 | `filter/dashboard.py` | Messages “why” from `score_detail` |
-| `rspamd/local.d/` | `hfilter_group.conf`, `actions.conf` (cosmetic 4/6/15), `neural.conf` (autotrain off), `fuzzy_check.conf` (comments only → stock rule) |
+| `rspamd/local.d/` | `hfilter_group.conf`, `actions.conf` (cosmetic), `neural.conf` (autotrain off), `fuzzy_check.conf` (comments only), `url_suspect.conf` (word-dot check off; uncommitted, live copy installed) |
 | `README.md` | Operator docs (IMAP-path limitation section) |
 | `design-arch/slice6_rspamd_scan_metadata.md` | Locked: no fake `Ip`/`Helo` |
 

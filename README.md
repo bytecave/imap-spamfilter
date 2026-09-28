@@ -687,7 +687,9 @@ A small Flask dashboard is available for at-a-glance stats:
 a health banner, filter KPIs, a 14-day scan trend, rspamd Bayes
 progress, recent scans/learns, and per-account activity. Admins can
 also edit domain and user allow/block lists from a textarea (one
-address or `@host` per line). User lists override roster-scoped
+address or `@host` per line). `@host` covers that host and its
+subdomains (`@apple.com` matches `email.apple.com`); a longer
+matching host wins on the same list. User lists override roster-scoped
 domain lists. Matching uses From and Sender only (not Reply-To).
 A list hit still runs rspamd `/checkv2` so the dashboard has a score;
 the list only overrides routing (keep Inbox vs treat as spam). List

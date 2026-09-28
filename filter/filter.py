@@ -2775,18 +2775,35 @@ def iter_list_header_addrs(raw: bytes) -> list[str]:
     return out
 
 
+def _domain_covers_host(pattern: str, host: str) -> bool:
+    """True when `@example.com` covers `example.com` and any subdomain.
+
+    The dot boundary is required, so `notapple.com` and
+    `apple.com.evil.com` do not match `@apple.com`.
+    """
+    if not host or not pattern.startswith("@") or pattern.count("@") != 1:
+        return False
+    domain = pattern[1:]
+    if not domain:
+        return False
+    return host == domain or host.endswith("." + domain)
+
+
 def classify_list_hit(
     acc: Account, db: Db, addrs: list[str]
 ) -> ListHit | None:
     """Stop-on-first-hit list match. From+Sender addresses are pooled.
 
     1. User-list exact address
-    2. User-list whole domain (@host)
+    2. User-list domain (`@host`, including subdomains)
     3. Domain-list exact address (roster-scoped)
-    4. Domain-list whole domain
+    4. Domain-list domain (`@host`, including subdomains)
 
-    Address beats @host. User list beats domain list. Allow wins only
-    on a true tie at the winning step (audit-only list_conflict).
+    Address beats a domain pattern. User list beats domain list. Within
+    one domain step the longer matching host wins, so block
+    `@email.apple.com` beats allow `@apple.com` for that subdomain.
+    Allow wins only on a true tie at the winning (rank, host length)
+    pair (audit-only list_conflict).
     """
     if not addrs or not acc.actual_name:
         return None
@@ -2795,50 +2812,54 @@ def classify_list_hit(
         mbox_dom if (mbox_dom and acc.list_roster.has_domain(mbox_dom)) else None
     )
     rows = db.list_rows_for_match(acc.actual_name, domain_key)
-    by_key: set[tuple[str, str, str, str]] = set()
+    address_keys: set[tuple[str, str, str, str]] = set()
+    domain_entries: list[tuple[str, str, str, str]] = []
     for r in rows:
-        by_key.add((r["scope_type"], r["scope_key"], r["kind"], r["pattern"]))
+        key = (r["scope_type"], r["scope_key"], r["kind"], r["pattern"])
+        if r["pattern_type"] == "domain":
+            domain_entries.append(key)
+        else:
+            address_keys.add(key)
 
-    # rank, decision, pattern, scope
-    hits: list[tuple[int, str, str, str]] = []
+    # rank, host length (0 for an address), decision, pattern, scope
+    hits: list[tuple[int, int, str, str, str]] = []
     for addr in addrs:
         host = addr.rsplit("@", 1)[-1] if "@" in addr else ""
-        domain_pat = f"@{host}" if host else None
-        if ("person", acc.actual_name, "allow", addr) in by_key:
-            hits.append((4, "allow", addr, "person"))
-        if ("person", acc.actual_name, "block", addr) in by_key:
-            hits.append((4, "block", addr, "person"))
-        if domain_pat:
-            if ("person", acc.actual_name, "allow", domain_pat) in by_key:
-                hits.append((3, "allow", domain_pat, "person"))
-            if ("person", acc.actual_name, "block", domain_pat) in by_key:
-                hits.append((3, "block", domain_pat, "person"))
+        if ("person", acc.actual_name, "allow", addr) in address_keys:
+            hits.append((4, 0, "allow", addr, "person"))
+        if ("person", acc.actual_name, "block", addr) in address_keys:
+            hits.append((4, 0, "block", addr, "person"))
+        for scope_type, scope_key, kind, pattern in domain_entries:
+            if scope_type != "person" or scope_key != acc.actual_name:
+                continue
+            if host and _domain_covers_host(pattern, host):
+                hits.append((3, len(pattern) - 1, kind, pattern, "person"))
         if domain_key:
-            if ("domain", domain_key, "allow", addr) in by_key:
-                hits.append((2, "allow", addr, "domain"))
-            if ("domain", domain_key, "block", addr) in by_key:
-                hits.append((2, "block", addr, "domain"))
-            if domain_pat:
-                if ("domain", domain_key, "allow", domain_pat) in by_key:
-                    hits.append((1, "allow", domain_pat, "domain"))
-                if ("domain", domain_key, "block", domain_pat) in by_key:
-                    hits.append((1, "block", domain_pat, "domain"))
+            if ("domain", domain_key, "allow", addr) in address_keys:
+                hits.append((2, 0, "allow", addr, "domain"))
+            if ("domain", domain_key, "block", addr) in address_keys:
+                hits.append((2, 0, "block", addr, "domain"))
+            for scope_type, scope_key, kind, pattern in domain_entries:
+                if scope_type != "domain" or scope_key != domain_key:
+                    continue
+                if host and _domain_covers_host(pattern, host):
+                    hits.append((1, len(pattern) - 1, kind, pattern, "domain"))
     if not hits:
         return None
-    best = max(h[0] for h in hits)
-    at_best = [h for h in hits if h[0] == best]
-    kinds = {h[1] for h in at_best}
+    best = max((h[0], h[1]) for h in hits)
+    at_best = [h for h in hits if (h[0], h[1]) == best]
+    kinds = {h[2] for h in at_best}
     conflict = "allow" in kinds and "block" in kinds
     if "allow" in kinds:
-        chosen = next(h for h in at_best if h[1] == "allow")
+        chosen = next(h for h in at_best if h[2] == "allow")
     else:
         chosen = at_best[0]
     return ListHit(
-        decision=chosen[1],
-        pattern=chosen[2],
-        scope=chosen[3],
+        decision=chosen[2],
+        pattern=chosen[3],
+        scope=chosen[4],
         conflict=conflict,
-        rank=best,
+        rank=best[0],
     )
 
 

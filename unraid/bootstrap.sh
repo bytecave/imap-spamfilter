@@ -36,7 +36,7 @@ BOOTSTRAP_VERSION="$(tr -d '[:space:]' < "$SCRIPT_DIR/bootstrap.version" 2>/dev/
 if [ -z "$BOOTSTRAP_VERSION" ]; then
   # User Scripts often paste only this file. Keep the fallback in lockstep
   # with unraid/bootstrap.version so a re-paste can still trigger refresh.
-  BOOTSTRAP_VERSION="$(tr -d '[:space:]' < "$REPO_ROOT/unraid/bootstrap.version" 2>/dev/null || echo 12)"
+  BOOTSTRAP_VERSION="$(tr -d '[:space:]' < "$REPO_ROOT/unraid/bootstrap.version" 2>/dev/null || echo 13)"
 fi
 STAMP="$APP/.bootstrap.version"
 NEED_REFRESH=0
@@ -280,6 +280,7 @@ RSPAMD_FILES=(
   neural.conf
   rbl.conf
   hfilter_group.conf
+  url_suspect.conf
 )
 BUNDLE_STAGE=""
 cleanup_stage() {

@@ -297,6 +297,102 @@ def test_match_person_address_block_beats_domain_address_allow(tmp_path):
     assert hit.conflict is False
 
 
+def test_match_domain_covers_subdomains(tmp_path):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(actual_name="Rich")
+    _seed(db, "person", "Rich", "allow", "@apple.com", "domain")
+    exact = f.classify_list_hit(acc, db, ["a@apple.com"])
+    sub = f.classify_list_hit(acc, db, ["no_reply@email.apple.com"])
+    deep = f.classify_list_hit(acc, db, ["a@mail.email.apple.com"])
+    assert exact is not None and exact.decision == "allow"
+    assert exact.pattern == "@apple.com" and exact.rank == 3
+    assert sub is not None and sub.decision == "allow"
+    assert sub.pattern == "@apple.com" and sub.rank == 3
+    assert deep is not None and deep.decision == "allow"
+    assert f.classify_list_hit(acc, db, ["a@notapple.com"]) is None
+    assert f.classify_list_hit(acc, db, ["a@apple.com.evil.com"]) is None
+
+
+def test_match_domain_block_covers_subdomains(tmp_path):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(actual_name="Rich")
+    _seed(db, "person", "Rich", "block", "@apple.com", "domain")
+    hit = f.classify_list_hit(acc, db, ["no_reply@email.apple.com"])
+    assert hit is not None
+    assert hit.decision == "block"
+    assert hit.pattern == "@apple.com"
+    assert hit.rank == 3
+    assert hit.conflict is False
+    roster = f.ListRoster(entries=(("example.com", "company"),))
+    roster_acc = _mk_account(
+        user="u@example.com", actual_name="Other", list_roster=roster
+    )
+    _seed(db, "domain", "example.com", "block", "@apple.com", "domain")
+    roster_hit = f.classify_list_hit(
+        roster_acc, db, ["no_reply@email.apple.com"]
+    )
+    assert roster_hit is not None
+    assert roster_hit.decision == "block"
+    assert roster_hit.pattern == "@apple.com"
+    assert roster_hit.rank == 1
+    assert roster_hit.scope == "domain"
+
+
+def test_match_longer_domain_block_beats_parent_allow(tmp_path):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(actual_name="Rich")
+    _seed(db, "person", "Rich", "allow", "@apple.com", "domain")
+    _seed(db, "person", "Rich", "block", "@email.apple.com", "domain")
+    hit = f.classify_list_hit(acc, db, ["no_reply@email.apple.com"])
+    assert hit.decision == "block"
+    assert hit.pattern == "@email.apple.com"
+    assert hit.rank == 3
+    assert hit.conflict is False
+    parent = f.classify_list_hit(acc, db, ["a@apple.com"])
+    assert parent.decision == "allow"
+    assert parent.pattern == "@apple.com"
+
+
+def test_match_longer_domain_allow_beats_parent_block(tmp_path):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(actual_name="Rich")
+    _seed(db, "person", "Rich", "block", "@apple.com", "domain")
+    _seed(db, "person", "Rich", "allow", "@email.apple.com", "domain")
+    hit = f.classify_list_hit(acc, db, ["no_reply@email.apple.com"])
+    assert hit.decision == "allow"
+    assert hit.pattern == "@email.apple.com"
+    assert hit.rank == 3
+    assert hit.conflict is False
+
+
+def test_match_person_address_beats_parent_domain(tmp_path):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(actual_name="Rich")
+    _seed(db, "person", "Rich", "allow", "safe@email.apple.com")
+    _seed(db, "person", "Rich", "block", "@apple.com", "domain")
+    hit = f.classify_list_hit(acc, db, ["safe@email.apple.com"])
+    assert hit.decision == "allow"
+    assert hit.pattern == "safe@email.apple.com"
+    assert hit.rank == 4
+    assert hit.conflict is False
+
+
+def test_match_person_parent_domain_beats_roster_subdomain_block(tmp_path):
+    db = _mk_db(tmp_path)
+    roster = f.ListRoster(entries=(("example.com", "company"),))
+    acc = _mk_account(
+        user="u@example.com", actual_name="Rich", list_roster=roster
+    )
+    _seed(db, "person", "Rich", "allow", "@apple.com", "domain")
+    _seed(db, "domain", "example.com", "block", "spam@email.apple.com")
+    hit = f.classify_list_hit(acc, db, ["spam@email.apple.com"])
+    assert hit.decision == "allow"
+    assert hit.scope == "person"
+    assert hit.pattern == "@apple.com"
+    assert hit.rank == 3
+    assert hit.conflict is False
+
+
 def test_match_ignores_domain_list_when_not_on_roster(tmp_path):
     db = _mk_db(tmp_path)
     acc = _mk_account(user="u@example.com", actual_name="Rich")
