@@ -159,7 +159,8 @@ def _verify_pbkdf2(stored: str, password: str) -> bool:
             "sha256", password.encode(), bytes.fromhex(salt_hex), int(iters)
         )
         return hmac.compare_digest(dk.hex(), hash_hex)
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, TypeError):
+        # TypeError: compare_digest on a non-ASCII hash field. Fail closed.
         return False
 
 
@@ -267,7 +268,9 @@ def _load_users() -> dict[str, "_User"]:
                 s = line.strip()
                 if s and not s.startswith("#"):
                     _parse_user_line(s, users)
-    except OSError as ex:
+    except (OSError, UnicodeDecodeError) as ex:
+        # A users file saved in another encoding must fail closed (no
+        # file users), not turn every request into a 500.
         logging.getLogger("dashboard").warning(
             "could not read %s: %s", USERS_FILE, ex)
     for entry in os.environ.get("DASHBOARD_USERS", "").split(","):
@@ -544,7 +547,8 @@ def _csrf_token() -> str:
 def _check_csrf() -> None:
     got = request.form.get("csrf_token") or ""
     want = session.get("csrf") or ""
-    if not want or not hmac.compare_digest(got, want):
+    # Compare bytes: compare_digest raises TypeError on non-ASCII str.
+    if not want or not hmac.compare_digest(got.encode(), want.encode()):
         abort(400)
 
 

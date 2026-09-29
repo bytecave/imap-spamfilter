@@ -1558,3 +1558,49 @@ def test_write_private_is_atomic_and_keeps_old_file_on_failure(tmp_path, monkeyp
         d._write_private(target, "bob:hash:admin\n")
     assert target.read_text() == "alice:hash:admin\n"
     assert [p.name for p in tmp_path.iterdir()] == ["dashboard_users"]
+
+
+@pytest.mark.parametrize("token", ["wrong-token", "é"])
+def test_list_post_rejects_wrong_csrf_token_with_400(
+    dashboard_db, tmp_path, monkeypatch, token,
+):
+    monkeypatch.setattr(d, "CONFIG_PATH", _list_yaml(tmp_path))
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    client.get("/lists/domains")
+    resp = client.post("/lists/domains", data={
+        "csrf_token": token, "scope": "rjmetalfab.com", "kind": "allow",
+        "body": "a@x.com\n",
+    })
+    assert resp.status_code == 400
+    assert _domain_lists() == ([], [])
+
+
+def test_authenticated_list_save_over_16_kib_succeeds(
+    dashboard_db, tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(d, "CONFIG_PATH", _list_yaml(tmp_path))
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    client.get("/lists/domains")
+    with client.session_transaction() as sess:
+        token = sess["csrf"]
+    body = "".join(f"user{i:04d}@example-long-domain.com\n" for i in range(1000))
+    assert len(body) > 16 * 1024
+    resp = client.post("/lists/domains", data={
+        "csrf_token": token, "scope": "rjmetalfab.com", "kind": "allow",
+        "body": body,
+    })
+    assert resp.status_code == 302
+    assert len(_domain_lists()[0]) == 1000
+
+
+def test_undecodable_users_file_fails_closed(tmp_path, monkeypatch):
+    users_file = tmp_path / "dashboard_users"
+    users_file.write_bytes(b"\xff\xfe broken\n")
+    monkeypatch.setattr(d, "USERS_FILE", users_file)
+    monkeypatch.delenv("DASHBOARD_USERS", raising=False)
+    monkeypatch.delenv("DASHBOARD_USER", raising=False)
+    monkeypatch.delenv("DASHBOARD_PASSWORD", raising=False)
+    assert d._load_users() == {}
+    assert d._verify_pbkdf2("pbkdf2$1$00$é", "pw") is False
