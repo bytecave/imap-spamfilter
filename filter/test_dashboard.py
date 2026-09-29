@@ -1528,3 +1528,33 @@ def test_list_error_line_survives_a_leading_blank_line(
     # The HTML parser drops one newline after <textarea>; the page must
     # emit one so the posted leading blank line survives.
     assert b">\n\nbad x\n</textarea>" in resp.data
+
+
+@pytest.mark.parametrize("raw", [",", "|", " , ", ", |"])
+def test_user_helper_refuses_a_blank_account_scope(raw):
+    with pytest.raises(SystemExit):
+        d._helper_scope(raw, {"acct-alpha"})
+
+
+def test_user_helper_scope_admin_default_and_accounts():
+    assert d._helper_scope("", {"acct-alpha"}) == "admin"
+    assert d._helper_scope("Admin", None) == "admin"
+    assert d._helper_scope("acct-alpha, acct-beta", None) == "acct-alpha|acct-beta"
+    with pytest.raises(SystemExit):
+        d._helper_scope("typo", {"acct-alpha"})
+
+
+def test_write_private_is_atomic_and_keeps_old_file_on_failure(tmp_path, monkeypatch):
+    target = tmp_path / "dashboard_users"
+    d._write_private(target, "alice:hash:admin\n")
+    assert target.read_text() == "alice:hash:admin\n"
+    assert target.stat().st_mode & 0o777 == 0o600
+
+    def boom(fd, data):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(d.os, "write", boom)
+    with pytest.raises(OSError):
+        d._write_private(target, "bob:hash:admin\n")
+    assert target.read_text() == "alice:hash:admin\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["dashboard_users"]

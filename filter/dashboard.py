@@ -167,17 +167,44 @@ USERS_FILE = STATE_DIR / "dashboard_users"
 
 
 def _write_private(path: Path, text: str) -> None:
-    """Create or replace `path` with mode 0600 from the first byte.
+    """Atomically create or replace `path` with mode 0600 from the first byte.
 
     chmod-after-write leaves a world-readable window; open with 0o600.
+    The dashboard re-reads the users file on every request, so write a
+    temp file beside it and rename: a reader never sees a truncated file,
+    and a failed write leaves the old one intact.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    data = text.encode()
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        os.write(fd, text.encode())
-        os.fchmod(fd, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            view = memoryview(data)
+            while view:
+                written = os.write(fd, view)
+                view = view[written:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    try:
+        dir_fd = os.open(str(path.parent), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
     finally:
-        os.close(fd)
+        os.close(dir_fd)
 
 
 def _safe_next(dest: str | None) -> str:
@@ -2153,6 +2180,31 @@ def start() -> None:
     threading.Thread(target=_serve, name="dashboard", daemon=True).start()
 
 
+def _helper_scope(raw_scope: str, known: set[str] | None) -> str:
+    """Scope string for the user-add helper, or SystemExit.
+
+    'admin' (or Enter, the documented default) grants admin. Anything else
+    must name at least one account: a blank list such as ',' used to fall
+    through to admin, binding a typo to everything.
+    """
+    raw_scope = raw_scope.strip() or "admin"
+    if raw_scope.lower() == "admin":
+        return "admin"
+    wanted = [a.strip() for a in re.split(r"[|,]", raw_scope) if a.strip()]
+    if not wanted:
+        raise SystemExit(
+            "no account named - enter 'admin' or at least one account name")
+    if known:
+        unknown = sorted(a for a in wanted if a not in known)
+        if unknown:
+            raise SystemExit(
+                f"unknown account(s): {', '.join(unknown)} - not in "
+                f"{CONFIG_PATH}. Known: {', '.join(sorted(known))}")
+    # Normalise to pipe-separated; pipe is the on-disk separator so the
+    # value survives the comma-delimited DASHBOARD_USERS env too.
+    return "|".join(wanted)
+
+
 def _known_accounts() -> set[str] | None:
     """Account names declared in accounts.yml, or None if the file
     cannot be read or parsed. Used by the user-add helper to list and
@@ -2196,22 +2248,9 @@ if __name__ == "__main__":
     known = _known_accounts()
     if known:
         print("known accounts:", ", ".join(sorted(known)))
-    raw_scope = input(
+    scope = _helper_scope(input(
         "access scope - 'admin' for everything, or the account name(s) "
-        "this user may see (comma-separated) [admin]: ").strip() or "admin"
-    if raw_scope.lower() == "admin":
-        scope = "admin"
-    else:
-        wanted = [a.strip() for a in re.split(r"[|,]", raw_scope) if a.strip()]
-        if known:
-            unknown = sorted(a for a in wanted if a not in known)
-            if unknown:
-                raise SystemExit(
-                    f"unknown account(s): {', '.join(unknown)} - not in "
-                    f"{CONFIG_PATH}. Known: {', '.join(sorted(known))}")
-        # Normalise to pipe-separated; pipe is the on-disk separator so
-        # the value survives the comma-delimited DASHBOARD_USERS env too.
-        scope = "|".join(wanted) or "admin"
+        "this user may see (comma-separated) [admin]: "), known)
     entry = f"{name}:{_hash_password(pw1)}:{scope}"
     try:
         lines = []
