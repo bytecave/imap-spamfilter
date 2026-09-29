@@ -67,7 +67,11 @@ services:
   spamfilter:
     build:
       context: /opt/bytelord/projects/imap-spamfilter/filter
-    image: ghcr.io/marcelverdult/imap-spamfilter:latest
+    # Local-only tag for this fork's build. Do not reuse the upstream
+    # ghcr.io/marcelverdult name: `docker compose pull` would replace this
+    # build with upstream's public image, and the next `up` would run it
+    # against the live accounts.yml, secrets and database.
+    image: imap-spamfilter:bytelord
     container_name: spamfilter
     restart: unless-stopped
     logging: *log-rotate
