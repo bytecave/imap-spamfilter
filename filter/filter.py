@@ -563,6 +563,11 @@ class Account:
     # recognized by body fingerprint and is not moved back.
     rescue_below: float = 4.0
 
+    # On mail that newly appears in Junk and has not been taught, set the
+    # single IMAP \\Flagged bit (Outlook's red follow-up flag). Off by
+    # default. Does not revisit UIDs already at or below the Junk bookmark.
+    flag_untrained_junk: bool = False
+
     # Shared immutable roster from YAML; empty if list_domains omitted.
     list_roster: ListRoster = field(default_factory=ListRoster)
 
@@ -609,6 +614,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "mode": "shadow",
     "threshold": 8.0,
     "rescue_below": 4.0,
+    "flag_untrained_junk": False,
     "min_threshold_allowed": 5.0,
     "reject_score_above": 100.0,
     "move_grace_seconds": 60,
@@ -1093,6 +1099,11 @@ def load_accounts(path: Path) -> list[Account]:
                 ),
                 rescue_below=_parse_finite_float(
                     merged["rescue_below"], key="rescue_below", account=name,
+                ),
+                flag_untrained_junk=_parse_bool(
+                    merged["flag_untrained_junk"],
+                    key="flag_untrained_junk",
+                    account=name,
                 ),
                 move_grace_seconds=_parse_int(
                     merged["move_grace_seconds"], key="move_grace_seconds",
@@ -3431,11 +3442,89 @@ _FILTER_OWNED_JUNK_ACTIONS = frozenset({
     "pending_move", "moved_to_junk", "pending_rescue",
 })
 
+# Train-Ham restore. inbox_copied is stored on the Train-Ham row once an
+# Inbox copy exists (we made it, or the user already had one). ham_restored
+# is stored on the Inbox row so a later score cannot move it to Junk.
+# Neither value is written onto older ham that was taught some other way.
+_HAM_INBOX_COPIED = "inbox_copied"
+_HAM_RESTORED = "ham_restored"
+
 
 def _is_filter_owned_junk(siblings: list[sqlite3.Row]) -> bool:
     return any(
         r["our_action"] in _FILTER_OWNED_JUNK_ACTIONS for r in siblings
     )
+
+
+def _row_was_taught(row: sqlite3.Row | None) -> bool:
+    """True when this row was taught spam or ham, or a learn is still queued."""
+    if row is None:
+        return False
+    return (
+        row["learned_as"] in ("spam", "ham")
+        or row["pending_learn"] in ("spam", "ham")
+    )
+
+
+def _content_was_taught(
+    row: sqlite3.Row | None, siblings: list[sqlite3.Row],
+) -> bool:
+    if _row_was_taught(row):
+        return True
+    return any(_row_was_taught(r) for r in siblings)
+
+
+def _queue_untrained_junk_flag(
+    bucket: list[tuple[int, str | None]],
+    acc: Account,
+    uid: int,
+    msgid: str | None,
+    row: sqlite3.Row | None,
+    siblings: list[sqlite3.Row],
+) -> None:
+    """Remember a new Junk UID for the follow-up flag.
+
+    Skipped when the setting is off, and when this copy or an identical
+    body was already taught or is waiting out the learn grace period.
+    """
+    if not acc.flag_untrained_junk or _content_was_taught(row, siblings):
+        return
+    bucket.append((uid, msgid))
+
+
+def _apply_untrained_junk_flags(
+    client: IMAPClient,
+    db: Db,
+    log: logging.Logger,
+    acc: Account,
+    junk: str,
+    flagged: list[tuple[int, str | None]],
+) -> None:
+    """STORE \\Flagged on Junk UIDs gathered during this poll.
+
+    poll_junk examines Junk read-only. The flag is a second, writable
+    select, and only for UIDs above the bookmark (mail already in the
+    folder is never revisited). Exchange exposes one follow-up flag.
+    A store failure is logged and does not stall the poll.
+    """
+    if not acc.flag_untrained_junk or not flagged:
+        return
+    uids = [uid for uid, _msgid in flagged]
+    try:
+        select_with_uidvalidity_check(client, db, junk, log, readonly=False)
+        client.add_flags(uids, [b"\\Flagged"])
+    except IMAPClientError as ex:
+        log.warning(
+            "could not flag untrained junk: %s",
+            redact_log(str(ex), acc.password),
+        )
+        return
+    with db.tx():
+        for uid, msgid in flagged:
+            db.log_event(
+                "junk_untrained_flagged", msgid, detail=f"uid={uid}",
+            )
+    log.info("flagged %d untrained junk message(s)", len(flagged))
 
 
 def _list_hit_event_detail(hit: ListHit, score: float | None) -> str:
@@ -3560,6 +3649,27 @@ def scan_inbox(
     if SHUTDOWN.is_set() or halted or db.in_safe_mode("all"):
         return
     _catchup_unscored_inbox(client, db, log, acc, fmap, state, uv, candidates)
+
+
+def _is_train_ham_restore(
+    sha: str | None,
+    prior: sqlite3.Row | None,
+    siblings: list[sqlite3.Row],
+) -> bool:
+    """True when this Inbox message is the copy made from Train-Ham.
+
+    The mail bytes are unchanged. The fingerprint is the body SHA-256
+    recorded on the Train-Ham row when that copy was made. Older ham
+    teaches do not match: they never received ``inbox_copied``.
+    """
+    if prior is not None and prior["our_action"] == _HAM_RESTORED:
+        return True
+    if not sha:
+        return False
+    return any(
+        r["our_action"] == _HAM_INBOX_COPIED and r["body_sha256"] == sha
+        for r in siblings
+    )
 
 
 def _scan_inbox_uid_batch(
@@ -3737,6 +3847,19 @@ def _scan_inbox_uid_batch(
                     if hit.conflict:
                         db.log_event("list_conflict", msgid, detail=hit_detail)
                 over_threshold = True
+            elif _is_train_ham_restore(sha, prior, siblings):
+                # The Inbox copy was made from Train-Ham before this scan.
+                # Keep the stored score, and do not shadow, flag, or queue
+                # a Junk move. A block hit took the branch above.
+                over_threshold = False
+                with db.tx():
+                    db.update_imap_message(
+                        fmap["inbox"], uv, uid, our_action=_HAM_RESTORED,
+                    )
+                    db.log_event(
+                        "ham_restored", msgid,
+                        detail=f"score={_score_log(score)}",
+                    )
             else:
                 over_threshold = score >= acc.threshold
 
@@ -4158,6 +4281,7 @@ def poll_junk(
     if uids:
         last_terminal: int | None = None
         halted = False
+        to_flag: list[tuple[int, str | None]] = []
         for chunk_start in range(0, len(uids), SCAN_FETCH_CHUNK):
             if SHUTDOWN.is_set():
                 return
@@ -4198,6 +4322,9 @@ def poll_junk(
                 # Both completed and uncertain filter-owned moves are excluded
                 # from user feedback and from provider-junk scoring/rescue.
                 if _is_filter_owned_junk(siblings):
+                    _queue_untrained_junk_flag(
+                        to_flag, acc, uid, msgid, prior, siblings,
+                    )
                     last_terminal = uid
                     continue
                 # Learn spam only from a confirmed user move Inbox -> Junk,
@@ -4281,6 +4408,7 @@ def poll_junk(
                         halted = True
                         break
                 hit = classify_list_hit(acc, db, iter_list_header_addrs(raw))
+                leaving_junk = False
                 if hit is not None:
                     hit_detail = _list_hit_event_detail(hit, score)
                     _log_list_hit(log, acc, hit, msgid, subject, hit_detail)
@@ -4297,34 +4425,46 @@ def poll_junk(
                             db.log_event(
                                 "blocklisted", msgid, detail=hit_detail,
                             )
-                        last_terminal = uid
-                        continue
                 # Allow hit, or unlisted and under rescue_below: a rescue
                 # candidate, unless evidence says it must stay in Junk.
-                # Inbox → Junk uses acc.threshold, which is higher, so a
-                # mid-band score stays in whichever folder it arrived in.
-                if hit is not None or score < acc.rescue_below:
-                    blocked = _rescue_blocker(
-                        raw, received_at=_internaldate_ts(data),
-                    )
-                    if blocked is not None:
-                        detail = f"{blocked} score={_score_log(score)} mode={acc.mode}"
-                        log.info("rescue skipped for %s: %s", msgid, detail)
-                        with db.tx():
-                            db.log_event("rescue_skipped", msgid, detail=detail)
-                    else:
-                        if hit is not None:
-                            # Keeps allowlisted provider-Junk out of retention
-                            # in flag mode; move mode overwrites it with
-                            # pending_rescue below.
-                            with db.tx():
-                                db.update_imap_message(
-                                    junk, uv, uid, our_action="allowlisted",
-                                )
-                        _queue_junk_rescue(
-                            db, log, acc, junk, uv, uid, msgid, score,
+                # A block hit stays. Inbox → Junk uses acc.threshold, which
+                # is higher, so a mid-band score stays in whichever folder
+                # it arrived in.
+                if hit is None or hit.decision != "block":
+                    if hit is not None or score < acc.rescue_below:
+                        blocked = _rescue_blocker(
+                            raw, received_at=_internaldate_ts(data),
                         )
+                        if blocked is not None:
+                            detail = (
+                                f"{blocked} score={_score_log(score)} "
+                                f"mode={acc.mode}"
+                            )
+                            log.info("rescue skipped for %s: %s", msgid, detail)
+                            with db.tx():
+                                db.log_event(
+                                    "rescue_skipped", msgid, detail=detail,
+                                )
+                        else:
+                            if hit is not None:
+                                # Keeps allowlisted provider-Junk out of
+                                # retention in flag mode; move mode overwrites
+                                # it with pending_rescue below.
+                                with db.tx():
+                                    db.update_imap_message(
+                                        junk, uv, uid, our_action="allowlisted",
+                                    )
+                            _queue_junk_rescue(
+                                db, log, acc, junk, uv, uid, msgid, score,
+                            )
+                            leaving_junk = acc.mode == "move"
+                if not leaving_junk:
+                    _queue_untrained_junk_flag(
+                        to_flag, acc, uid, msgid,
+                        db.get_imap_message(junk, uv, uid), siblings,
+                    )
                 last_terminal = uid
+        _apply_untrained_junk_flags(client, db, log, acc, junk, to_flag)
         if last_terminal is not None:
             with db.tx():
                 db.set_scan_bookmark(junk, uv, last_terminal)
@@ -4541,6 +4681,16 @@ def _drain_train_folder(
                 message_id=msgid, sender=sender, subject=subject,
                 received_at=_internaldate_ts(data), body_sha256=sha,
             )
+        if kind == "ham":
+            fresh = db.get_imap_message(folder, uv, uid)
+            restored = (
+                fresh is not None
+                and fresh["our_action"] in (_HAM_INBOX_COPIED, _HAM_RESTORED)
+            )
+            if not restored:
+                # The Inbox copy has not been made yet. Leave the message
+                # in Train-Ham so a later pass can copy it before learning.
+                continue
         ok = try_learn(
             db, log, acc, raw, msgid, kind, reason=reason,
             folder=folder, uidvalidity=uv, uid=uid,
@@ -4651,9 +4801,139 @@ def drain_train_spam(
     )
 
 
+def _restore_train_ham_to_inbox(
+    client: IMAPClient,
+    db: Db,
+    log: logging.Logger,
+    acc: Account,
+    fmap: dict[str, str],
+) -> None:
+    """COPY new Train-Ham mail to the Inbox before it is learned.
+
+    The message bytes are not edited. A SHA-256 fingerprint is stored on
+    the Train-Ham row so scan_inbox can hold that Inbox copy against a
+    later score move. An identical message already in the Inbox is not
+    copied again. This runs even when the hourly learn budget is spent.
+    """
+    if not acc.learn_from_moves:
+        return
+    folder = fmap["ham_train"]
+    inbox = fmap["inbox"]
+    try:
+        uv = select_with_uidvalidity_check(client, db, folder, log)
+    except IMAPClientError as ex:
+        log.warning(
+            "select %s failed: %s", folder, redact_log(str(ex), acc.password),
+        )
+        return
+    uids = list(client.search(["ALL"]) or [])
+    pending: list[int] = []
+    for uid in uids:
+        row = db.get_imap_message(folder, uv, uid)
+        if row is not None and (
+            row["our_action"] in (_HAM_INBOX_COPIED, _HAM_RESTORED)
+            or row["current_folder"] == fmap["trained_ham"]
+        ):
+            continue
+        pending.append(int(uid))
+        if len(pending) >= acc.max_train_per_run:
+            break
+    if not pending:
+        return
+    fetched: list[tuple[int, str, str]] = []
+    for uid, data, oversize in fetch_under_cap(client, pending):
+        if SHUTDOWN.is_set():
+            return
+        if oversize:
+            continue
+        raw = _body_bytes(data)
+        if not raw:
+            continue
+        msgid, subject, sender = parse_envelope(raw)
+        sha = body_sha256(raw)
+        with db.tx():
+            db.upsert_imap_message(
+                folder, uv, uid,
+                message_id=msgid, sender=sender, subject=subject,
+                received_at=_internaldate_ts(data), body_sha256=sha,
+            )
+        fetched.append((uid, msgid or "", sha))
+    if not fetched:
+        return
+    wanted = {(msgid, sha) for _uid, msgid, sha in fetched if msgid and sha}
+    present = _identical_copies_in_folder(
+        client, inbox, wanted, log, password=acc.password,
+    )
+    try:
+        select_with_uidvalidity_check(client, db, folder, log)
+    except IMAPClientError as ex:
+        log.warning(
+            "train-ham restore: cannot re-select %s: %s",
+            folder, redact_log(str(ex), acc.password),
+        )
+        return
+    to_copy: list[int] = []
+    by_uid = {uid: (msgid, sha) for uid, msgid, sha in fetched}
+    for uid, msgid, sha in fetched:
+        if msgid and sha and (msgid, sha) in present:
+            with db.tx():
+                db.update_imap_message(
+                    folder, uv, uid, our_action=_HAM_INBOX_COPIED,
+                )
+            continue
+        to_copy.append(uid)
+    if not to_copy:
+        return
+    try:
+        copied = client.copy(to_copy, inbox)
+    except IMAPClientError as ex:
+        log.warning(
+            "copy %s -> %s failed: %s",
+            folder, inbox, redact_log(str(ex), acc.password),
+        )
+        return
+    try:
+        inbox_uv = select_with_uidvalidity_check(
+            client, db, inbox, log, readonly=True,
+        )
+    except IMAPClientError as ex:
+        log.warning(
+            "train-ham restore: copied but cannot select %s: %s",
+            inbox, redact_log(str(ex), acc.password),
+        )
+        inbox_uv = None
+    with db.tx():
+        for uid in to_copy:
+            db.update_imap_message(
+                folder, uv, uid, our_action=_HAM_INBOX_COPIED,
+            )
+            db.log_event(
+                "ham_inbox_copied", detail=f"uid={uid} -> {inbox}",
+            )
+        if inbox_uv is not None and isinstance(copied, dict):
+            for src, dest_uid in copied.items():
+                try:
+                    src_uid = int(src)
+                    new_uid = int(dest_uid)
+                except (TypeError, ValueError):
+                    continue
+                msgid, sha = by_uid.get(src_uid, ("", ""))
+                if not sha:
+                    continue
+                db.upsert_imap_message(
+                    inbox, inbox_uv, new_uid,
+                    message_id=msgid or None, body_sha256=sha,
+                )
+                db.update_imap_message(
+                    inbox, inbox_uv, new_uid, our_action=_HAM_RESTORED,
+                )
+    log.info("train-ham restore: copied %d message(s) to %s", len(to_copy), inbox)
+
+
 def drain_train_ham(
     client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fmap: dict[str, str]
 ) -> None:
+    _restore_train_ham_to_inbox(client, db, log, acc, fmap)
     _drain_train_folder(
         client, db, log, acc, fmap,
         kind="ham", src_key="ham_train", dst_key="trained_ham",

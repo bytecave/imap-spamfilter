@@ -16,7 +16,7 @@ from test_connection import _write_accounts  # noqa: E402
 from test_fetch_discipline import CapIMAP, _body_fetch_uids  # noqa: E402
 from test_inbox_bookmark import _raw  # noqa: E402
 from test_learn import _FakeIMAP, _mk_account, _pending  # noqa: E402
-from test_shadow_mode import FMAP, _all_existing, _mk_db  # noqa: E402
+from test_shadow_mode import FMAP, RAW_SCAN, RecordingIMAP, _all_existing, _mk_db  # noqa: E402
 
 
 LOG = logging.getLogger("test")
@@ -825,3 +825,351 @@ def test_provider_junk_shadow_does_not_rescue(tmp_path, monkeypatch):
     evs = [r["event"] for r in db.conn.execute("SELECT event FROM events")]
     assert "would_rescue" in evs
     assert "rescued_to_inbox" not in evs
+
+
+def _junk_events(db):
+    return [r["event"] for r in db.conn.execute("SELECT event FROM events")]
+
+
+def test_untrained_junk_flag_is_off_unless_configured(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="move", move_grace_seconds=0, threshold=8.0)
+    with db.tx():
+        db.set_scan_bookmark("Junk", 1, 3)
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(6.0, (), None),
+    )
+    client = CapIMAP(
+        existing=_all_existing(), uids=[4], bodies={4: _raw(4)},
+    )
+    f.poll_junk(client, db, LOG, acc, FMAP)
+    assert client.flags_added == []
+    assert "junk_untrained_flagged" not in _junk_events(db)
+
+
+def test_new_untrained_provider_junk_is_flagged(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(
+        mode="move", move_grace_seconds=0, threshold=8.0,
+        flag_untrained_junk=True,
+    )
+    with db.tx():
+        db.set_scan_bookmark("Junk", 1, 3)
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(6.0, (), None),
+    )
+    client = CapIMAP(
+        existing=_all_existing(), uids=[4], bodies={4: _raw(4)},
+    )
+    f.poll_junk(client, db, LOG, acc, FMAP)
+    assert client.flags_added == [([4], [b"\\Flagged"])]
+    assert ("Junk", False) in client.selects
+    assert "junk_untrained_flagged" in _junk_events(db)
+
+
+def test_shadow_would_rescue_still_flags_when_it_stays(tmp_path, monkeypatch):
+    """Shadow does not move the message, so the untrained copy remains in Junk."""
+    db = _mk_db(tmp_path)
+    acc = _mk_account(
+        mode="shadow", move_grace_seconds=0, flag_untrained_junk=True,
+    )
+    with db.tx():
+        db.set_scan_bookmark("Junk", 1, 3)
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(1.5, (), None),
+    )
+    client = CapIMAP(
+        existing=_all_existing(), uids=[4], bodies={4: _raw(4)},
+    )
+    f.poll_junk(client, db, LOG, acc, FMAP)
+    assert client.moved == []
+    assert client.flags_added == [([4], [b"\\Flagged"])]
+    assert "would_rescue" in _junk_events(db)
+
+
+def test_junk_bookmark_init_does_not_flag_existing(tmp_path):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="move", flag_untrained_junk=True)
+    client = CapIMAP(
+        existing=_all_existing(), uids=[4, 5], bodies={4: _raw(4), 5: _raw(5)},
+    )
+    f.poll_junk(client, db, LOG, acc, FMAP)
+    assert client.flags_added == []
+    assert client.fetch_calls == []
+    assert db.get_scan_bookmark("Junk", 1) == 5
+
+
+def test_user_drag_to_junk_is_not_flagged_as_untrained(tmp_path, monkeypatch):
+    raw = _raw(4)
+    db = _mk_db(tmp_path)
+    _seed_inbox_sibling(db, raw)
+    with db.tx():
+        db.set_scan_bookmark("Junk", 1, 3)
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(6.0, (), None),
+    )
+    client = CapIMAP(
+        existing=_all_existing(), uids=[4], bodies={4: raw},
+    )
+    f.poll_junk(
+        client, db, LOG,
+        _mk_account(mode="move", move_grace_seconds=0, flag_untrained_junk=True),
+        FMAP,
+    )
+    assert client.flags_added == []
+    assert db.get_imap_message("Junk", 1, 4)["pending_learn"] == "spam"
+
+
+def test_rescued_provider_junk_is_not_flagged(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(
+        mode="move", move_grace_seconds=0, threshold=8.0,
+        flag_untrained_junk=True,
+    )
+    with db.tx():
+        db.set_scan_bookmark("Junk", 1, 3)
+    monkeypatch.setattr(
+        f, "rspamd_learn", lambda *a, **k: "learned",
+    )
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(1.5, (), None),
+    )
+    client = CapIMAP(
+        existing=_all_existing(), uids=[4], bodies={4: _raw(4)},
+    )
+    f.poll_junk(client, db, LOG, acc, FMAP)
+    assert client.moved == [([4], "INBOX")]
+    assert client.flags_added == []
+
+
+def test_filter_moved_junk_is_flagged_untrained(tmp_path):
+    raw = _raw(4)
+    db = _mk_db(tmp_path)
+    _seed_inbox_sibling(db, raw, action="moved_to_junk")
+    with db.tx():
+        db.set_scan_bookmark("Junk", 1, 3)
+    client = CapIMAP(
+        existing=_all_existing(), uids=[4], bodies={4: raw},
+    )
+    f.poll_junk(
+        client, db, LOG,
+        _mk_account(mode="move", flag_untrained_junk=True),
+        FMAP,
+    )
+    assert client.flags_added == [([4], [b"\\Flagged"])]
+    row = db.get_imap_message("Junk", 1, 4)
+    assert row["learned_as"] is None
+    assert row["pending_learn"] is None
+
+
+def test_already_taught_junk_body_is_not_flagged(tmp_path, monkeypatch):
+    raw = _raw(4)
+    db = _mk_db(tmp_path)
+    with db.tx():
+        db.set_scan_bookmark("Junk", 1, 3)
+        db.upsert_imap_message(
+            "Junk/Trained-Spam", 1, 9,
+            message_id="mid4@example.com",
+            body_sha256=f.body_sha256(raw),
+        )
+        db.update_imap_message(
+            "Junk/Trained-Spam", 1, 9, learned_as="spam",
+        )
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(6.0, (), None),
+    )
+    client = CapIMAP(
+        existing=_all_existing(), uids=[4], bodies={4: raw},
+    )
+    f.poll_junk(
+        client, db, LOG,
+        _mk_account(mode="move", flag_untrained_junk=True),
+        FMAP,
+    )
+    assert client.flags_added == []
+
+
+def _pending_moves(db) -> int:
+    return db.conn.execute("SELECT COUNT(*) FROM pending_move").fetchone()[0]
+
+
+def test_train_ham_copies_to_inbox_then_archives(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account()
+    monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: "learned")
+    client = RecordingIMAP(
+        existing=_all_existing(),
+        search_uids=[7],
+        fetch_by_uid={7: {b"BODY[]": _raw(7), b"FLAGS": ()}},
+    )
+    f.drain_train_ham(client, db, LOG, acc, FMAP)
+    assert client.copied == [([7], "INBOX")]
+    assert client.moved == [([7], FMAP["trained_ham"])]
+    train = db.get_imap_message(FMAP["ham_train"], 1, 7)
+    assert train["our_action"] == "inbox_copied"
+    restored = db.get_imap_message("INBOX", 1, 1001)
+    assert restored["our_action"] == "ham_restored"
+    assert restored["body_sha256"] == f.body_sha256(_raw(7))
+
+
+def test_train_ham_copy_runs_when_learn_budget_is_spent(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(max_learns_per_hour=2)
+    with db.tx():
+        db.record_rate("learn")
+        db.record_rate("learn")
+    monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: pytest.fail("no learn"))
+    client = RecordingIMAP(
+        existing=_all_existing(),
+        search_uids=[7],
+        fetch_by_uid={7: {b"BODY[]": _raw(7), b"FLAGS": ()}},
+    )
+    f.drain_train_ham(client, db, LOG, acc, FMAP)
+    assert client.copied == [([7], "INBOX")]
+    assert client.moved == []
+    assert db.get_imap_message(FMAP["ham_train"], 1, 7)["learned_as"] is None
+
+
+def test_train_ham_does_not_duplicate_an_inbox_copy(tmp_path, monkeypatch):
+    raw = _raw(7)
+    db = _mk_db(tmp_path)
+    acc = _mk_account()
+    monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: "learned")
+    client = RecordingIMAP(
+        existing=_all_existing(),
+        search_uids=[7],
+        fetch_by_uid={
+            1: {b"BODY[]": raw, b"FLAGS": ()},
+            7: {b"BODY[]": raw, b"FLAGS": ()},
+        },
+    )
+    client.inbox_message_ids.add("mid7@example.com")
+    f.drain_train_ham(client, db, LOG, acc, FMAP)
+    assert client.copied == []
+    assert client.moved == [([7], FMAP["trained_ham"])]
+    assert db.get_imap_message(FMAP["ham_train"], 1, 7)["our_action"] == "inbox_copied"
+
+
+def test_train_spam_does_not_copy_to_inbox(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account()
+    monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: "learned")
+    client = RecordingIMAP(
+        existing=_all_existing(),
+        search_uids=[7],
+        fetch_by_uid={7: {b"BODY[]": _raw(7), b"FLAGS": ()}},
+    )
+    f.drain_train_spam(client, db, LOG, acc, FMAP)
+    assert client.copied == []
+    assert client.moved == [([7], FMAP["trained_spam"])]
+
+
+def test_train_ham_restore_is_not_moved_to_junk(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="move", move_grace_seconds=0, threshold=8.0)
+    with db.tx():
+        db.set_scan_bookmark("INBOX", 1, 0)
+        db.upsert_imap_message(
+            FMAP["ham_train"], 1, 7,
+            message_id="scan1@example.com",
+            body_sha256=f.body_sha256(RAW_SCAN),
+        )
+        db.update_imap_message(
+            FMAP["ham_train"], 1, 7, our_action="inbox_copied",
+        )
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(9.0, (), None),
+    )
+    client = RecordingIMAP(
+        existing=_all_existing(),
+        search_uids=[1],
+        fetch_by_uid={1: {b"BODY[]": RAW_SCAN, b"FLAGS": ()}},
+    )
+    f.scan_inbox(client, db, LOG, acc, FMAP)
+    row = db.get_imap_message("INBOX", 1, 1)
+    assert row["our_score"] == 9.0
+    assert row["our_action"] == "ham_restored"
+    assert _pending_moves(db) == 0
+
+
+def test_train_ham_restore_blocklist_still_junks(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(
+        mode="move", move_grace_seconds=0, threshold=8.0,
+        actual_name="Test User",
+    )
+    parsed = f.ParsedPattern("sender@example.com", "address")
+    with db.tx():
+        db.set_scan_bookmark("INBOX", 1, 0)
+        db.upsert_imap_message(
+            FMAP["ham_train"], 1, 7,
+            message_id="scan1@example.com",
+            body_sha256=f.body_sha256(RAW_SCAN),
+        )
+        db.update_imap_message(
+            FMAP["ham_train"], 1, 7, our_action="inbox_copied",
+        )
+        db.list_upsert_address(
+            "person", "Test User", "block", parsed,
+            source="imap", max_entries=1000,
+        )
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(9.0, (), None),
+    )
+    client = RecordingIMAP(
+        existing=_all_existing(),
+        search_uids=[1],
+        fetch_by_uid={1: {b"BODY[]": RAW_SCAN, b"FLAGS": ()}},
+    )
+    f.scan_inbox(client, db, LOG, acc, FMAP)
+    row = db.get_imap_message("INBOX", 1, 1)
+    assert row["our_score"] == 9.0
+    assert row["our_action"] == "pending_move"
+    assert _pending_moves(db) == 1
+
+
+def test_ordinary_high_score_still_queues_junk(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="move", move_grace_seconds=0, threshold=8.0)
+    with db.tx():
+        db.set_scan_bookmark("INBOX", 1, 0)
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(9.0, (), None),
+    )
+    client = RecordingIMAP(
+        existing=_all_existing(),
+        search_uids=[1],
+        fetch_by_uid={1: {b"BODY[]": RAW_SCAN, b"FLAGS": ()}},
+    )
+    f.scan_inbox(client, db, LOG, acc, FMAP)
+    row = db.get_imap_message("INBOX", 1, 1)
+    assert row["our_score"] == 9.0
+    assert row["our_action"] == "pending_move"
+    assert _pending_moves(db) == 1
+
+
+def test_old_ham_teach_does_not_hold_a_new_inbox_copy(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="move", move_grace_seconds=0, threshold=8.0)
+    with db.tx():
+        db.set_scan_bookmark("INBOX", 1, 0)
+        db.upsert_imap_message(
+            FMAP["trained_ham"], 1, 9,
+            message_id="scan1@example.com",
+            body_sha256=f.body_sha256(RAW_SCAN),
+        )
+        db.update_imap_message(
+            FMAP["trained_ham"], 1, 9, learned_as="ham",
+        )
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(9.0, (), None),
+    )
+    client = RecordingIMAP(
+        existing=_all_existing(),
+        search_uids=[1],
+        fetch_by_uid={1: {b"BODY[]": RAW_SCAN, b"FLAGS": ()}},
+    )
+    f.scan_inbox(client, db, LOG, acc, FMAP)
+    row = db.get_imap_message("INBOX", 1, 1)
+    assert row["our_action"] == "pending_move"
+    assert _pending_moves(db) == 1

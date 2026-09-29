@@ -107,6 +107,8 @@ class RecordingIMAP:
         self.created: list[str] = []
         self.subscribed: list[str] = []
         self.moved: list[tuple[list[int], str]] = []
+        self.copied: list[tuple[list[int], str]] = []
+        self._next_uid = 1000
         self.flags_added: list[tuple] = []
         self.expunged: list[list[int]] = []
         self.selects: list[tuple[str, bool]] = []
@@ -127,6 +129,15 @@ class RecordingIMAP:
 
     def subscribe_folder(self, name):
         self.subscribed.append(name)
+
+    def copy(self, uids, dest):
+        seq = list(uids)
+        self.copied.append((seq, dest))
+        mapping = {}
+        for uid in seq:
+            self._next_uid += 1
+            mapping[int(uid)] = self._next_uid
+        return mapping
 
     def move(self, uids, dest):
         self.moved.append((list(uids), dest))
@@ -378,3 +389,4 @@ def test_drain_train_folder_shadow_still_moves(tmp_path, monkeypatch):
         kind="spam", src_key="spam_train", dst_key="trained_spam",
     )
     assert client.moved == [([7], "Junk/Trained-Spam")]
+    assert client.copied == []

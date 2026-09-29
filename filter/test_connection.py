@@ -82,6 +82,21 @@ def test_quoted_learn_from_moves_false(tmp_path):
     assert accs[0].learn_from_moves is False
 
 
+def test_flag_untrained_junk_defaults_off_and_parses(tmp_path):
+    path = _write_accounts(tmp_path, "")
+    assert f.load_accounts(path)[0].flag_untrained_junk is False
+
+    path = _write_accounts(tmp_path, "    flag_untrained_junk: true\n")
+    assert f.load_accounts(path)[0].flag_untrained_junk is True
+
+    path = _write_accounts(tmp_path, '    flag_untrained_junk: "false"\n')
+    assert f.load_accounts(path)[0].flag_untrained_junk is False
+
+    path = _write_accounts(tmp_path, '    flag_untrained_junk: "maybe"\n')
+    with pytest.raises(f.ConfigError, match="flag_untrained_junk"):
+        f.load_accounts(path)
+
+
 def test_invalid_bool_exits(tmp_path):
     path = _write_accounts(tmp_path, '    learn_from_moves: "maybe"\n')
     with pytest.raises(f.ConfigError, match="learn_from_moves"):

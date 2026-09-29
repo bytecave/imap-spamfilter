@@ -43,10 +43,10 @@ Move-based training (no special folders needed in daily use):
 
 Folder-based training (bootstrap and bulk corrections):
 - **Move** spam to `Junk/Train-Spam` -> filter learns, moves to `Junk/Trained-Spam`
-- **Copy** (never move) known-good mail to `Junk/Train-Ham` -> filter learns,
-  moves to `Junk/Trained-Ham`. The copy is destroyed by retention; the
-  original in your sorted folder stays untouched. **Moving** ham here means
-  the only copy will eventually end up in Trash.
+- Drop known-good mail in `Junk/Train-Ham`. The filter copies it to the
+  Inbox immediately, learns ham, then moves the Train-Ham message to
+  `Junk/Trained-Ham`. The Inbox copy stays even when its score is 8 or
+  higher. A block-list hit can still send that Inbox copy to Junk.
 - Drag to `INBOX/Allowlist` -> person-allow From, ham-learn, MOVE to Inbox
 - Drag to `INBOX/Blocklist` -> person-block From, spam-learn, MOVE to Junk
 - Both `Junk/Trained-*` folders are swept to Trash after `trained_retention_days` (default 7)
@@ -295,14 +295,16 @@ The filter creates four folders on each account:
 
 - `Train-Spam`   — **move** spam here (originals are spam, OK to lose)
 - `Trained-Spam` — filter archives here after learning; retention -> Trash
-- `Train-Ham`    — **copy only** known-good mail here (never move)
-- `Trained-Ham`  — filter archives here after learning; retention -> Trash
+- `Train-Ham`    — drop known-good mail here
+- `Trained-Ham`  — filter archives a copy here after learning; retention -> Trash
 
-**Why copy for ham:** the copy in `Train-Ham` is destroyed by retention.
-If you **move** a legitimate mail into `Train-Ham` you lose your only
-copy. Bulk-train ham by selecting a known-good folder in your mail
-client (e.g. `Archive/Family`) and **Copy** to `Train-Ham` - the
-originals in your folders stay untouched.
+**Train-Ham:** as soon as a message is in `Train-Ham`, the filter copies
+it to the Inbox, then learns ham and moves the Train-Ham message to
+`Trained-Ham`. You end up with the message in both the Inbox and
+`Trained-Ham`. The Inbox copy is not moved to Junk just because its
+score is 8 or higher. If that exact message is already in the Inbox,
+the filter does not make a second Inbox copy. A copy dropped in from
+another folder leaves the original there as well.
 
 **b) bootstrap_train.py CLI (faster for one-off bulk runs)**
 
@@ -516,7 +518,7 @@ override `defaults:` values; both override built-in defaults from `filter.py`.
 | `trash` | `Trash` | auto-detected via `\Trash` |
 | `spam_train` | `Junk/Train-Spam` | drop spam here for the filter to learn |
 | `trained_spam` | `Junk/Trained-Spam` | post-learn archive (auto-trashed by retention) |
-| `ham_train` | `Junk/Train-Ham` | drop (or **copy**) known-good mail here for ham training |
+| `ham_train` | `Junk/Train-Ham` | drop known-good mail here; the filter copies it to the Inbox immediately, learns ham, then archives the Train-Ham message in Trained-Ham |
 | `trained_ham` | `Junk/Trained-Ham` | post-learn archive for ham (auto-trashed by retention) |
 | `allowlist` | `INBOX/Allowlist` | drag mail here to person-allow the From address, ham-learn it, then MOVE to Inbox (expunges a leftover source copy if the server treated MOVE as COPY) |
 | `blocklist` | `INBOX/Blocklist` | drag mail here to person-block the From address, spam-learn it, then MOVE to Junk (same leftover-copy cleanup) |
@@ -539,6 +541,7 @@ user's mailbox.
 | `mode` | `shadow` | `shadow` (no Inbox/Junk/Trash writes; Train-* drain allowed) \| `flag` \| `move` |
 | `threshold` | `8.0` | Inbox score >= this is moved to Junk in move mode |
 | `rescue_below` | `4.0` | provider Junk is moved to Inbox only when the first score is below this |
+| `flag_untrained_junk` | `false` | on mail newly arrived in Junk that has not been taught spam or ham, set Outlook's follow-up flag (`\Flagged`). Mail already in Junk is left alone. A user Inbox→Junk drag, and provider Junk that move mode is about to rescue, are not flagged |
 | `min_threshold_allowed` | `5.0` | startup refuses to run if `threshold` is below this |
 | `reject_score_above` | `100.0` | scores outside `±this` are treated as failed scan |
 
