@@ -1,6 +1,6 @@
 # Session handoff — imap-spamfilter (ByteLord VPS)
 
-**Last updated:** 2026-09-29 Pacific. The Claude Fable 5.1 code and security review is done. Its fixes, plus a second operator-approved pass (Unbound recursion, blocklist rules, the Microsoft-trust switch, the Secure cookie, rspamd file inputs off, the "already learned" 404), are committed and pushed but **not deployed**. Next: deploy the bundle, then rescue Trained-* mail from Deleted Items and rebuild Bayes, then the Outlook add-in.  
+**Last updated:** 2026-09-29 02:10 Pacific. The Claude Fable 5.1 review fixes and the second pass are **deployed and verified**. Next: rescue Trained-* mail from Deleted Items and rebuild Bayes, fix `jamie.zinsli_rjmetalfab`'s mailbox access on the Microsoft side, then the Outlook add-in.  
 **Repo:** `/opt/bytelord/projects/imap-spamfilter`  
 **Remote:** `github.com:bytecave/imap-spamfilter.git` (branch `main`)  
 **Upstream fork of:** marcelverdult/imap-spamfilter  
@@ -36,7 +36,7 @@ Also read `/home/bytecave/.claude/CLAUDE.md` (Cursor user rule) and use Agent Ma
 - **25 fixed in the tree**, each with regression tests, one commit per fix: [`CLAUDE_FABLE5.1_CODE_FIXED.md`](CLAUDE_FABLE5.1_CODE_FIXED.md).
 - Full Docker suite: **487 passed**, up from 429. 47 of the new tests fail on the pre-review code.
 
-**Nothing is deployed.** The live containers still run the 2026-09-28 19:22 image and the old rspamd config. `rich_bytecave` is still the only `mode: move` account, and nothing about modes, Bayes contents or live mail was changed.
+**Deployed 2026-09-29 02:00–02:02 Pacific** (details below). `rich_bytecave` is still the only `mode: move` account, and nothing about modes, Bayes contents or live mail was changed.
 
 ### Deploy first: rspamd has been deleting Bayes tokens (FABLE-CR-001)
 
@@ -53,19 +53,33 @@ From the live rspamd log (read-only):
 - A plain `--all-trained` re-feed returns 208 ("already") from rspamd's learn cache and restores nothing.
 - Rebuilding the notebook (backup, clear the `bytelord` notebook including its learn cache, re-feed Trained-*) is an **operator decision**.
 
-### ⚠ `accounts.yml` now needs the new image: do not restart the old one
+### DEPLOYED 2026-09-29 02:00–02:02 Pacific (Claude Fable 5.1, at the operator's request)
 
-**2026-09-29 ~01:56 Pacific**, at the operator's request, `accounts.yml` (18 accounts, 8 of them added about an hour earlier) gained:
-- `m365_auth_trust: true`, set explicitly on every account;
-- `trained_retention_days: 0` on `rich_bytecave`.
+The whole bundle ran in order. Redis was never touched.
 
-A backup of the previous file is `/opt/bytelord/data/imap-spamfilter/state/accounts.yml.bak-20260929-*`.
+**Steps and results:**
+1. Live compose synced from `deploy/bytelord-compose.yaml`. The backup is `compose.yaml.bak.20260929-*`, and the diff was exactly the three expected changes.
+2. **Unbound** recreated. Spamhaus ZEN returns `127.0.0.10 .4 .2` and DBL returns `127.0.1.2` (real answers, no longer "refused"). The first lookups after a recreate can SERVFAIL for a few seconds while the cache warms; seen once, then clean.
+3. **rspamd `local.d`** installed. The backup is `/opt/bytelord/data/imap-spamfilter/rspamd/local.d.bak.20260929-020048`, and every live file now matches the repo. One line was appended to the rendered `worker-controller.inc`. `configtest` gave syntax OK, then rspamd restarted.
+   - `allow_file_and_shm_inputs = false` on 3 workers.
+   - RBL rules: stock `spamhaus` plus `spamcop`.
+   - No Bayes `expire`: since the restart the expiry module has run **no** steps. The last step logged was 09:00:49 UTC from the old process.
+4. **Filter** rebuilt as `imap-spamfilter:bytelord` and recreated. It loaded 18 accounts, with no config errors and 0 restarts. `accounts.yml` now gives `m365_auth_trust: true` on every account and `trained_retention_days: 0` on `rich_bytecave`, both active.
+   - The dashboard answers 200, and `SESSION_COOKIE_SECURE = True`.
+   - `explain_score.py` on a live `rich_bytecave` message scans normally, with Bayes contributing and no `*_BLOCKED` symbol.
 
-**The running image rejects the new file** (`unknown key(s): 'm365_auth_trust'`). The running process loaded its config at start, so it keeps working. But **any restart of the current image fails at startup** until the new image is built. That includes `docker restart`, a crash-restart and a host reboot. So the next start of `spamfilter` must be deploy step 4 (build + recreate), which also activates `trained_retention_days: 0`. Until then, the old process still sweeps `rich_bytecave` Trained-* mail older than about 8 days to Deleted Items every hour.
+**Bayes baseline:** 13,797 `RS*_*` token keys at 02:07 Pacific. From now on it should only grow.
 
-If the old image must be restarted before the deploy, first remove the 18 `m365_auth_trust: true` lines (the default is true anyway).
+**New accounts:** 7 of the 8 added on 2026-09-29 connected, and each got all six folders, created and subscribed and confirmed by a read-only `LIST`/`LSUB`: aiden_eizenhoefer, matt, cad, foreman, shop, matta and mike (all `_rjmetalfab` except aiden).
 
-### The deploy bundle (operator runs it; nothing has been run)
+**`jamie.zinsli_rjmetalfab` does not connect.** Exchange answers LOGIN with `User is authenticated but not connected.`, so the proxy's OAuth token works but that mailbox cannot be opened. It has never connected, and no folders exist yet. The usual causes are on the Microsoft side:
+- the app's service principal lacks `FullAccess` on that mailbox (`Add-MailboxPermission`);
+- IMAP is disabled (`Get-CASMailbox … ImapEnabled`);
+- the address in the proxy section or `accounts.yml` is not the mailbox's primary SMTP address, or the mailbox is unlicensed.
+
+The filter retries with backoff up to 5 minutes. Once Exchange allows it, it connects and creates the folders by itself, with no restart needed.
+
+### The deploy bundle (as run on 2026-09-29; kept for the next deploy)
 
 The ordered, copy-paste steps are in [`CLAUDE_FABLE5.1_CODE_FIXED.md`](CLAUDE_FABLE5.1_CODE_FIXED.md) § "Deploying these fixes":
 1. Sync the compose file (Unbound mount, Secure cookie, image `imap-spamfilter:bytelord`).

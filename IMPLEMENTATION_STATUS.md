@@ -1,6 +1,6 @@
 # Implementation status — imap-spamfilter (ByteLord)
 
-**Last updated:** 2026-09-29 Pacific. The Claude Fable 5.1 code and security review is **done**: 32 findings, 25 fixed in the tree, **none deployed yet**. Deploy the Bayes-expiry fix (FABLE-CR-001) first. Then the planned Outlook add-in.  
+**Last updated:** 2026-09-29 02:10 Pacific. The Claude Fable 5.1 review fixes and the second pass are **deployed** (Unbound recursing, rspamd `local.d`, filter image `imap-spamfilter:bytelord`). 18 accounts are configured, 17 connected; `jamie.zinsli_rjmetalfab` is refused by Exchange (see SESSION_HANDOFF). Next: Deleted Items rescue and Bayes rebuild, then the Outlook add-in.  
 **Audience:** brand-new agent sessions (Cursor / Claude Code / Codex) with no prior chat memory.  
 **Companion:** [`SESSION_HANDOFF.md`](SESSION_HANDOFF.md) (short “where we left off”; this file is the durable product/deploy/agent map).
 
@@ -257,12 +257,12 @@ Full plan at `~/.cursor/plans/rspamd_4.2.0_upgrade_and_webui_link_18e83c16.plan.
 | Rspamd fuzzy *(2026-09-25)* | Stock `rspamd.com` rule (local file is comments only). Before CR-029 it never loaded. |
 | Rspamd neural *(2026-09-25)* | `autotrain = false`; neural Redis keys deleted during deploy → no `NEURAL_*` score. **Stays off by decision** (next section). |
 | Caps | `max_list_per_run=100`, `max_list_entries=1000` |
-| Bayes token lifetime *(2026-09-29)* | Tokens never expire. `classifier-bayes.conf` must not set `expire`: any number turns on rspamd's `bayes_expiry`, and `0` deletes rare tokens (FABLE-CR-001; `test_config_files.py` guards it). **Not deployed yet.** |
-| DNS for blocklists *(2026-09-29)* | Unbound resolves from the root servers (`unbound/forward-records.conf` mounted over the image's Cloudflare forwarder). Stock Spamhaus ZEN/DBL, SURBL and URIBL rules score. Local `rbl.conf` adds only SpamCop (`Received:` hops, weight 1.5 in `rbl_group.conf`) (FABLE-CR-005/032). **Not deployed yet.** |
+| Bayes token lifetime *(2026-09-29)* | Tokens never expire. `classifier-bayes.conf` must not set `expire`: any number turns on rspamd's `bayes_expiry`, and `0` deletes rare tokens (FABLE-CR-001; `test_config_files.py` guards it). **Deployed 2026-09-29.** |
+| DNS for blocklists *(2026-09-29)* | Unbound resolves from the root servers (`unbound/forward-records.conf` mounted over the image's Cloudflare forwarder). Stock Spamhaus ZEN/DBL, SURBL and URIBL rules score. Local `rbl.conf` adds only SpamCop (`Received:` hops, weight 1.5 in `rbl_group.conf`) (FABLE-CR-005/032). **Deployed 2026-09-29.** |
 | Microsoft auth trust *(2026-09-29)* | Per-account `m365_auth_trust`, default `true`. Set it `false` for any mailbox Microsoft 365 does not deliver to; that account then ignores `Authentication-Results` (no bucket B, no spoof verdict) (FABLE-CR-011). |
 | rspamd changes *(2026-09-29)* | **Configuration only (`rspamd/local.d/`); never patch rspamd code.** File/shm inputs are off on every worker. |
-| rspamd evaluation *(2026-09-29)* | `/checkv2` sends `Pass: all`, so every rule runs even past `reject = 15`. `actions.conf` is then truly cosmetic (FABLE-CR-004). **Not deployed yet.** |
-| Dashboard list Save *(2026-09-29)* | Writes only the (scope, kind) the page loaded (hidden fields). If the list or its sibling changed since the page was opened, it returns 409 and writes nothing (FABLE-CR-006/007). **Not deployed yet.** |
+| rspamd evaluation *(2026-09-29)* | `/checkv2` sends `Pass: all`, so every rule runs even past `reject = 15`. `actions.conf` is then truly cosmetic (FABLE-CR-004). **Deployed 2026-09-29.** |
+| Dashboard list Save *(2026-09-29)* | Writes only the (scope, kind) the page loaded (hidden fields). If the list or its sibling changed since the page was opened, it returns 409 and writes nothing (FABLE-CR-006/007). **Deployed 2026-09-29.** |
 
 Older docs that say “list hits skip `/checkv2`” or “both list drains MOVE to Inbox” are **stale** — trust this file + `README.md` + `filter/filter.py`.
 
