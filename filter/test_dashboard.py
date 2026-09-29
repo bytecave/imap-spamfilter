@@ -1387,3 +1387,144 @@ def test_rspamd_webui_link_shown_for_non_admin_viewer(dashboard_db, monkeypatch)
     assert resp.status_code == 200
     assert b'href="https://spam.bytelord.net/rspamd/"' in resp.data
 
+
+
+# ----- Claude Fable 5.1 review (FABLE-CR-*) --------------------------------
+
+import re as _re  # noqa: E402
+
+
+def _hidden(html: bytes, name: str) -> str:
+    m = _re.search(rb'name="' + name.encode() + rb'" value="([^"]*)"', html)
+    assert m, name
+    return m.group(1).decode()
+
+
+def _fdb():
+    import filter as f
+    f.DB_PATH = d.DB_PATH
+    return f, f.Db("_dashboard")
+
+
+def _seed_domain_lists(allow=(), block=()):
+    f, db = _fdb()
+    with db.tx():
+        for kind, patterns in (("allow", allow), ("block", block)):
+            for pat in patterns:
+                db.list_upsert_address(
+                    "domain", "rjmetalfab.com", kind,
+                    f.parse_list_line(pat, allow_domain=True),
+                    source="dashboard", max_entries=1000,
+                )
+    db.close()
+
+
+def _domain_lists():
+    _f, db = _fdb()
+    try:
+        return (
+            db.list_get("domain", "rjmetalfab.com", "allow"),
+            db.list_get("domain", "rjmetalfab.com", "block"),
+        )
+    finally:
+        db.close()
+
+
+def test_list_editor_posts_the_loaded_list_not_the_navigation_controls(
+    dashboard_db, tmp_path, monkeypatch,
+):
+    """FABLE-CR-006: a Cancel on the kind radio after a 400
+    used to leave "allow" selected, and Save wrote the block text there."""
+    monkeypatch.setattr(d, "CONFIG_PATH", _list_yaml(tmp_path))
+    _seed_domain_lists(allow=["friend@x.com"], block=["@kickstarlaunch.com"])
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    page = client.get("/lists/domains?scope=rjmetalfab.com&kind=block")
+    assert _hidden(page.data, "kind") == "block"
+    assert _hidden(page.data, "scope") == "rjmetalfab.com"
+    # The visible controls are navigation only and never named scope/kind.
+    assert b'name="view_kind"' in page.data
+    assert b'<select id="scope-key" name="view_scope"' in page.data
+    with client.session_transaction() as sess:
+        token = sess["csrf"]
+    bad = client.post("/lists/domains", data={
+        "csrf_token": token, "scope": "rjmetalfab.com", "kind": "block",
+        "snapshot": _hidden(page.data, "snapshot"),
+        "view_kind": "allow",
+        "body": "@kickstarlaunch.com\nbad line\n",
+    })
+    assert bad.status_code == 400
+    assert _hidden(bad.data, "kind") == "block"
+    ok = client.post("/lists/domains", data={
+        "csrf_token": token, "scope": "rjmetalfab.com", "kind": "block",
+        "snapshot": _hidden(bad.data, "snapshot"),
+        "view_kind": "allow",
+        "body": "@kickstarlaunch.com\n@spam.example\n",
+    })
+    assert ok.status_code == 302
+    assert _domain_lists() == (
+        ["friend@x.com"], ["@kickstarlaunch.com", "@spam.example"],
+    )
+
+
+def test_stale_list_save_is_refused_and_writes_nothing(
+    dashboard_db, tmp_path, monkeypatch,
+):
+    """FABLE-CR-007: a Save from a page opened before an Outlook drag must
+    not undo it."""
+    monkeypatch.setattr(d, "CONFIG_PATH", _list_yaml(tmp_path))
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    page = client.get("/lists/users?scope=Rich%20Eizenhoefer&kind=allow")
+    stale = _hidden(page.data, "snapshot")
+    f, db = _fdb()
+    with db.tx():  # the user drags a message into Blocklist meanwhile
+        db.list_flip_address(
+            "person", "Rich Eizenhoefer", "block",
+            f.ParsedPattern("promo@shop.com", "address"),
+            source="imap", max_entries=1000,
+        )
+    db.close()
+    with client.session_transaction() as sess:
+        token = sess["csrf"]
+    form = {
+        "csrf_token": token, "scope": "Rich Eizenhoefer", "kind": "allow",
+        "snapshot": stale, "body": "promo@shop.com\nfriend@x.com\n",
+    }
+    resp = client.post("/lists/users", data=form)
+    assert resp.status_code == 409
+    assert b"changed after you opened it" in resp.data
+    f, db = _fdb()
+    assert db.list_get("person", "Rich Eizenhoefer", "block") == ["promo@shop.com"]
+    assert db.list_get("person", "Rich Eizenhoefer", "allow") == []
+    db.close()
+    # The conflict page carries the current snapshot: a second Save is a
+    # deliberate overwrite.
+    form["snapshot"] = _hidden(resp.data, "snapshot")
+    assert form["snapshot"] != stale
+    assert client.post("/lists/users", data=form).status_code == 302
+    f, db = _fdb()
+    assert db.list_get("person", "Rich Eizenhoefer", "allow") == [
+        "friend@x.com", "promo@shop.com",
+    ]
+    db.close()
+
+
+def test_list_error_line_survives_a_leading_blank_line(
+    dashboard_db, tmp_path, monkeypatch,
+):
+    monkeypatch.setattr(d, "CONFIG_PATH", _list_yaml(tmp_path))
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    client.get("/lists/domains")
+    with client.session_transaction() as sess:
+        token = sess["csrf"]
+    resp = client.post("/lists/domains", data={
+        "csrf_token": token, "scope": "rjmetalfab.com", "kind": "allow",
+        "body": "\nbad x\n",
+    })
+    assert resp.status_code == 400
+    assert b'data-error-line="2"' in resp.data
+    # The HTML parser drops one newline after <textarea>; the page must
+    # emit one so the posted leading blank line survives.
+    assert b">\n\nbad x\n</textarea>" in resp.data

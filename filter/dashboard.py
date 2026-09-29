@@ -1845,6 +1845,42 @@ def _list_config():
     return roster, names, cap
 
 
+class _ListChanged(Exception):
+    """The list changed after the editor page was rendered."""
+
+    def __init__(self, current: str) -> None:
+        super().__init__("list changed")
+        self.current = current
+
+
+def _list_snapshot(db, scope_type: str, scope_key: str, kind: str) -> str:
+    """Fingerprint of one editor page: this list and its sibling.
+
+    Rendered as a hidden field and re-checked inside the Save transaction,
+    so a Save from a stale page cannot silently undo an Outlook
+    Allowlist/Blocklist drag (or another admin's Save) that landed after
+    the page was opened. Covers scope and kind, so text loaded for one
+    list can never be written into another.
+    """
+    other = "block" if kind == "allow" else "allow"
+    digest = hashlib.sha256()
+    for part in (
+        scope_type, scope_key, kind,
+        "\n".join(db.list_get(scope_type, scope_key, kind)),
+        "\n".join(db.list_get(scope_type, scope_key, other)),
+    ):
+        digest.update(part.encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+_LIST_CHANGED_MESSAGE = (
+    "This list changed after you opened it (an Outlook Allowlist/Blocklist "
+    "drag or another save). Nothing was saved. Your text is below: Save "
+    "again to replace the list with it, or reload to start from the saved list."
+)
+
+
 def _list_page(which: str, error: str | None = None, error_line: int | None = None,
                posted_body: str | None = None):
     from filter import Db
@@ -1858,7 +1894,11 @@ def _list_page(which: str, error: str | None = None, error_line: int | None = No
             '<div class="card list-err">Could not read accounts.yml.</div>',
         ), 503
     roster, actual_names, cap = cfg
-    kind = (request.values.get("kind") or "allow").strip().lower()
+    # GET navigates with ?scope=&kind=. A POST writes the list the page
+    # loaded, carried in hidden form fields, never the navigation controls
+    # and never a query string.
+    src = request.form if request.method == "POST" else request.args
+    kind = (src.get("kind") or "allow").strip().lower()
     if kind not in ("allow", "block"):
         abort(400)
     if which == "domains":
@@ -1879,7 +1919,7 @@ def _list_page(which: str, error: str | None = None, error_line: int | None = No
         title = "User lists"
         active = "lists-users"
         action = "/lists/users"
-    scope_key = request.values.get("scope") or default_key
+    scope_key = src.get("scope") or default_key
     valid_keys = {k for k, _l in options}
     if request.method == "POST" and scope_key not in valid_keys:
         abort(404)
@@ -1896,16 +1936,23 @@ def _list_page(which: str, error: str | None = None, error_line: int | None = No
         _check_csrf()
         from filter import parse_list_text
         raw_text = request.form.get("body") or ""
+        posted_snapshot = request.form.get("snapshot") or ""
         items, perr = parse_list_text(raw_text, allow_domain=allow_domain)
         if perr is not None:
             return _list_page_render(
                 title, active, action, options, scope_key, kind,
                 raw_text, perr.message, perr.line, allow_domain,
+                snapshot=posted_snapshot,
             ), 400
         try:
             db = Db("_dashboard")
             try:
                 with db.tx():
+                    current = _list_snapshot(db, scope_type, scope_key, kind)
+                    if posted_snapshot and not hmac.compare_digest(
+                        posted_snapshot.encode(), current.encode()
+                    ):
+                        raise _ListChanged(current)
                     db.list_replace(
                         scope_type, scope_key, kind, items,
                         source="dashboard", actor=session.get("user"),
@@ -1913,10 +1960,17 @@ def _list_page(which: str, error: str | None = None, error_line: int | None = No
                     )
             finally:
                 db.close()
+        except _ListChanged as ex:
+            return _list_page_render(
+                title, active, action, options, scope_key, kind,
+                raw_text, _LIST_CHANGED_MESSAGE, None, allow_domain,
+                snapshot=ex.current,
+            ), 409
         except ValueError as ex:
             return _list_page_render(
                 title, active, action, options, scope_key, kind,
                 raw_text, str(ex), 1, allow_domain,
+                snapshot=posted_snapshot,
             ), 400
         endpoint = "lists_domains" if which == "domains" else "lists_users"
         return redirect(url_for(endpoint, scope=scope_key, kind=kind))
@@ -1924,6 +1978,7 @@ def _list_page(which: str, error: str | None = None, error_line: int | None = No
     db = Db("_dashboard")
     try:
         lines = db.list_get(scope_type, scope_key, kind)
+        snapshot = _list_snapshot(db, scope_type, scope_key, kind)
     finally:
         db.close()
     body_text = posted_body if posted_body is not None else "\n".join(lines)
@@ -1931,13 +1986,13 @@ def _list_page(which: str, error: str | None = None, error_line: int | None = No
         body_text += "\n"
     return _list_page_render(
         title, active, action, options, scope_key, kind,
-        body_text, error, error_line, allow_domain,
+        body_text, error, error_line, allow_domain, snapshot=snapshot,
     )
 
 
 def _list_page_render(
     title, active, action, options, scope_key, kind, body_text,
-    error, error_line, allow_domain,
+    error, error_line, allow_domain, *, snapshot="",
 ):
     opts = "".join(
         f'<option value="{_h(k)}"{" selected" if k == scope_key else ""}>'
@@ -1959,10 +2014,13 @@ def _list_page_render(
 <div class="card">
 <form id="list-editor" method="post" action="{_h(action)}" class="list-form">
 <input type="hidden" name="csrf_token" value="{csrf}">
+<input type="hidden" id="loaded-scope" name="scope" value="{_h(scope_key)}">
+<input type="hidden" id="loaded-kind" name="kind" value="{_h(kind)}">
+<input type="hidden" name="snapshot" value="{_h(snapshot)}">
 <div class="list-chrome">
-  <select id="scope-key" name="scope">{opts}</select>
-  <label><input type="radio" name="kind" value="allow"{allow_checked}> Allow</label>
-  <label><input type="radio" name="kind" value="block"{block_checked}> Block</label>
+  <select id="scope-key" name="view_scope" form="list-nav">{opts}</select>
+  <label><input type="radio" name="view_kind" value="allow" form="list-nav"{allow_checked}> Allow</label>
+  <label><input type="radio" name="view_kind" value="block" form="list-nav"{block_checked}> Block</label>
   <button type="submit" id="list-save" disabled>Save</button>
   <button type="button" id="list-cancel" disabled>Cancel</button>
 </div>
@@ -1975,9 +2033,11 @@ def _list_page_render(
 </div>
 <div class="list-body-wrap">
 <pre class="list-body-hl" id="list-body-hl" aria-hidden="true"></pre>
-<textarea class="list-body" id="list-body" name="body" spellcheck="false"{line_attr}>{_h(body_text)}</textarea>
+<textarea class="list-body" id="list-body" name="body" spellcheck="false"{line_attr}>
+{_h(body_text)}</textarea>
 </div>
 </form>
+<form id="list-nav" method="get" action="{_h(action)}"></form>
 </div>
 """
     return render(title, active, html)

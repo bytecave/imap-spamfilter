@@ -9,6 +9,10 @@
   var searchStatus = document.getElementById("list-search-status");
   var hl = document.getElementById("list-body-hl");
   var scope = document.getElementById("scope-key");
+  // The list whose text is in the textarea. Save always writes to this
+  // list (hidden fields); the dropdown and radios only navigate.
+  var loadedScope = document.getElementById("loaded-scope").value;
+  var loadedKind = document.getElementById("loaded-kind").value;
   var snapshot = body.value;
   var dirty = false;
 
@@ -58,7 +62,7 @@
   });
 
   function navigateKindOrScope() {
-    var kind = (form.querySelector('input[name="kind"]:checked') || {}).value || "allow";
+    var kind = (form.querySelector('input[name="view_kind"]:checked') || {}).value || "allow";
     var url = form.action + "?scope=" + encodeURIComponent(scope.value) + "&kind=" + encodeURIComponent(kind);
     window.location.assign(url);
   }
@@ -66,17 +70,17 @@
   scope.addEventListener("change", function (ev) {
     if (!warn()) {
       ev.preventDefault();
-      scope.value = new URLSearchParams(window.location.search).get("scope") || scope.options[0].value;
+      scope.value = loadedScope;
       return;
     }
     setDirty(false);
     navigateKindOrScope();
   });
 
-  form.querySelectorAll('input[name="kind"]').forEach(function (radio) {
+  form.querySelectorAll('input[name="view_kind"]').forEach(function (radio) {
     radio.addEventListener("change", function () {
       if (!warn()) {
-        form.querySelector('input[name="kind"][value="' + (new URLSearchParams(window.location.search).get("kind") || "allow") + '"]').checked = true;
+        form.querySelector('input[name="view_kind"][value="' + loadedKind + '"]').checked = true;
         return;
       }
       setDirty(false);
