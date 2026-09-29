@@ -70,6 +70,22 @@ def test_scan_from_is_message_from_not_recipient(monkeypatch):
     assert "User" not in captured["headers"]
 
 
+def test_scan_asks_rspamd_to_run_every_rule(monkeypatch):
+    """FABLE-CR-004: without `Pass: all` rspamd stops starting filter rules
+    once the score passes `reject`, so high scores were truncated sums."""
+    captured = _capture_post(monkeypatch)
+    f.rspamd_scan(RAW_WITH_FROM, "u@example.com", 100.0, bayes_user="bytelord")
+    assert captured["headers"]["Pass"] == "all"
+    captured.clear()
+    assert f.rspamd_probe_ok(_probe_account())
+    assert captured["headers"]["Pass"] == "all"
+
+
+def _probe_account():
+    from test_shadow_mode import _mk_account
+    return _mk_account(bayes_user="bytelord")
+
+
 def test_address_bayes_user_stays_in_rcpt(monkeypatch):
     captured = _capture_post(monkeypatch)
     f.rspamd_scan(

@@ -2423,6 +2423,11 @@ def rspamd_scan_detail(
     IMAP has no SMTP client IP — do not send `Ip` or `Helo`.
     Do not send HTTP `User`: rspamd treats that as an authenticated
     submission and skips DKIM/DMARC failure symbols.
+
+    `Pass: all` makes rspamd run every rule. Without it rspamd stops
+    starting new filter rules once the score passes the highest action
+    threshold (`reject` in actions.conf), so a high score would be a
+    truncated, order-dependent sum that bucket B then adjusts.
     """
     try:
         identity = bayes_user or recipient
@@ -2431,7 +2436,7 @@ def rspamd_scan_detail(
             rcpt = recipient
         else:
             rcpt = identity
-        headers: dict[str, str] = {}
+        headers: dict[str, str] = {"Pass": "all"}
         safe_rcpt = _http_header_safe(rcpt)
         if safe_rcpt:
             headers["Rcpt"] = safe_rcpt
