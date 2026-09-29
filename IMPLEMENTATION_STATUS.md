@@ -1,6 +1,6 @@
 # Implementation status — imap-spamfilter (ByteLord)
 
-**Last updated:** 2026-09-29 03:55 Pacific. The Claude Fable 5.1 review fixes are deployed. The Bayes notebook `bytelord` was rebuilt 2026-09-29: 1,105 spam and 1,655 ham learns, about 213k tokens, with expiry off. 18 accounts are configured, all connected. Next: the Outlook add-in.  
+**Last updated:** 2026-09-29 ~14:45 Pacific. The Fable 5.1 review fixes, the Bayes rebuild, 60-day arrival-based Trained-* retention and the 2-minute Train-* settle are all **live**. `flag_untrained_junk` is **off** for good (Outlook sync conflicts). 18 accounts are connected. **Next: investigate the IMAP connection errors, then the Outlook add-in.**  
 **Audience:** brand-new agent sessions (Cursor / Claude Code / Codex) with no prior chat memory.  
 **Companion:** [`SESSION_HANDOFF.md`](SESSION_HANDOFF.md) (short “where we left off”; this file is the durable product/deploy/agent map).
 
@@ -486,19 +486,18 @@ Ham training **cannot** cancel A/B auth-header symbols when they still fire (unt
 
 ## What’s next (suggested order)
 
-1. **Deploy the Fable 5.1 review fixes (operator).** First copy `rspamd/local.d/classifier-bayes.conf` into the live `local.d` and restart rspamd (FABLE-CR-001, Bayes expiry). Then sync the compose file and rebuild `spamfilter`. Commands are in `CLAUDE_FABLE5.1_CODE_FIXED.md`, and the test list is in `SESSION_HANDOFF.md`. Then decide whether to rebuild the Bayes notebook, and whether to turn on Unbound recursion (FABLE-CR-005). *(The full code and security review itself is done: `CLAUDE_FABLE5.1_CODE_REVIEW.md`.)*
-2. **Outlook add-in remains planned.** Requirements and setup notes are in `outlook-addin/` (`d988d40`). There is no add-in code yet. Do not treat that as a filter defect, and do not start the add-in until the review is done.
-3. **`rich_bytecave` is in `move`.** The first retention sweep (01:26 Pacific) moved 101 Trained-Spam and 500 Trained-Ham older than ~8 days to Deleted Items. Default `trained_retention_days` is 7, so later hourly sweeps of up to 500 may have continued. Do not promote any other account. CR-014 Inbox→Junk leftover check is still open.
-4. **CR-004 / neural: done and closed.** It stays off. See "Neural: why it stays off" before proposing any change.
-5. **Do not wipe Bayes again** unless asked. Restore point: `dump.rdb.bak-20260928-before-rich-move` and `appendonlydir.bak-20260928-before-rich-move` inside the Redis data volume. Do not run any score-based Trained-* mover.
-6. **`@host` subdomain matching and `word_dots = false` are committed and in the running image.** Do not rebuild `spamfilter` unless asked.
-7. **Operator decisions still open:** CR-019 `Rcpt` = mailbox vs first To/Cc; optional `DASHBOARD_TRUSTED_PROXIES`.
-8. **Rspamd 4.2.0 / WebUI-link deploy is done** (2026-09-22). V1–V7 deploy verification is done.
-9. **ChatGPT CR-016 / supply chain** (accepted risk): lock and hash deps, image digests, GHA SHA pins — when prioritized.
-10. More M365 mailboxes only with an Exchange grant + proxy section + YAML. No generic IMAP for `bytelord.net` unless asked.
-11. Optional polish: ChatGPT CR disposition items, and the Low items under "Not fixed" in `CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md`. Not release blockers. Human testing table in SESSION_HANDOFF is still open, now against one live move-mode mailbox.
-
----
+1. **IMAP connection errors.** About 270 `conn_error` events a day ("idle_done failed", plus hourly `AccessTokenExpired`). The starting analysis and commands are in SESSION_HANDOFF § "Connection errors: what is known". Mail is not being lost; the loop reconnects. The goal is to tell expected session recycling apart from real faults, and to stop needless re-logins (FABLE-CR-029).
+2. **Reconnect Supermemory** and add the 2026-09-28/29 facts listed in SESSION_HANDOFF.
+3. **Steve's Outlook:** confirm Train-Spam drags now stay in Trained-Spam. The 2-minute settle is live; `flag_untrained_junk` stays off. Optionally de-duplicate the bounced copies left in his Junk.
+4. **Outlook add-in.** Requirements and setup notes are in `outlook-addin/`; there is no code yet. It is built on the Windows desktop clone, not on ByteLord.
+5. **Do not wipe Bayes** unless asked. Latest restore point, taken just before the 2026-09-29 rebuild: `dump.rdb.bak-20260929-022922-before-retrain` + `appendonlydir.bak-20260929-022922-before-retrain` in the Redis `/data`, and SQLite `spamfilter.db.bak-20260929-022922-before-retrain`. Do not run any score-based Trained-* mover.
+6. **Operator decisions still open:**
+   - CR-014, the Inbox→Junk MOVE-as-COPY leftover;
+   - CR-019, `Rcpt` = mailbox vs first To/Cc;
+   - FABLE-CR-011 before any non-M365 mailbox: set `m365_auth_trust: false` on it;
+   - FABLE-CR-028, list routing for oversize mail.
+7. **Accepted risk / later:** ChatGPT CR-016 supply chain; the Low items under "Not fixed" in the Fable/Opus fix logs.
+8. More M365 mailboxes only with an Exchange grant, a proxy section and an `accounts.yml` entry (`m365_auth_trust: true`, as on every current account).
 
 ## Key files for a new agent
 

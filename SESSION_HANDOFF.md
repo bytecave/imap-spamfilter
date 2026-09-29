@@ -1,6 +1,6 @@
 # Session handoff — imap-spamfilter (ByteLord VPS)
 
-**Last updated:** 2026-09-29 03:55 Pacific. Review fixes deployed; the Bayes notebook has been rebuilt from Trained-* (including 1,186 messages rescued from Deleted Items), and the dashboard rescored. All 18 accounts connected. Next: the Outlook add-in.  
+**Last updated:** 2026-09-29 ~14:45 Pacific. Next session: investigate the IMAP **connection errors** (`conn_error`) in the log, and reconnect **Supermemory**. Everything below is live, committed and pushed (`main` at `f14ae92` or later).  
 **Repo:** `/opt/bytelord/projects/imap-spamfilter`  
 **Remote:** `github.com:bytecave/imap-spamfilter.git` (branch `main`)  
 **Upstream fork of:** marcelverdult/imap-spamfilter  
@@ -38,7 +38,70 @@ Also read `/home/bytecave/.claude/CLAUDE.md` (Cursor user rule) and use Agent Ma
 
 ---
 
-## Where we left off (2026-09-29) — CONTINUE HERE
+## CONTINUE HERE (2026-09-29 ~14:45 Pacific): next job is the connection errors
+
+### Current live state (all committed, pushed and deployed)
+
+- **Accounts:** 18 connected. `rich_bytecave` is `mode: move`; the other 17 are `shadow`. That includes 8 added 2026-09-29, among them `jamie.zinsli_rjmetalfab`, which connected at 03:48 after the operator's Exchange permission fix.
+- **Filter image:** `imap-spamfilter:bytelord`, recreated 14:31 Pacific; the running code matches the repo.
+- **Review:** the Claude Fable 5.1 review fixes and second pass are deployed ([`CLAUDE_FABLE5.1_CODE_FIXED.md`](CLAUDE_FABLE5.1_CODE_FIXED.md)).
+- **Bayes:** rebuilt 2026-09-29, with 1,105 spam and 1,655 ham learns and about 213k tokens. rspamd's Bayes expiry is **off**; it used to delete tokens.
+- **Unbound:** recurses on its own, so Spamhaus, SURBL and URIBL answer. rspamd scans send `Pass: all`.
+- **Trained-* retention:** **60 days from arrival in the folder** (`trained_arrival` table). For rich_bytecave, nothing moves before 2026-11-28.
+- **`flag_untrained_junk`: OFF, and it must stay off.** `accounts.yml` has a "DON'T ENABLE THIS" comment. Its flags made classic Outlook re-create moved mail in Junk.
+- **Train-* settle:** `train_settle_seconds: 120`. Train-Spam/Train-Ham mail waits 2 minutes before it is learned and archived; the Train-Ham copy back to the Inbox is immediate.
+- **IMAP audit log:** every mailbox-changing command the filter sends is logged as `imap_audit <cmd> in=<folder> <args>`. `IMAP_AUDIT=verbose` also logs SELECT/EXAMINE.
+- **Open with the operator:**
+  - Steve's classic Outlook may still bounce Train-Spam drags until its cache settles. The operator ran "Clear Offline Items" and removed the flags; re-test.
+  - Duplicate copies of bounced messages may remain in Steve's Junk.
+
+### Connection errors: what is known (starting point)
+
+**Snapshot, `events` table, last 24 h, all 18 accounts (read-only query).**
+
+| Count | Accounts | Detail |
+|---|---|---|
+| **270** | 18 | `conn_error "idle_done failed"`, about 10–24 per account per day |
+| 10 | 7 | `Session invalidated - AccessTokenExpired` (on SEARCH) |
+| 4 | 3 | `* BYE Session invalidated - AccessTokenExpired` (during IDLE) |
+| 5 | 5 | `Broken pipe` |
+| 1 | — | `LOGIN ***` |
+| 1 | — | `Server Unavailable. 15` |
+| 10 | 1 | jamie's `User is authenticated but not connected.` (all before the Exchange fix) |
+
+The review's 7-day count was 1,561 "idle_done failed" (FABLE-CR-029).
+
+**How the code gets there** (`filter/filter.py`):
+- `wait_between_scans` IDLEs on the Inbox in chunks of at most 30 s (`wait = min(idle_timeout, max(30, junk_poll_interval))`), then calls `idle_done()`.
+- If `idle_done` raises, it logs `idle_done failed: <reason>; forcing reconnect` and raises `IMAPClientError("idle_done failed")`.
+- `_run_account` records that as `conn_error` and reconnects with backoff, which means a full login through `email-oauth2-proxy`.
+- The **real reason is only in the log line**, not in the event row. The container log was reset by the 14:31 recreate, so collect fresh ones with:
+
+  ```bash
+  docker logs --since 2h spamfilter 2>&1 | grep -E "idle_done failed:|connection error:"
+  ```
+
+**Likely causes to check.**
+1. **Token expiry.** Microsoft ends the IMAP session when the proxy's OAuth access token expires, about hourly (`AccessTokenExpired` BYE). A drop at IDLE end is then expected and recovers.
+2. **An IDLE/DONE handling quirk** between imapclient, the proxy and Exchange.
+3. **Proxy restarts:** the host's **03:00 nightly `bytelord-backup`** stops every container.
+
+**Recommendation already on file (FABLE-CR-029).** Classify an expected session recycle (BYE/AccessTokenExpired/idle_done right after a long IDLE) as `conn_recycled`, so real errors stand out. No mail is lost today; the loop reconnects and resumes.
+
+**Other items in this area:**
+- `redact_log` replaces everything after the word "LOGIN" (OPUS-CR-024), which hides the reason in that one `LOGIN ***` error.
+- Proxy logs: `docker logs email-oauth2-proxy`. That is a sibling project at `/opt/bytelord/projects/email-oauth2-proxy`; don't print its config, which holds secrets.
+
+**Rules that still apply:**
+- Do not restart during the 03:00 backup window.
+- Do not `compose down` Redis.
+- Tests: Docker `python:3.12-slim` with the **whole repository** mounted (**508 passed** last run; see IMPLEMENTATION_STATUS § Tests).
+
+### Supermemory
+
+It was unreachable for this entire Claude session (the plugin failed to authenticate), so nothing was captured. The facts to add once it works are listed under "Mandatory before doing anything else" above.
+
+## Earlier on 2026-09-29: review, deploy, Bayes rebuild (history)
 
 **The full code and security review is done.** Claude Fable 5.1 reviewed `main` at `f53586a`:
 - **32 findings**, traced requirement → test, in [`CLAUDE_FABLE5.1_CODE_REVIEW.md`](CLAUDE_FABLE5.1_CODE_REVIEW.md).
