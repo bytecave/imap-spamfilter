@@ -2514,7 +2514,8 @@ def rspamd_learn(raw: bytes, kind: str, user: str) -> str:
 
     Returns one of:
       * 'learned'  - HTTP 200, a fresh learn committed to Bayes;
-      * 'already'  - HTTP 208, the message was already learned;
+      * 'already'  - HTTP 208, or rspamd's 404 "has been already learned"
+        from its learn cache: the message was already learned;
       * 'declined' - HTTP 204: rspamd processed the request and learned
         nothing (too few tokens, or the message is already in that
         class). Re-POSTing the identical bytes always yields the same
@@ -2553,6 +2554,12 @@ def rspamd_learn(raw: bytes, kind: str, user: str) -> str:
         return "already"
     if resp.status_code == 204:
         return "declined"
+    if resp.status_code == 404 and "already learned" in (resp.text or ""):
+        # rspamd 4.2's learn cache reports "<id> has been already learned
+        # as spam, ignore it" as HTTP 404 (stat_process.c). Treating it as
+        # an error retried the same message with backoff forever. Other
+        # 404s ("cannot find classifier") are real configuration errors.
+        return "already"
     if resp.status_code in (401, 403):
         logging.getLogger("filter").error(
             "rspamd learn(%s) authentication failed (HTTP %s)",

@@ -491,3 +491,40 @@ def test_list_drag_waiting_on_learn_budget_is_not_refetched(tmp_path, monkeypatc
         "SELECT COUNT(*) FROM events WHERE event='list_imap_add'"
     ).fetchone()[0]
     assert adds == 1
+
+
+# ----- FABLE-CR-032: rspamd's "already learned" 404 -------------------------
+
+
+class _LearnResp:
+    def __init__(self, status_code, text=""):
+        self.status_code = status_code
+        self.text = text
+
+
+def test_rspamd_learn_cache_404_already_learned_is_already(monkeypatch):
+    body = '{"error":"<abc@x> has been already learned as spam, ignore it"}'
+    monkeypatch.setattr(f.requests, "post", lambda *a, **k: _LearnResp(404, body))
+    assert f.rspamd_learn(b"raw", "spam", user="u") == "already"
+
+
+def test_rspamd_learn_other_404_is_still_an_error(monkeypatch):
+    body = '{"error":"cannot find classifier with name bayes"}'
+    monkeypatch.setattr(f.requests, "post", lambda *a, **k: _LearnResp(404, body))
+    assert f.rspamd_learn(b"raw", "spam", user="u") == "error"
+
+
+def test_already_learned_404_ends_the_train_retry_loop(tmp_path, monkeypatch):
+    """Before the fix the message stayed in Train-Spam and was retried with
+    backoff forever."""
+    db = _mk_db(tmp_path)
+    acc = _mk_account()
+    body = '{"error":"<m@x> has been already learned as spam, ignore it"}'
+    monkeypatch.setattr(f.requests, "post", lambda *a, **k: _LearnResp(404, body))
+    client = RecordingIMAP(
+        existing=_all_existing(), search_uids=[7],
+        fetch_by_uid={7: {b"BODY[]": RAW_RESTORE, b"FLAGS": ()}},
+    )
+    f.drain_train_spam(client, db, LOG, acc, FMAP)
+    assert client.moved == [([7], FMAP["trained_spam"])]
+    assert db.get_imap_message(FMAP["spam_train"], 1, 7)["learned_as"] == "spam"
