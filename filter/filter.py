@@ -5190,6 +5190,15 @@ def _drain_list_folder(
         log.warning("select %s failed: %s", folder, redact_log(str(ex), acc.password))
         return
     uids = list(client.search(["ALL"]) or [])
+    if acc.learn_from_moves:
+        # The list entry is written on the first pass. A message still here
+        # because its learn is backing off (hourly budget, safe mode, rspamd
+        # error) waits for its retry time instead of being downloaded and
+        # re-logged every pass.
+        uids = [
+            uid for uid in uids
+            if _learn_retry_due(db.get_imap_message(folder, uv, uid))
+        ]
     if not uids:
         return
     uids = uids[: acc.max_list_per_run]
@@ -5253,7 +5262,7 @@ def _drain_list_folder(
                     "list_flip", msgid,
                     detail=f"kind={kind} pattern={parsed.pattern}",
                 )
-            else:
+            elif outcome == "inserted":
                 db.log_event(
                     "list_imap_add", msgid,
                     detail=f"kind={kind} pattern={parsed.pattern} outcome={outcome}",

@@ -451,3 +451,43 @@ def test_invalid_yaml_does_not_echo_the_password_line(tmp_path, bad_line):
 def test_unreadable_accounts_file_is_a_config_error(tmp_path):
     with pytest.raises(f.ConfigError):
         f.load_accounts(tmp_path / "missing.yml")
+
+
+# ----- FABLE-CR-023: a backed-off list drag is not re-fetched every pass ----
+
+
+class _BodyFetchLog(RecordingIMAP):
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.body_fetches: list[list[int]] = []
+
+    def fetch(self, uids, parts):
+        names = [p if isinstance(p, bytes) else str(p).encode() for p in parts]
+        if any(p in (b"BODY[]", b"BODY.PEEK[]") for p in names):
+            self.body_fetches.append(list(uids))
+        return super().fetch(uids, parts)
+
+
+def test_list_drag_waiting_on_learn_budget_is_not_refetched(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(actual_name="Test User", max_learns_per_hour=1)
+    with db.tx():
+        db.record_rate("learn")  # hourly budget already spent
+    monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: pytest.fail("no learn"))
+    raw = b"From: friend@example.com\r\nSubject: hi\r\nMessage-ID: <d1@x>\r\n\r\nb\r\n"
+    client = _BodyFetchLog(
+        existing=_all_existing(), search_uids=[3],
+        fetch_by_uid={3: {b"BODY[]": raw, b"FLAGS": ()}},
+    )
+    f.drain_list_allow(client, db, LOG, acc, FMAP)
+    f.drain_list_allow(client, db, LOG, acc, FMAP)
+    # The entry is written at once (IMAP drags persist immediately) ...
+    assert db.list_get("person", "Test User", "allow") == ["friend@example.com"]
+    # ... the message waits in the folder for its retry time ...
+    assert client.moved == []
+    assert client.body_fetches == [[3]]
+    # ... and the Events page gets one add, not one per pass.
+    adds = db.conn.execute(
+        "SELECT COUNT(*) FROM events WHERE event='list_imap_add'"
+    ).fetchone()[0]
+    assert adds == 1
