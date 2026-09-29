@@ -4692,6 +4692,15 @@ def _drain_train_folder(
         return
     due_uids: list[int] = []
     for uid, row in candidates:
+        if kind == "ham" and not (
+            row is not None
+            and row["our_action"] in (_HAM_INBOX_COPIED, _HAM_RESTORED)
+        ):
+            # The Inbox copy has not been made yet (the COPY failed, or this
+            # pass has not reached it). Leave the message in Train-Ham so a
+            # later pass copies it before it is learned or archived; this
+            # covers oversize mail, which the loop below archives unlearned.
+            continue
         if _learn_retry_due(row):
             due_uids.append(uid)
             if len(due_uids) >= per_run:
@@ -4722,16 +4731,6 @@ def _drain_train_folder(
                 message_id=msgid, sender=sender, subject=subject,
                 received_at=_internaldate_ts(data), body_sha256=sha,
             )
-        if kind == "ham":
-            fresh = db.get_imap_message(folder, uv, uid)
-            restored = (
-                fresh is not None
-                and fresh["our_action"] in (_HAM_INBOX_COPIED, _HAM_RESTORED)
-            )
-            if not restored:
-                # The Inbox copy has not been made yet. Leave the message
-                # in Train-Ham so a later pass can copy it before learning.
-                continue
         ok = try_learn(
             db, log, acc, raw, msgid, kind, reason=reason,
             folder=folder, uidvalidity=uv, uid=uid,
@@ -4882,10 +4881,21 @@ def _restore_train_ham_to_inbox(
     if not pending:
         return
     fetched: list[tuple[int, str, str]] = []
+    oversize_uids: list[int] = []
     for uid, data, oversize in fetch_under_cap(client, pending):
         if SHUTDOWN.is_set():
             return
         if oversize:
+            # Not downloaded, so no fingerprint and no duplicate check.
+            # COPY is server-side, and scan_inbox never scores or moves an
+            # oversize Inbox message, so the copy needs no hold. Without
+            # this the drain archived it to Trained-Ham with no Inbox copy
+            # and retention later moved it to Trash.
+            with db.tx():
+                db.upsert_imap_message(
+                    folder, uv, uid, received_at=_internaldate_ts(data),
+                )
+            oversize_uids.append(uid)
             continue
         raw = _body_bytes(data)
         if not raw:
@@ -4899,7 +4909,7 @@ def _restore_train_ham_to_inbox(
                 received_at=_internaldate_ts(data), body_sha256=sha,
             )
         fetched.append((uid, msgid or "", sha))
-    if not fetched:
+    if not fetched and not oversize_uids:
         return
     wanted = {(msgid, sha) for _uid, msgid, sha in fetched if msgid and sha}
     present = _identical_copies_in_folder(
@@ -4913,7 +4923,7 @@ def _restore_train_ham_to_inbox(
             folder, redact_log(str(ex), acc.password),
         )
         return
-    to_copy: list[int] = []
+    to_copy: list[int] = list(oversize_uids)
     for uid, msgid, sha in fetched:
         if msgid and sha and (msgid, sha) in present:
             with db.tx():

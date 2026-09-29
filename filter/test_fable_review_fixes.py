@@ -362,3 +362,65 @@ def test_list_drag_of_8bit_message_id_mail_still_records_the_sender(tmp_path, mo
     f.drain_list_allow(client, db, LOG, acc, FMAP)
     assert db.list_get("person", "Test User", "allow") == ["friend@example.com"]
     assert client.moved == [([3], FMAP["inbox"])]
+
+
+# ----- FABLE-CR-008: oversize Train-Ham still gets its Inbox copy -----------
+
+
+class _CopyFails(RecordingIMAP):
+    def copy(self, uids, dest):
+        from imapclient.exceptions import IMAPClientError
+        raise IMAPClientError("COPY failed")
+
+
+def _oversize_train_ham(cls=RecordingIMAP):
+    # No body stored: RecordingIMAP raises if a BODY fetch is attempted
+    # for an oversize UID, so this also proves the body is never pulled.
+    return cls(
+        existing=_all_existing(),
+        search_uids=[7],
+        fetch_by_uid={7: {b"RFC822.SIZE": f.MAX_FETCH_BYTES + 1, b"FLAGS": ()}},
+    )
+
+
+def test_oversize_train_ham_is_copied_to_inbox_then_archived(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account()
+    monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: pytest.fail("no learn"))
+    client = _oversize_train_ham()
+    f.drain_train_ham(client, db, LOG, acc, FMAP)
+    assert client.copied == [([7], FMAP["inbox"])]
+    assert client.moved == [([7], FMAP["trained_ham"])]
+    assert db.get_imap_message(FMAP["ham_train"], 1, 7)["our_action"] == "inbox_copied"
+
+
+def test_oversize_train_ham_stays_put_when_the_copy_fails(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account()
+    monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: pytest.fail("no learn"))
+    client = _oversize_train_ham(_CopyFails)
+    f.drain_train_ham(client, db, LOG, acc, FMAP)
+    assert client.moved == []
+
+
+def test_ordinary_train_ham_stays_put_when_the_copy_fails(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account()
+    monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: pytest.fail("no learn"))
+    client = _CopyFails(
+        existing=_all_existing(), search_uids=[7],
+        fetch_by_uid={7: {b"BODY[]": RAW_RESTORE, b"FLAGS": ()}},
+    )
+    f.drain_train_ham(client, db, LOG, acc, FMAP)
+    assert client.moved == []
+    assert db.get_imap_message(FMAP["ham_train"], 1, 7)["our_action"] is None
+
+
+def test_oversize_train_spam_is_still_archived_without_a_copy(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account()
+    monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: pytest.fail("no learn"))
+    client = _oversize_train_ham()
+    f.drain_train_spam(client, db, LOG, acc, FMAP)
+    assert client.copied == []
+    assert client.moved == [([7], FMAP["trained_spam"])]
