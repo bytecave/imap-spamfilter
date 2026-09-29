@@ -158,3 +158,81 @@ def test_literal_marker_message_id_does_not_hang_a_real_imap_session():
         assert client.search(["ALL"]) == []
     finally:
         srv.close()
+
+
+# ----- FABLE-CR-003: 8-bit addresses must not break the rspamd POST ---------
+
+RAW_8BIT_TO = (
+    b"From: a@b.com\r\nTo: <r\xc3\xafch@example.com>\r\n"
+    b"Subject: x\r\nMessage-ID: <m1@b.com>\r\n\r\nbody\r\n"
+)
+RAW_8BIT_FROM = (
+    b"From: <j\xc3\xb6rg@example.de>\r\nTo: u@example.com\r\n"
+    b"Subject: x\r\nMessage-ID: <m2@b.com>\r\n\r\nbody\r\n"
+)
+
+
+def test_first_recipient_skips_an_address_http_cannot_carry():
+    assert f.first_recipient(RAW_8BIT_TO, "u@example.com") == "u@example.com"
+    raw = b"From: a@b.com\r\nTo: <\xc3\xa9@x.com>\r\nCc: ok@x.com\r\n\r\nb\r\n"
+    assert f.first_recipient(raw, "u@example.com") == "ok@x.com"
+    assert f.first_recipient(b"To: plain@x.com\r\n\r\nb\r\n", "u@x") == "plain@x.com"
+
+
+def test_scan_request_headers_are_always_printable_ascii(monkeypatch):
+    captured: dict[str, str] = {}
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"score": 1.0, "action": "no action", "symbols": {}}
+
+    def fake_post(url, data=None, headers=None, timeout=None):
+        captured.clear()
+        captured.update(headers or {})
+        return _Resp()
+
+    monkeypatch.setattr(f.requests, "post", fake_post)
+    rcpt = f.first_recipient(RAW_8BIT_TO, "u@example.com")
+    assert f.rspamd_scan_detail(RAW_8BIT_TO, rcpt, 100.0, bayes_user="bytelord")
+    assert captured["Rcpt"] == "u@example.com"
+    assert captured["From"] == "a@b.com"
+    rcpt = f.first_recipient(RAW_8BIT_FROM, "u@example.com")
+    assert f.rspamd_scan_detail(RAW_8BIT_FROM, rcpt, 100.0, bayes_user="bytelord")
+    assert "From" not in captured
+    assert all(v.isascii() and v.isprintable() for v in captured.values())
+
+
+def test_8bit_addresses_scan_over_a_real_http_connection(monkeypatch):
+    """http.client encodes header values as Latin-1; before the fix this
+    raised UnicodeEncodeError and rspamd_scan_detail returned None on every
+    attempt, so the message halted the scan until the poison give-up."""
+    import http.server
+
+    class _H(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            body = b'{"score": 2.5, "action": "no action", "symbols": {}}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setattr(
+            f, "RSPAMD_SCAN_URL",
+            f"http://127.0.0.1:{srv.server_address[1]}/checkv2",
+        )
+        for raw in (RAW_8BIT_TO, RAW_8BIT_FROM):
+            rcpt = f.first_recipient(raw, "u@example.com")
+            result = f.rspamd_scan_detail(raw, rcpt, 100.0, bayes_user="bytelord")
+            assert result is not None and result.score == 2.5
+    finally:
+        srv.shutdown()

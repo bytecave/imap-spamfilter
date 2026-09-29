@@ -2418,6 +2418,8 @@ def rspamd_scan_detail(
 
     HTTP `From` is the message From address (rspamd treats it as
     envelope-from for SPF/DMARC). It is omitted when From is empty.
+    Either header is omitted when its value is not printable ASCII (raw
+    8-bit address bytes); rspamd still parses the MIME From/To itself.
     IMAP has no SMTP client IP — do not send `Ip` or `Helo`.
     Do not send HTTP `User`: rspamd treats that as an authenticated
     submission and skips DKIM/DMARC failure symbols.
@@ -2429,10 +2431,14 @@ def rspamd_scan_detail(
             rcpt = recipient
         else:
             rcpt = identity
-        headers: dict[str, str] = {"Rcpt": rcpt}
+        headers: dict[str, str] = {}
+        safe_rcpt = _http_header_safe(rcpt)
+        if safe_rcpt:
+            headers["Rcpt"] = safe_rcpt
         _msgid, _subject, sender = parse_envelope(raw)
-        if sender:
-            headers["From"] = sender
+        safe_sender = _http_header_safe(sender)
+        if safe_sender:
+            headers["From"] = safe_sender
         resp = requests.post(
             RSPAMD_SCAN_URL, data=posted, headers=headers, timeout=HTTP_TIMEOUT
         )
@@ -2921,12 +2927,28 @@ def _internaldate_ts(data: dict) -> int | None:
         return None
 
 
+def _http_header_safe(value: str | None) -> str | None:
+    """`value` if it can go out as an HTTP header value, else None.
+
+    Addresses come from the message. compat32 renders raw 8-bit header
+    bytes as U+FFFD or surrogate escapes, which http.client cannot encode
+    (it sends Latin-1), so the POST would fail on every attempt and the
+    message would look like an rspamd outage until the poison give-up.
+    """
+    if not value or not value.isascii() or not value.isprintable():
+        return None
+    if value != value.strip():
+        return None
+    return value
+
+
 def first_recipient(raw: bytes, fallback: str) -> str:
+    """First To/Cc address that can be sent as HTTP `Rcpt`, else `fallback`."""
     try:
         msg = email.message_from_bytes(raw, policy=email.policy.compat32)
         addrs = getaddresses(msg.get_all("To", []) + msg.get_all("Cc", []))
         for _name, addr in addrs:
-            if addr:
+            if _http_header_safe(addr):
                 return addr
     except Exception:
         pass
