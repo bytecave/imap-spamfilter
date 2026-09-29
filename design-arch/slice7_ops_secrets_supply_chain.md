@@ -97,7 +97,9 @@ File mode is `600`. `.env` next to Compose remains optional/dev-only.
 
 ## 6. Redis
 
-Keep `maxmemory-policy noeviction`, 1 GB, Bayes `expire = 0`. README:
+Keep `maxmemory-policy noeviction`, 1 GB, and no Bayes `expire` key at all
+(2026-09-29: `expire = 0` turned rspamd's Bayes expiry *on* and deleted rare
+tokens; see FABLE-CR-001). README:
 monitor Redis memory; raise `maxmemory` rather than evict. A full Redis
 fails **writes** (learns); it does not silently drop tokens.
 

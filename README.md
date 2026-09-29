@@ -676,9 +676,12 @@ Skip `rspamd/data/` and `redis-config/` (both regenerate — the latter is
 re-rendered by `bootstrap.sh` from the protected secrets file). Unraid's
 built-in **CA Backup** plugin pointed at the appdata path is sufficient.
 
-Redis is capped at 1 GB with `maxmemory-policy noeviction` and Bayes
-`expire = 0`. That is intentional: LRU would silently drop tokens and
-degrade accuracy. Monitor Redis memory (`INFO memory`); if it approaches
+Redis is capped at 1 GB with `maxmemory-policy noeviction`, and Bayes
+tokens never expire: `rspamd/local.d/classifier-bayes.conf` deliberately
+sets no `expire`. (Any number there, `0` included, switches on rspamd's
+Bayes expiry, and `0` deletes rare tokens every minute.) That is
+intentional: LRU or expiry would silently drop tokens and degrade
+accuracy. Monitor Redis memory (`INFO memory`); if it approaches
 the cap, raise `maxmemory` in `redis/redis.conf.template` and re-run
 bootstrap. A full Redis **fails writes** (learns), it does not evict.
 
