@@ -555,7 +555,7 @@ user's mailbox.
 | `mode` | `shadow` | `shadow` (no score moves, flags, rescues or retention; Train-*, list drags and `flag_untrained_junk` still act) \| `flag` \| `move` |
 | `threshold` | `8.0` | Inbox score >= this is moved to Junk in move mode |
 | `rescue_below` | `4.0` | provider Junk is moved to Inbox only when the first score is below this |
-| `flag_untrained_junk` | `false` | on mail newly arrived in Junk that has not been taught spam or ham, set Outlook's follow-up flag (`\Flagged`). Mail already in Junk is left alone. A user Inbox→Junk drag, and provider Junk that move mode is about to rescue, are not flagged |
+| `flag_untrained_junk` | `false` | on mail newly arrived in Junk that has not been taught spam or ham, set Outlook's follow-up flag (`\Flagged`). Mail already in Junk is left alone. A user Inbox→Junk drag, and provider Junk that move mode is about to rescue, are not flagged | **Warning:** with classic Outlook in Cached Exchange Mode, a flagged message that is later moved can be re-created in Junk as a sync conflict (seen 2026-09-29), so leave this off for those users.
 | `m365_auth_trust` | `true` | believe the top `Authentication-Results` header when Microsoft 365 stamped it: cancel the IMAP-path SPF/DKIM/DMARC failure penalties when it says pass, and use its spoof verdict for rescue and the allowlist flag. **Set `false` for any mailbox Microsoft 365 does not deliver to**: there, a sender could forge that header on top |
 | `min_threshold_allowed` | `5.0` | startup refuses to run if `threshold` is below this |
 | `reject_score_above` | `100.0` | scores outside `±this` are treated as failed scan |

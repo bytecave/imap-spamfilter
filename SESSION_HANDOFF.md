@@ -53,6 +53,25 @@ From the live rspamd log (read-only):
 - A plain `--all-trained` re-feed returns 208 ("already") from rspamd's learn cache and restores nothing.
 - Rebuilding the notebook (backup, clear the `bytelord` notebook including its learn cache, re-feed Trained-*) is an **operator decision**.
 
+### `flag_untrained_junk` turned OFF (2026-09-29 12:41 Pacific): it made Outlook bounce mail back to Junk
+
+**Symptom.** In steve_rjmetalfab, mail dragged out of Junk (to the Inbox, or to Train-Spam) reappeared in Junk after a few seconds, often as 2–4 copies.
+
+**Root cause, proven by tests and a new per-command IMAP audit log (`imap_audit` lines, commit `b2743be`):**
+- The filter never sent a command moving anything to Junk.
+- The copies are made by **Outlook in Cached Exchange Mode** resolving sync conflicts. Steve's `Sync Issues/Conflicts` folder has 59 entries for messages from 09-28/29, and they are the bounced ones.
+- The trigger was the filter's `\Flagged` STORE on new untrained Junk (`flag_untrained_junk`, live since 09-28 19:22). Outlook turns the flag into a follow-up task, which is a local change it cannot reconcile once the item moves on the server. It then re-creates the item in Junk; the filter flagged each new copy, and the loop continued.
+
+**The controlled test.** 3 never-flagged Junk messages moved to Trained-Spam stayed. 2 filter-flagged ones bounced and doubled. Removing the IMAP flag afterwards did **not** stop the bounce, because the conflict lives in that Outlook's local cache.
+
+**Done.**
+- `defaults.flag_untrained_junk: false` in the live `accounts.yml`, and the filter restarted. No new flags are set.
+- The filter-set flags still on old Junk items were left alone. Removing them does not fix the bounce, and every server-side change on those items risks another conflict.
+
+**Still needed, on the PC(s) running classic Outlook for steve@rjmetalfab.com.** Right-click **Junk Email → Properties → Clear Offline Items**, then let it re-sync. If it persists, rebuild that Outlook's OST. Only Steve's mailbox shows new conflicts.
+
+Some duplicate copies of bounced messages, including a few made by the debugging tests, remain in Steve's Junk. The Leslie Harms "Purchase Order #3149955" is in his Inbox, learned as ham.
+
 ### Trained-* retention: 60 days from arrival (live 2026-09-29 10:39 Pacific)
 
 `defaults.trained_retention_days: 60` is in the live `accounts.yml`. rich_bytecave's temporary `0` was removed. Trained-* ages now count from when the filter first saw the message in that folder (new `trained_arrival` table), not from delivery. Without that, 60 days would have swept ~311 of the just-rescued messages at once.
