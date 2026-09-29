@@ -1041,6 +1041,9 @@ def _rspamd_stats() -> dict | None:
             f"{RSPAMD_CONTROLLER_URL}/stat",
             headers={"Password": password},
             timeout=3,
+            # requests re-sends custom headers (Password) to a redirect
+            # target; the controller never redirects, so refuse it.
+            allow_redirects=False,
         )
         if r.status_code != 200:
             return None
