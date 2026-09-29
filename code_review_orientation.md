@@ -8,7 +8,7 @@ Read [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) and [`SESSION_HANDOF
 
 ## What this review is
 
-A read-only pass over the filter as it runs on ByteLord: Python IMAP worker, dashboard, rspamd local config, and the deploy files that put them there. Report defects, unsafe defaults, and places where the code does not match the policy in `IMPLEMENTATION_STATUS.md`. Do not fix them in the same pass unless the operator asks.
+A pass over the filter as it runs on ByteLord: Python IMAP worker, dashboard, rspamd local config, and the deploy files that put them there. Find defects, unsafe defaults, and places where the code does not match the policy in `IMPLEMENTATION_STATUS.md`, then fix those in the tree and cover them with tests. A report with no code change is unfinished for any issue you are sure is a defect.
 
 The Outlook add-in is the work that comes **after** this review. `outlook-addin/outlook_spam_addin_requirements.md` describes a classic-Outlook VSTO ribbon that only moves or copies messages into the existing Train-*, Allowlist, and Blocklist folders. It does not call this filter. There is no add-in project, manifest, or installer in the tree yet. A missing binary is not a finding. Do not start the add-in during the review, and do not review those notes as if they were running code.
 
@@ -17,7 +17,7 @@ The Outlook add-in is the work that comes **after** this review. `outlook-addin/
 - Do not wipe Bayes, flush Redis, or delete `NEURAL_*` / Bayes keys. Restore point, if ever needed: `/opt/bytelord/data/imap-spamfilter/redis/dump.rdb.bak-20260928-before-rich-move` and `appendonlydir.bak-20260928-before-rich-move`. AOF is on; a restore needs Redis stopped and both pieces.
 - Do not `docker compose down` the Redis container.
 - Do not change `mode` on any account. `rich_bytecave` is the only `mode: move` mailbox. The other nine stay `shadow`.
-- Do not rebuild or restart `spamfilter`, rspamd, or the proxy unless the operator asks. The running image was built at 19:22 Pacific and already contains this evening's code.
+- Do not rebuild or restart `spamfilter`, rspamd, or the proxy unless the operator asks. Fixes stay in the git tree until then. The running image was built at 19:22 Pacific and already contains this evening's code.
 - Do not move, delete, expunge, or learn live mail as part of the review.
 - Do not print secrets. `accounts.yml` is gitignored and holds the proxy password (a dummy `LOGIN` password, not the Microsoft token). Do not `cat` it, the secrets env file, or Redis `requirepass`. Do not paste message bodies from live mailboxes into the report; a Message-ID, score, and symbol list is enough.
 - Do not commit unless the operator asks.
@@ -80,8 +80,14 @@ docker run --rm -v "$PWD/filter":/src/filter -w /src/filter python:3.12-slim \
   sh -c 'pip install -q pytest==8.4.2 && python -m pytest -q'
 ```
 
-Last full run before this document: 429 passed. A review that adds no code does not need to re-run them.
+Last full run before this document: 429 passed. Re-run the suite after your fixes.
+
+## Fixes are part of the review
+
+For each defect you are confident about, change the code and add or update a test in the same pass. Run the Docker pytest command above before you call the review done. Leave a policy disagreement you are not treating as a defect as a written recommendation, not a code change.
+
+Do not widen a fix into a refactor, a mode promotion, a Bayes wipe, or the Outlook add-in. Commit and push only when the operator asks. Do not deploy the fixes onto the live containers unless the operator asks.
 
 ## What a useful report looks like
 
-Group findings by severity. For each one, name the function, what an attacker or a normal mailbox can make it do, and whether it is reachable in shadow, in move mode, or only from the dashboard. Separate "does not match the written policy" from "policy I would change." Do not include a patch unless the operator asks for one.
+Group findings by severity. For each one, name the function, what an attacker or a normal mailbox can make it do, whether it is reachable in shadow, in move mode, or only from the dashboard, and what you changed. Separate "does not match the written policy" (fix it) from "policy I would change" (recommend only).

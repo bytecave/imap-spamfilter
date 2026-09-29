@@ -442,7 +442,7 @@ Ham training **cannot** cancel A/B auth-header symbols when they still fire (unt
 
 ## What’s next (suggested order)
 
-1. **Full code and security review.** Start at [`code_review_orientation.md`](code_review_orientation.md). Read-only unless the operator asks for a fix.
+1. **Full code and security review, including fixes.** Start at [`code_review_orientation.md`](code_review_orientation.md). Fix confirmed defects in the tree with tests. Do not deploy unless the operator asks.
 2. **Outlook add-in remains planned.** Requirements and setup notes are in `outlook-addin/` (`d988d40`). There is no add-in code yet. Do not treat that as a filter defect, and do not start the add-in until the review is done.
 3. **`rich_bytecave` is in `move`.** The first retention sweep (01:26 Pacific) moved 101 Trained-Spam and 500 Trained-Ham older than ~8 days to Deleted Items. Default `trained_retention_days` is 7, so later hourly sweeps of up to 500 may have continued. Do not promote any other account. CR-014 Inbox→Junk leftover check is still open.
 4. **CR-004 / neural: done and closed.** It stays off. See "Neural: why it stays off" before proposing any change.
