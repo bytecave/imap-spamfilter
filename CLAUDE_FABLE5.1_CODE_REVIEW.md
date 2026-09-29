@@ -616,7 +616,7 @@ The live events table has **1,561 `conn_error` "idle_done failed"** rows in 7 da
 
 ## Recommended new tests
 
-These are tests that do not exist today. Items 1–8 are planned to land with the fixes; [`CLAUDE_FABLE5.1_CODE_FIXED.md`](CLAUDE_FABLE5.1_CODE_FIXED.md) records which ones did. Items 9–10 are recommendations only.
+These are tests that do not exist today. Items 1–9 landed with the fixes; [`CLAUDE_FABLE5.1_CODE_FIXED.md`](CLAUDE_FABLE5.1_CODE_FIXED.md) maps each one to its commit. Item 10 is a recommendation only.
 
 1. `_identical_copies_in_folder` with Message-IDs `abc{5}`, `a\r\n b@x`, `a"b`, `jörg@x` (via `U+FFFD`): no SEARCH is sent, the result is empty, and nothing raises. A Train-Spam leftover with such an ID is kept, not expunged, and the drain returns normally.
 2. `rspamd_scan_detail` with a raw 8-bit To, Cc and From. Capture the headers passed to `requests.post` and assert every value is printable ASCII. `first_recipient` skips the unsafe address and falls back to the mailbox. An end-to-end check against a local HTTP stub returns a score.
@@ -626,7 +626,7 @@ These are tests that do not exist today. Items 1–8 are planned to land with th
 6. Dashboard: a POST whose hidden scope/kind differ from the navigation controls writes to the loaded list; a stale snapshot returns 409 and writes nothing; a wrong CSRF token (ASCII and non-ASCII) returns 400; a leading blank line keeps the caret line; an authenticated 1,000-line Save over 16 KiB succeeds.
 7. User-add helper scope parsing: `","`, `"|"` and `" , "` exit with an error.
 8. A config test that fails when `rspamd/local.d/classifier-bayes.conf` sets `expire` to a non-negative number (FABLE-CR-001); a `Pass: all` header assertion (FABLE-CR-004); invalid YAML containing a sentinel password raises `ConfigError` whose text does not contain it (FABLE-CR-013); `bootstrap_train.py` exits non-zero for a missing source folder and zero when the only skip is an oversize Trained-* message (FABLE-CR-020).
-9. **Not added (recommended):** a `/messages` escaping test with `<script>` in the subject, `"><img>` in the sender and `<b>` in a `score_detail` symbol; a POST `/logout` test; a `list_dashboard_save` event assertion.
+9. *(Added in the fix pass after all, commit `1473c14`.)* A `/messages` escaping test with `<script>` in the subject, `"><img>` in the sender and `<b>` in a `score_detail` symbol; a POST `/logout` test; a `list_dashboard_save` event assertion.
 10. **Not added (recommended):** a scan-to-move test in move mode that runs `drain_train_ham → scan_inbox → execute_due_moves` in one pass with the real imapclient return types, to prove the hold end to end.
 
 ## Controls checked and found correct

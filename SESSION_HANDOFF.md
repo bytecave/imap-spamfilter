@@ -1,6 +1,6 @@
 # Session handoff — imap-spamfilter (ByteLord VPS)
 
-**Last updated:** 2026-09-28 19:22 Pacific — Train-Ham returns a copy to the Inbox; untrained new Junk is flagged; next is a code/security review, then the Outlook addon  
+**Last updated:** 2026-09-29 Pacific — the Claude Fable 5.1 code and security review is done, and its fixes are committed and pushed but **not deployed**. Deploy the Bayes-expiry fix first. Then comes the Outlook add-in.  
 **Repo:** `/opt/bytelord/projects/imap-spamfilter`  
 **Remote:** `github.com:bytecave/imap-spamfilter.git` (branch `main`)  
 **Upstream fork of:** marcelverdult/imap-spamfilter  
@@ -29,14 +29,80 @@ Also read `/home/bytecave/.claude/CLAUDE.md` (Cursor user rule) and use Agent Ma
 
 ---
 
-## Where we left off (2026-09-28 19:22 Pacific) — CONTINUE HERE
+## Where we left off (2026-09-29) — CONTINUE HERE
+
+**The full code and security review is done.** Claude Fable 5.1 reviewed `main` at `f53586a`:
+- **32 findings**, traced requirement → test, in [`CLAUDE_FABLE5.1_CODE_REVIEW.md`](CLAUDE_FABLE5.1_CODE_REVIEW.md).
+- **25 fixed in the tree**, each with regression tests, one commit per fix: [`CLAUDE_FABLE5.1_CODE_FIXED.md`](CLAUDE_FABLE5.1_CODE_FIXED.md).
+- Full Docker suite: **487 passed**, up from 429. 47 of the new tests fail on the pre-review code.
+
+**Nothing is deployed.** The live containers still run the 2026-09-28 19:22 image and the old rspamd config. `rich_bytecave` is still the only `mode: move` account, and nothing about modes, Bayes contents or live mail was changed.
+
+### Deploy first: rspamd has been deleting Bayes tokens (FABLE-CR-001)
+
+`expire = 0` in `rspamd/local.d/classifier-bayes.conf` does **not** mean "never expire". In rspamd 4.2.0 any number turns on the `bayes_expiry` module, and 0 makes it run `EXPIRE key 0` every minute on rare, one-class tokens, which deletes them.
+
+From the live rspamd log (read-only):
+- About **374,700 tokens deleted** since 2026-09-23, 361,000 of them on 2026-09-25, the retrain3 day.
+- The notebook now has about 13,800 token keys.
+- This is the unexplained 78,042 → 60,919 `RS*` drop noted on 2026-09-25.
+
+**What the fix does and does not do.**
+- The commit removes the line. Copy the file into the live `local.d` and restart `spamfilter-rspamd`; the commands are in `CLAUDE_FABLE5.1_CODE_FIXED.md` § "Deploying these fixes". Redis is not touched.
+- Tokens already deleted do **not** come back.
+- A plain `--all-trained` re-feed returns 208 ("already") from rspamd's learn cache and restores nothing.
+- Rebuilding the notebook (backup, clear the `bytelord` notebook including its learn cache, re-feed Trained-*) is an **operator decision**.
+
+### Then rebuild `spamfilter`
+
+1. Diff, back up and copy `deploy/bytelord-compose.yaml` to the live compose. The filter image is now tagged `imap-spamfilter:bytelord` (FABLE-CR-010), not the upstream author's registry name.
+2. Build and recreate `spamfilter` with `SPAMFILTER_UID=1001 SPAMFILTER_GID=1001`, as in the runbooks below.
+3. Leave Redis alone.
+
+**Scores will change for high-scoring mail.** Scans now send `Pass: all` (FABLE-CR-004), so rspamd no longer stops evaluating at `reject = 15`.
+
+### Test these first (human + Cursor), highest risk first
+
+| # | Fix | What to check |
+|---|---|---|
+| 1 | **FABLE-CR-001** Bayes expiry off | After the rspamd restart, `docker logs --since 10m spamfilter-rspamd 2>&1 \| grep -c "finished expiry"` → **0**. Record the `RS*_*` key count (`redis-cli --scan --pattern 'RS*_*' \| wc -l`, with `REDISCLI_AUTH` as in V3), Train-Spam a few messages, and check a day later that the count only grew. |
+| 2 | **FABLE-CR-004** `Pass: all` | For a day, watch `rich_bytecave` mail that scores near **8** (Inbox→Junk) and under **4** (provider-Junk rescue). `explain_score.py` on a message that used to score ≥ 15 should list more symbols (DMARC, fuzzy, RBL/URL rules) than its old `score_detail`. Report any legitimate mail newly over 8. |
+| 3 | **FABLE-CR-009** Train-Ham of Junk mail | In `rich_bytecave`, drag a mis-junked message **from Junk** to Train-Ham. It must appear in the Inbox and **stay**. On the dashboard its Inbox row shows a score and `ham_restored`, with no `pending_ham` event. Repeat with a test sender you put on the User block list: in move mode that copy goes back to Junk. |
+| 4 | **FABLE-CR-006 / 007** list editor | On User lists, save a typo (400), click the other Allow/Block option, press Cancel at the prompt, fix the typo and Save. The text must land in the list you had loaded. Open the same list in two tabs and Save in each: the second gets **409** "changed after you opened it" and writes nothing, and saving again overwrites on purpose. Also try a Save after an Outlook Blocklist drag landed while the page was open. |
+| 5 | **FABLE-CR-008** oversize Train-Ham | Drop a message **over 5 MiB** into Train-Ham. A copy appears in the Inbox, and the Train-Ham message moves to Trained-Ham. |
+| 6 | **FABLE-CR-002 / 003** hostile headers | Nothing to trigger live. `scan_failed` / `scan_giveup` stay at 0. An occasional `not safe to search` info line in `docker logs spamfilter` is expected and harmless. |
+| 7 | **FABLE-CR-010** image name | After the deploy, `docker inspect -f '{{.Config.Image}}' spamfilter` → `imap-spamfilter:bytelord`. |
+| 8 | Tools | `bootstrap_train.py rich_bytecave NoSuchFolder spam --dry-run` exits **1**. `explain_score.py <acct> --message-id '<id>'` still explains a known message. |
+
+### Operator decisions from this review (not changed in code)
+
+- Rebuilding the Bayes notebook after the FABLE-CR-001 deploy (see above).
+- **FABLE-CR-005:** Unbound forwards all DNS to Cloudflare, so Spamhaus and URIBL refuse the queries (`*_BLOCKED*` on 237 of 370 recent scans). Real recursion would turn those blocklists on, which is a scoring change. The steps are in the review.
+- **FABLE-CR-011:** trust in Microsoft `Authentication-Results` is global. Make it per account before adding any non-M365 mailbox.
+- **FABLE-CR-030** `DASHBOARD_COOKIE_SECURE`, **OPUS-CR-023** `DASHBOARD_TRUSTED_PROXIES`, and **FABLE-CR-032** rspamd hardening (`allow_file_and_shm_inputs = false`, a separate controller enable password).
+- Still open from before: CR-014 and CR-019.
+
+### Supermemory
+
+This session could not reach Supermemory (authentication failed), so nothing was captured there. When it is available, add project memories for:
+- `expire = 0` enables rspamd Bayes expiry; about 374k tokens deleted, 2026-09-23 → 09-29;
+- `Pass: all` on `/checkv2`;
+- Unbound forwards to Cloudflare, so RBLs are blocked;
+- Train-Ham copies of Junk mail were handled as user reverts;
+- the review/fix file names.
+
+### After that
+
+The Outlook add-in (`outlook-addin/`), built on the Windows desktop clone.
+
+## Previously: where we left off (2026-09-28 19:22 Pacific)
 
 `rich@bytecave.net` (`rich_bytecave`) is the only account in **`mode: move`**. The other nine stay **`shadow`**. `move_grace_seconds` is **0**. The `spamfilter` image was rebuilt from this tree at 19:22 Pacific and the container was recreated. All ten accounts reconnected. Full suite: **429 passed**.
 
 ### What landed this evening
 
 1. **Untrained Junk follow-up flag.** `flag_untrained_junk: true` is in the live `accounts.yml` defaults (that file is gitignored). Builtin default remains false. Every account, including shadow, flags Junk that is **new above the Junk bookmark** and has not been taught (`learned_as` or `pending_learn` of spam/ham, on that row or a same-body sibling). Filter-owned Junk and provider Junk that stays are flagged. A user Inbox→Junk drag is not, because that drag is the spam teach. On `rich_bytecave`, provider Junk that is about to be rescued (score under 4, or allow) is not flagged. Mail already in Junk when the setting was turned on was not backfilled. Event: `junk_untrained_flagged`. Exchange exposes only `\Flagged` (the red follow-up flag).
-2. **Train-Ham returns a copy to the Inbox.** On seeing a message in Train-Ham, the filter `COPY`s it to the Inbox before `try_learn`, stores the unchanged body's SHA-256 (`our_action=inbox_copied`), and when UIDPLUS returns the new UID marks that Inbox row `ham_restored`. The learn then still MOVEs the Train-Ham message to Trained-Ham. The Inbox copy stays even when the score is 8 or higher. A block-list hit still sends it to Junk. A byte-identical copy already in the Inbox is not copied a second time. The copy runs even if the hourly learn budget is spent. A failed copy leaves the message in Train-Ham and skips the learn that pass. Older ham (including the accidental Trained-Ham reversal) does **not** hold a new Inbox copy, because those rows have no `inbox_copied` mark. Train-Spam does not copy to the Inbox.
+2. **Train-Ham returns a copy to the Inbox.** On seeing a message in Train-Ham, the filter `COPY`s it to the Inbox before `try_learn`, stores the unchanged body's SHA-256 (`our_action=inbox_copied`), and when UIDPLUS returns the new UID marks that Inbox row `ham_restored`. *(Correction 2026-09-29: that UIDPLUS pre-mark never ran, because imapclient returns no COPYUID for UID COPY. The hold works by body fingerprint in `scan_inbox`; see FABLE-CR-009.)* The learn then still MOVEs the Train-Ham message to Trained-Ham. The Inbox copy stays even when the score is 8 or higher. A block-list hit still sends it to Junk. A byte-identical copy already in the Inbox is not copied a second time. The copy runs even if the hourly learn budget is spent. A failed copy leaves the message in Train-Ham and skips the learn that pass. Older ham (including the accidental Trained-Ham reversal) does **not** hold a new Inbox copy, because those rows have no `inbox_copied` mark. Train-Spam does not copy to the Inbox.
 3. **`@kickstarlaunch.com` domain block** is live in SQLite for `bytecave.net`, `bytelord.net`, `eizenhoefer.net`, and `rjmetalfab.com`. It is not in git. New mail is routed by the list (move mode to Junk, shadow logs only) and is not Bayes-learned from the list hit alone. Copies already scored before the insert were left where they were.
 
 ### Still in force from this morning
@@ -45,7 +111,7 @@ Also read `/home/bytecave/.claude/CLAUDE.md` (Cursor user rule) and use Agent Ma
 
 ### Next
 
-1. Another agent does a **full code and security review and fixes what it confirms**. Start at [`code_review_orientation.md`](code_review_orientation.md). Do not deploy, rebuild, or change live mail during that review unless the operator asks.
+1. ~~Another agent does a full code and security review and fixes what it confirms.~~ **Done 2026-09-29** (Claude Fable 5.1). See the continue-here section above.
 2. The **Outlook add-in is still planned.** `outlook-addin/` holds the requirements and setup notes (`d988d40`). Building it waits until after the review.
 3. CR-014 (Inbox→Junk MOVE-as-COPY leftover) is still open. CR-019 `Rcpt` and `DASHBOARD_TRUSTED_PROXIES` are still open.
 

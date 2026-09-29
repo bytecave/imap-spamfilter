@@ -1,6 +1,6 @@
 # Implementation status — imap-spamfilter (ByteLord)
 
-**Last updated:** 2026-09-28 19:22 Pacific (Train-Ham Inbox copy and untrained-Junk follow-up flag are live; next is a full code/security review, then the planned Outlook addon)  
+**Last updated:** 2026-09-29 Pacific. The Claude Fable 5.1 code and security review is **done**: 32 findings, 25 fixed in the tree, **none deployed yet**. Deploy the Bayes-expiry fix (FABLE-CR-001) first. Then the planned Outlook add-in.  
 **Audience:** brand-new agent sessions (Cursor / Claude Code / Codex) with no prior chat memory.  
 **Companion:** [`SESSION_HANDOFF.md`](SESSION_HANDOFF.md) (short “where we left off”; this file is the durable product/deploy/agent map).
 
@@ -20,7 +20,7 @@ Then follow **Agent onboarding** below.
 
 ## Snapshot in one paragraph
 
-Self-hosted IMAP spam filter (Python + Rspamd + Redis + Unbound) on ByteLord. Mailboxes authenticate through sibling **`email-oauth2-proxy`** (XOAUTH2 to M365); this filter speaks plain IMAP `LOGIN` to the proxy. Allow/block lists + one shared Bayes notebook (`defaults.bayes_user: bytelord`) are live. **`rich_bytecave` (rich@bytecave.net) is `mode: move` as of 2026-09-28 01:26 Pacific. The other nine accounts stay `shadow`.** `move_grace_seconds` is 0. Score-based moves do **not** train Bayes. **`flag_untrained_junk` is true in the live `accounts.yml` defaults**, so all ten accounts set the follow-up flag on Junk mail that is new since the Junk bookmark and has not been taught. **Train-Ham** copies the message to the Inbox before learning, then still archives the Train-Ham message in Trained-Ham; that Inbox copy is not score-moved to Junk. Subdomain `@host` matching and `url_suspect` `word_dots = false` are committed and in the running image (rebuilt 2026-09-28 19:22 Pacific). `@kickstarlaunch.com` is on the domain block list for all four roster domains (SQLite only; not in git). Neural stays off. Bayes was not wiped. **Next: a full code and security review (`code_review_orientation.md`), then the planned Outlook add-in. Do not promote other accounts. Do not wipe Bayes.** The add-in is specified in `outlook-addin/` and has no code yet.
+Self-hosted IMAP spam filter (Python + Rspamd + Redis + Unbound) on ByteLord. Mailboxes authenticate through sibling **`email-oauth2-proxy`** (XOAUTH2 to M365); this filter speaks plain IMAP `LOGIN` to the proxy. Allow/block lists + one shared Bayes notebook (`defaults.bayes_user: bytelord`) are live. **`rich_bytecave` (rich@bytecave.net) is `mode: move` as of 2026-09-28 01:26 Pacific. The other nine accounts stay `shadow`.** `move_grace_seconds` is 0. Score-based moves do **not** train Bayes. **`flag_untrained_junk` is true in the live `accounts.yml` defaults**, so all ten accounts set the follow-up flag on Junk mail that is new since the Junk bookmark and has not been taught. **Train-Ham** copies the message to the Inbox before learning, then still archives the Train-Ham message in Trained-Ham; that Inbox copy is not score-moved to Junk. Subdomain `@host` matching and `url_suspect` `word_dots = false` are committed and in the running image (rebuilt 2026-09-28 19:22 Pacific). `@kickstarlaunch.com` is on the domain block list for all four roster domains (SQLite only; not in git). Neural stays off. Bayes was not wiped. **The full code and security review is done (2026-09-29, `CLAUDE_FABLE5.1_CODE_REVIEW.md` / `CLAUDE_FABLE5.1_CODE_FIXED.md`), and its fixes are committed but not deployed.** The most important finding: `expire = 0` in `classifier-bayes.conf` had switched rspamd's Bayes expiry *on*, deleting about 374,700 rare tokens since 2026-09-23. **Next: deploy that config fix and rebuild `spamfilter` (SESSION_HANDOFF "continue here"), decide whether to rebuild the Bayes notebook, then the planned Outlook add-in. Do not promote other accounts. Do not wipe Bayes without that decision.** The add-in is specified in `outlook-addin/` and has no code yet.
 
 ---
 
@@ -144,6 +144,27 @@ Live config: **`rich_bytecave` is `move`**; every other account is **shadow**. `
 - Phase 2 Bayes wipe + `bootstrap_train.py --all-trained` (ops history).
 - Contradictory learn skip (`learn_skipped_list`) for allow+spam / block+ham.
 
+### 2026-09-29 session (Claude Fable 5.1 code and security review, on ByteLord)
+
+1. **Review.** I read the docs and plans oldest to newest, all of `filter.py`, and (with two read-only subagents) the dashboard, the CLIs, rspamd `local.d` against the rspamd 4.2.0 sources, compose and CI. Live checks were read-only: SQLite `?mode=ro`, `docker logs`, one Unbound config file, and two non-secret environment variables. 32 findings, traced requirement → architecture → acceptance → code → tests, are in [`CLAUDE_FABLE5.1_CODE_REVIEW.md`](CLAUDE_FABLE5.1_CODE_REVIEW.md).
+2. **High findings.**
+   - **FABLE-CR-001:** `expire = 0` enabled rspamd Bayes expiry, and about 374,700 tokens were deleted. This is the cause of the 78,042 → 60,919 `RS*` drop.
+   - **FABLE-CR-002:** a Message-ID ending in `{n}` made the Train leftover, Train-Ham and list drains hang the IMAP session, which wedged the account's loop on every pass.
+   - **FABLE-CR-003:** an 8-bit From or first To/Cc address made every rspamd POST fail, which stalled the scan for 10+ minutes and then left the message unscored.
+3. **Fixed (25, one commit each, with tests).** The details are in [`CLAUDE_FABLE5.1_CODE_FIXED.md`](CLAUDE_FABLE5.1_CODE_FIXED.md). Behaviour changes to know about:
+   - scans send `Pass: all`;
+   - a Train-Ham copy of Junk mail is held as `ham_restored` and still block-list-checked;
+   - oversize Train-Ham is copied to the Inbox;
+   - a dashboard list Save writes only the loaded list and returns 409 if it changed meanwhile;
+   - the ByteLord image is tagged `imap-spamfilter:bytelord`.
+4. **Not changed (operator decisions):**
+   - rebuilding the Bayes notebook;
+   - Unbound recursion (FABLE-CR-005: Spamhaus/URIBL are refused through Cloudflare today);
+   - per-account M365 AR trust (FABLE-CR-011);
+   - dashboard cookie `Secure`;
+   - rspamd hardening.
+5. **Tests:** 429 → **487 passed**. 47 of the new tests fail against the pre-review `f53586a`.
+
 ### 2026-09-25 session (Claude Opus 5.5 extra code review — cloud session, no VPS access)
 
 1. **Review:** read every doc in order (upstream README, the 27-document chronological archive, ChatGPT CR, README, this file, and the handoff), then every source/config file. Findings are traced requirement → architecture → acceptance → implementation → tests in [`CLAUDE_OPUS5.5_EXTRA_CODE_REVIEW.md`](CLAUDE_OPUS5.5_EXTRA_CODE_REVIEW.md). Key claims were reproduced with scripts, or checked against rspamd 4.2.0, waitress 3.0.2, and imapclient 3.1.0 source.
@@ -207,7 +228,7 @@ Full plan at `~/.cursor/plans/rspamd_4.2.0_upgrade_and_webui_link_18e83c16.plan.
 | Precedence | user address → user `@host` → domain address → domain `@host`; `@host` includes subdomains and the longer host wins within that step; allow wins only on true tie. **Live** since the 2026-09-28 image rebuild (`8d310b9` and later). |
 | `URL_OBFUSCATED_TEXT` word-dot *(2026-09-28)* | **Live and committed.** `rspamd/local.d/url_suspect.conf` sets `word_dots = false` so “Green Dot Bank” is not scored as a URL (+9). Other obfuscation patterns stay on. |
 | `flag_untrained_junk` *(2026-09-28 evening)* | Builtin default **false**. Live `accounts.yml` defaults set it **true for all ten accounts**, including shadow. New Junk UIDs above the bookmark that have not been taught get the single `\Flagged` follow-up flag. Mail already at or below the bookmark is left alone. A user Inbox→Junk drag (pending or completed spam learn) is not flagged. Move-mode rescues that are about to leave Junk are not flagged. |
-| Train-Ham restore *(2026-09-28 evening)* | Before ham learn, `COPY` the Train-Ham message to the Inbox and store a SHA-256 fingerprint (`our_action=inbox_copied` on the Train-Ham row; `ham_restored` on the Inbox row). Message bytes are not edited. An identical copy already in the Inbox is not copied again. Successful learn still MOVEs the Train-Ham message to Trained-Ham. `scan_inbox` stores the score but does not shadow, flag, or queue Junk for that Inbox copy. A block-list hit still forces Junk. Older ham teaches that lack `inbox_copied` are not held. Train-Spam is unchanged. The copy runs even when the hourly learn budget is spent; a failed copy leaves the message in Train-Ham and skips the learn that pass. |
+| Train-Ham restore *(2026-09-28 evening; corrected 2026-09-29)* | Before ham learn, `COPY` the Train-Ham message to the Inbox and store a SHA-256 fingerprint (`our_action=inbox_copied` on the Train-Ham row; `scan_inbox` marks the Inbox copy `ham_restored` when it recognises that fingerprint). There is no UIDPLUS pre-mark: imapclient returns no COPYUID. The restore is recognised *before* the Junk→Inbox revert check, so a copy of mail that sat in Junk is scored, list-checked and held, not learned twice. Only its first Inbox arrival counts. Oversize mail is COPYed without a fingerprint, and ham stays in Train-Ham until its copy exists (FABLE-CR-008/009). Message bytes are not edited. An identical copy already in the Inbox is not copied again. Successful learn still MOVEs the Train-Ham message to Trained-Ham. `scan_inbox` stores the score but does not shadow, flag, or queue Junk for that Inbox copy. A block-list hit still forces Junk. Older ham teaches that lack `inbox_copied` are not held. Train-Spam is unchanged. The copy runs even when the hourly learn budget is spent; a failed copy leaves the message in Train-Ham and skips the learn that pass. |
 | `@kickstarlaunch.com` *(2026-09-28)* | Domain block on `bytecave.net`, `bytelord.net`, `eizenhoefer.net`, and `rjmetalfab.com` (live SQLite, not git). Covers that host and subdomains. List hit overrides routing and does not Bayes-learn. Move mode sends new mail to Junk; shadow only logs it. Mail already scored before the insert was not re-routed. |
 | Allowlist drag | Upsert/flip + **ham learn** + MOVE → **Inbox** |
 | Blocklist drag | Upsert/flip + **spam learn** + MOVE → **Junk** |
@@ -222,6 +243,9 @@ Full plan at `~/.cursor/plans/rspamd_4.2.0_upgrade_and_webui_link_18e83c16.plan.
 | Rspamd fuzzy *(2026-09-25)* | Stock `rspamd.com` rule (local file is comments only). Before CR-029 it never loaded. |
 | Rspamd neural *(2026-09-25)* | `autotrain = false`; neural Redis keys deleted during deploy → no `NEURAL_*` score. **Stays off by decision** (next section). |
 | Caps | `max_list_per_run=100`, `max_list_entries=1000` |
+| Bayes token lifetime *(2026-09-29)* | Tokens never expire. `classifier-bayes.conf` must not set `expire`: any number turns on rspamd's `bayes_expiry`, and `0` deletes rare tokens (FABLE-CR-001; `test_config_files.py` guards it). **Not deployed yet.** |
+| rspamd evaluation *(2026-09-29)* | `/checkv2` sends `Pass: all`, so every rule runs even past `reject = 15`. `actions.conf` is then truly cosmetic (FABLE-CR-004). **Not deployed yet.** |
+| Dashboard list Save *(2026-09-29)* | Writes only the (scope, kind) the page loaded (hidden fields). If the list or its sibling changed since the page was opened, it returns 409 and writes nothing (FABLE-CR-006/007). **Not deployed yet.** |
 
 Older docs that say “list hits skip `/checkv2`” or “both list drains MOVE to Inbox” are **stale** — trust this file + `README.md` + `filter/filter.py`.
 
@@ -252,7 +276,7 @@ rspamd 4.2.0 neural can also take LLM/embedding "providers" that read message *c
 
 ## Live VPS state
 
-**Filter container:** local image tag `ghcr.io/marcelverdult/imap-spamfilter:latest` (baked from `/opt/bytelord/projects/imap-spamfilter/filter`, not necessarily pushed to GHCR). Recreate with uid/gid **1001**.
+**Filter container:** local image tag `ghcr.io/marcelverdult/imap-spamfilter:latest` today (baked from `/opt/bytelord/projects/imap-spamfilter/filter`, never pushed). From the next deploy of `deploy/bytelord-compose.yaml` it is **`imap-spamfilter:bytelord`** (FABLE-CR-010), so `docker compose pull` cannot replace it with upstream's public image. Recreate with uid/gid **1001**.
 
 ```bash
 export SPAMFILTER_UID=1001 SPAMFILTER_GID=1001
@@ -405,7 +429,7 @@ docker run --rm -v /opt/bytelord/projects/imap-spamfilter:/src -w /src/filter \
   "pip install -q -r requirements.txt pytest==8.4.2 && python -m pytest -q --tb=short"
 ```
 
-**Last known:** **401 passed** (2026-09-25; was 349 before the review).
+**Last known:** **487 passed** (2026-09-29, after the Fable 5.1 fixes; 429 before). Mount the whole repository as above: tests read `README.md`, `unraid/` and `rspamd/local.d/`.
 
 ### 5. Rafter / secrets
 
@@ -442,7 +466,7 @@ Ham training **cannot** cancel A/B auth-header symbols when they still fire (unt
 
 ## What’s next (suggested order)
 
-1. **Full code and security review, including fixes.** Start at [`code_review_orientation.md`](code_review_orientation.md). Fix confirmed defects in the tree with tests. Do not deploy unless the operator asks.
+1. **Deploy the Fable 5.1 review fixes (operator).** First copy `rspamd/local.d/classifier-bayes.conf` into the live `local.d` and restart rspamd (FABLE-CR-001, Bayes expiry). Then sync the compose file and rebuild `spamfilter`. Commands are in `CLAUDE_FABLE5.1_CODE_FIXED.md`, and the test list is in `SESSION_HANDOFF.md`. Then decide whether to rebuild the Bayes notebook, and whether to turn on Unbound recursion (FABLE-CR-005). *(The full code and security review itself is done: `CLAUDE_FABLE5.1_CODE_REVIEW.md`.)*
 2. **Outlook add-in remains planned.** Requirements and setup notes are in `outlook-addin/` (`d988d40`). There is no add-in code yet. Do not treat that as a filter defect, and do not start the add-in until the review is done.
 3. **`rich_bytecave` is in `move`.** The first retention sweep (01:26 Pacific) moved 101 Trained-Spam and 500 Trained-Ham older than ~8 days to Deleted Items. Default `trained_retention_days` is 7, so later hourly sweeps of up to 500 may have continued. Do not promote any other account. CR-014 Inbox→Junk leftover check is still open.
 4. **CR-004 / neural: done and closed.** It stays off. See "Neural: why it stays off" before proposing any change.
@@ -462,7 +486,10 @@ Ham training **cannot** cancel A/B auth-header symbols when they still fire (unt
 |---|---|
 | `IMPLEMENTATION_STATUS.md` | **Mandatory** — this file |
 | `SESSION_HANDOFF.md` | **Mandatory** — current continue-here note (2026-09-28 evening: Train-Ham restore, untrained-Junk flag, review next) |
-| `code_review_orientation.md` | Start here for the planned full code and security review |
+| `code_review_orientation.md` | How to run a code review here (the 2026-09-29 one is done) |
+| `CLAUDE_FABLE5.1_CODE_REVIEW.md` | 2026-09-29 review: 32 traced findings (FABLE-CR-001…032) |
+| `CLAUDE_FABLE5.1_CODE_FIXED.md` | 2026-09-29 fixes (25), deferrals, deploy steps, validation |
+| `filter/test_fable_review_fixes.py`, `filter/test_config_files.py` | Regression tests for the 2026-09-29 fixes |
 | `README.md` | Operator docs (modes, folders, dashboard, safe-mode) |
 | `CHATGPT_CODE_REVIEW.md` | Prior CR findings + disposition |
 | `CLAUDE_OPUS5.5_EXTRA_CODE_REVIEW.md` | 2026-09-25 review: 29 traced findings (OPUS-CR-001…029) |

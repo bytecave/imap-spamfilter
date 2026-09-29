@@ -4,6 +4,8 @@
 **For:** the next agent doing a full code and security review of this filter  
 **Then:** the Outlook add-in. Its requirements are in `outlook-addin/`; the add-in itself is not built yet.
 
+> **Status 2026-09-29:** the review this file set up is **done**. Claude Fable 5.1 filed 32 findings in [`CLAUDE_FABLE5.1_CODE_REVIEW.md`](CLAUDE_FABLE5.1_CODE_REVIEW.md) and fixed 25 of them in the tree ([`CLAUDE_FABLE5.1_CODE_FIXED.md`](CLAUDE_FABLE5.1_CODE_FIXED.md)). None of the fixes is deployed yet. A later review should start from those two files as well as the ones listed under step 6 below.
+
 Read [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) and [`SESSION_HANDOFF.md`](SESSION_HANDOFF.md) before this file if you have not already. Those two are the product map. This file only says how to review.
 
 ## What this review is
@@ -60,7 +62,7 @@ The Outlook add-in is the work that comes **after** this review. `outlook-addin/
 3. `filter/test_core_review_fixes.py`, `filter/test_shadow_mode.py`, `filter/test_opus_review_fixes.py`, `filter/test_connection.py` — the claims the new behavior depends on.
 4. `rspamd/local.d/` — actions are cosmetic; `url_suspect.conf`; multimap / group files that zero bucket A.
 5. `deploy/bytelord-compose.yaml` — ports, mounts, which files are live. The running compose is `/opt/bytelord/compose/imap-spamfilter/compose.yaml` and does not auto-sync from git.
-6. Prior reviews, so you do not re-file closed items as new: `CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md`, `CLAUDE_OPUS5.5_EXTRA_CODE_REVIEW.md`, `CHATGPT_CODE_REVIEW.md`.
+6. Prior reviews, so you do not re-file closed items as new: `CLAUDE_FABLE5.1_CODE_REVIEW.md` / `CLAUDE_FABLE5.1_CODE_FIXED.md` (2026-09-29), `CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md`, `CLAUDE_OPUS5.5_EXTRA_CODE_REVIEW.md`, `CHATGPT_CODE_REVIEW.md`. If a file is missing from your checkout, read it from git history with `git show <commit>:<file>`.
 
 ## Open on purpose
 
@@ -73,14 +75,14 @@ The Outlook add-in is the work that comes **after** this review. `outlook-addin/
 
 ## How to run tests
 
-Host pytest is not the suite. From `/opt/bytelord/projects/imap-spamfilter`:
+Host pytest is not the suite. From `/opt/bytelord/projects/imap-spamfilter`, mount the **whole repository**. Several tests read `README.md`, `unraid/` and `rspamd/local.d/`; with only `filter/` mounted, three of them fail (FABLE-CR-026).
 
 ```bash
-docker run --rm -v "$PWD/filter":/src/filter -w /src/filter python:3.12-slim \
-  sh -c 'pip install -q pytest==8.4.2 && python -m pytest -q'
+docker run --rm -v "$PWD":/src:ro -w /src/filter python:3.12-slim \
+  sh -c 'pip install -q -r requirements.txt pytest==8.4.2 && python -m pytest -q -p no:cacheprovider'
 ```
 
-Last full run before this document: 429 passed. Re-run the suite after your fixes.
+Last full run: **487 passed** (2026-09-29, after the Fable 5.1 fixes; 429 before them). Re-run the suite after your fixes.
 
 ## Fixes are part of the review
 
