@@ -53,6 +53,18 @@ From the live rspamd log (read-only):
 - A plain `--all-trained` re-feed returns 208 ("already") from rspamd's learn cache and restores nothing.
 - Rebuilding the notebook (backup, clear the `bytelord` notebook including its learn cache, re-feed Trained-*) is an **operator decision**.
 
+### ⚠ `accounts.yml` now needs the new image: do not restart the old one
+
+**2026-09-29 ~01:56 Pacific**, at the operator's request, `accounts.yml` (18 accounts, 8 of them added about an hour earlier) gained:
+- `m365_auth_trust: true`, set explicitly on every account;
+- `trained_retention_days: 0` on `rich_bytecave`.
+
+A backup of the previous file is `/opt/bytelord/data/imap-spamfilter/state/accounts.yml.bak-20260929-*`.
+
+**The running image rejects the new file** (`unknown key(s): 'm365_auth_trust'`). The running process loaded its config at start, so it keeps working. But **any restart of the current image fails at startup** until the new image is built. That includes `docker restart`, a crash-restart and a host reboot. So the next start of `spamfilter` must be deploy step 4 (build + recreate), which also activates `trained_retention_days: 0`. Until then, the old process still sweeps `rich_bytecave` Trained-* mail older than about 8 days to Deleted Items every hour.
+
+If the old image must be restarted before the deploy, first remove the 18 `m365_auth_trust: true` lines (the default is true anyway).
+
 ### The deploy bundle (operator runs it; nothing has been run)
 
 The ordered, copy-paste steps are in [`CLAUDE_FABLE5.1_CODE_FIXED.md`](CLAUDE_FABLE5.1_CODE_FIXED.md) § "Deploying these fixes":
