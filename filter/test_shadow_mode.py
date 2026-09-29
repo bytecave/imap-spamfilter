@@ -91,6 +91,7 @@ def _mk_account(**over):
         learn_from_moves=True, auto_special_folders=True,
         actual_name="Test User",
         max_list_per_run=100, max_list_entries=1000,
+        train_settle_seconds=0,  # most tests drain on first sight
     )
     base.update(over)
     return f.Account(**base)

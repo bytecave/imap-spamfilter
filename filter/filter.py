@@ -569,6 +569,14 @@ class Account:
     # default. Does not revisit UIDs already at or below the Junk bookmark.
     flag_untrained_junk: bool = False
 
+    # Seconds a message must sit in Train-Spam / Train-Ham before it is
+    # learned and moved to Trained-*. Classic Outlook in Cached Exchange Mode
+    # uploads its own changes to a message it just moved a little later; if
+    # the filter moves the message again first, Outlook reports a sync
+    # conflict and re-creates it in Junk. The Train-Ham copy back to the
+    # Inbox is not delayed. 0 = drain on first sight.
+    train_settle_seconds: int = 120
+
     # Bucket B: believe the outermost Authentication-Results header when it
     # is Microsoft 365's stamp. Only safe for a mailbox Microsoft delivers
     # to (Microsoft always adds its own header on top). Set false for any
@@ -637,6 +645,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "max_moves_per_hour": 30,
     "max_learns_per_hour": 50,
     "max_train_per_run": 100,
+    "train_settle_seconds": 120,
     "flip_flop_cooldown_seconds": FLIP_FLOP_COOLDOWN_S,
     "safe_mode_unseen_cap": SAFE_MODE_UNSEEN_CAP,
     "junk_retention_days": 10,
@@ -1231,6 +1240,10 @@ def load_accounts(path: Path) -> list[Account]:
                     merged["max_train_per_run"], key="max_train_per_run",
                     account=name,
                 ),
+                train_settle_seconds=_parse_int(
+                    merged["train_settle_seconds"], key="train_settle_seconds",
+                    account=name,
+                ),
                 flip_flop_cooldown_seconds=_parse_int(
                     merged["flip_flop_cooldown_seconds"],
                     key="flip_flop_cooldown_seconds", account=name,
@@ -1377,6 +1390,8 @@ def validate_account(acc: Account) -> None:
         raise ConfigError(f"{acc.name}: max_learns_per_hour out of range")
     if not 1 <= acc.max_train_per_run <= 5000:
         raise ConfigError(f"{acc.name}: max_train_per_run out of range")
+    if not 0 <= acc.train_settle_seconds <= 3600:
+        raise ConfigError(f"{acc.name}: train_settle_seconds out of range (0..3600)")
     if not 1 <= acc.max_list_per_run <= 5000:
         raise ConfigError(f"{acc.name}: max_list_per_run out of range")
     if not 1 <= acc.max_list_entries <= 10000:
@@ -1535,11 +1550,12 @@ CREATE TABLE IF NOT EXISTS account_heartbeat (
     last_error_event TEXT
 );
 
--- When the filter first saw each message in a Trained-* folder. Trained-*
--- retention counts from this, not from the delivery date (INTERNALDATE),
--- so mail moved into Trained-* long after delivery is kept for the full
--- trained_retention_days. Entries for UIDs no longer in the folder are
--- dropped on each sweep.
+-- When the filter first saw each message in a filter-owned folder.
+-- Trained-*: retention counts from this, not from the delivery date
+-- (INTERNALDATE), so mail moved in long after delivery is kept for the full
+-- trained_retention_days. Train-*: the drain waits train_settle_seconds
+-- from this before learning and moving. Entries for UIDs no longer in the
+-- folder are dropped each time that folder is checked.
 CREATE TABLE IF NOT EXISTS trained_arrival (
     account     TEXT NOT NULL,
     folder      TEXT NOT NULL,
@@ -4846,6 +4862,23 @@ def _drain_train_folder(
             client, db, log, acc, folder, fmap[dst_key], leftovers,
         ):
             return
+    if acc.train_settle_seconds > 0 and candidates:
+        # Let the client that dropped the message finish syncing before the
+        # filter moves it again (see Account.train_settle_seconds).
+        with db.tx():
+            db.record_trained_arrivals(folder, uv, [uid for uid, _row in candidates])
+        settled = set(db.trained_arrived_before(
+            folder, uv, int(time.time()) - acc.train_settle_seconds,
+        ))
+        waiting = len(candidates) - sum(1 for uid, _row in candidates if uid in settled)
+        if waiting:
+            log.debug(
+                "drain %s: %d message(s) settling for %ds before learning",
+                folder, waiting, acc.train_settle_seconds,
+            )
+        candidates = [(uid, row) for uid, row in candidates if uid in settled]
+        if not candidates:
+            return
     per_run = min(acc.max_train_per_run, _learn_budget(db, acc))
     if per_run <= 0:
         log.debug(
@@ -4915,6 +4948,7 @@ def _drain_train_folder(
         return
     try:
         with db.tx():
+            db.drop_trained_arrivals(folder, uv, learned_uids)
             for uid in learned_uids:
                 db.log_event("trained_moved", detail=f"uid={uid} -> {fmap[dst_key]}")
                 db.update_imap_message(

@@ -45,7 +45,7 @@ Move-based training (no special folders needed in daily use):
 - IMAP keyword `$Junk` / `$NotJunk` skips the grace window
 
 Folder-based training (bootstrap and bulk corrections):
-- **Move** spam to `Junk/Train-Spam` -> filter learns, moves to `Junk/Trained-Spam`
+- **Move** spam to `Junk/Train-Spam` -> after about 2 minutes (`train_settle_seconds`) the filter learns it and moves it to `Junk/Trained-Spam`
 - Drop known-good mail in `Junk/Train-Ham`. The filter copies it to the
   Inbox immediately, learns ham, then moves the Train-Ham message to
   `Junk/Trained-Ham`. The Inbox copy stays even when its score is 8 or
@@ -566,6 +566,7 @@ user's mailbox.
 | --- | --- | --- |
 | `move_grace_seconds` | `60` | delay between flag and move (mode=move); `0` = move instantly |
 | `learn_grace_seconds` | `300` | undo window before any Bayes update |
+| `train_settle_seconds` | `120` | a message must sit in Train-Spam / Train-Ham this long before it is learned and moved to Trained-*. It gives classic Outlook (Cached Exchange Mode) time to finish syncing the drag; moving it again sooner caused sync conflicts that re-created it in Junk. The Train-Ham copy back to the Inbox is **not** delayed. `0` = drain on first sight |
 | `idle_timeout` | `1500` | IMAP IDLE re-issue interval (must be < 30 min) |
 | `poll_interval` | `600` | fallback poll when IDLE not supported |
 | `junk_poll_interval` | `120` | how often to scan Junk for user moves |

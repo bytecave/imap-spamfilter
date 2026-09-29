@@ -707,3 +707,57 @@ class SimpleNamespaceClient:
         inner = _FakeImaplib()
         self._imap = inner
         inner._inner = inner
+
+
+# ----- Train-* settle time before learn/archive (2026-09-29) ----------------
+
+
+def _backdate_arrivals(db, seconds):
+    with db.tx():
+        db.conn.execute("UPDATE trained_arrival SET first_seen=first_seen-?", (seconds,))
+
+
+def test_train_spam_waits_for_settle_time_before_learning(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(train_settle_seconds=120)
+    learned = []
+    monkeypatch.setattr(f, "rspamd_learn", lambda raw, kind, user: learned.append(kind) or "learned")
+    client = RecordingIMAP(existing=_all_existing(), search_uids=[7],
+                           fetch_by_uid={7: {b"BODY[]": RAW_RESTORE, b"FLAGS": ()}})
+    f.drain_train_spam(client, db, LOG, acc, FMAP)          # just dropped
+    assert learned == [] and client.moved == []
+    _backdate_arrivals(db, 119)
+    f.drain_train_spam(client, db, LOG, acc, FMAP)          # 119 s later
+    assert learned == [] and client.moved == []
+    _backdate_arrivals(db, 2)
+    f.drain_train_spam(client, db, LOG, acc, FMAP)          # past 120 s
+    assert learned == ["spam"]
+    assert client.moved == [([7], FMAP["trained_spam"])]
+    assert db.conn.execute("SELECT COUNT(*) FROM trained_arrival WHERE folder=?",
+                           (FMAP["spam_train"],)).fetchone()[0] == 0
+
+
+def test_train_ham_copies_to_inbox_at_once_but_learns_after_settling(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(train_settle_seconds=120)
+    learned = []
+    monkeypatch.setattr(f, "rspamd_learn", lambda raw, kind, user: learned.append(kind) or "learned")
+    client = RecordingIMAP(existing=_all_existing(), search_uids=[7],
+                           fetch_by_uid={7: {b"BODY[]": RAW_RESTORE, b"FLAGS": ()}})
+    f.drain_train_ham(client, db, LOG, acc, FMAP)
+    assert client.copied == [([7], FMAP["inbox"])]           # back in the Inbox right away
+    assert learned == [] and client.moved == []
+    _backdate_arrivals(db, 121)
+    f.drain_train_ham(client, db, LOG, acc, FMAP)
+    assert client.copied == [([7], FMAP["inbox"])]           # not copied twice
+    assert learned == ["ham"]
+    assert client.moved == [([7], FMAP["trained_ham"])]
+
+
+def test_train_settle_seconds_config(tmp_path):
+    assert f.load_accounts(_write_accounts(tmp_path, ""))[0].train_settle_seconds == 120
+    path = _write_accounts(tmp_path, "    train_settle_seconds: 0\n")
+    assert f.load_accounts(path)[0].train_settle_seconds == 0
+    path = _write_accounts(tmp_path, "    train_settle_seconds: 7200\n")
+    with pytest.raises(f.ConfigError, match="train_settle_seconds"):
+        f.load_accounts(path)
