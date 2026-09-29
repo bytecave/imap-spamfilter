@@ -39,6 +39,12 @@ services:
     container_name: spamfilter-unbound
     restart: unless-stopped
     logging: *log-rotate
+    # Resolve from the root servers instead of the image's default
+    # Cloudflare forwarder, which Spamhaus/URIBL refuse (FABLE-CR-005).
+    # After recreating Unbound, restart spamfilter-rspamd: it resolves
+    # this container's name once, at start.
+    volumes:
+      - ${SPAMFILTER_UNBOUND_FORWARD:-./unbound/forward-records.conf}:/opt/unbound/etc/unbound/forward-records.conf:ro
     networks: [spamnet]
 
   spamfilter-rspamd:
