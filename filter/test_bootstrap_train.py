@@ -525,3 +525,46 @@ def test_move_failure_leaves_source_folder(tmp_path, monkeypatch):
     row = db.get_imap_message("Train", 1, 1)
     assert row["current_folder"] == "Train"
     db.close()
+
+
+# ----- FABLE-CR-020: exit codes ----------------------------------------------
+
+
+class _MissingFolderIMAP(FakeIMAP):
+    def select_folder(self, folder, readonly=False):
+        raise IMAPClientError(f"NO [NONEXISTENT] {folder}")
+
+
+def test_single_account_missing_source_folder_is_an_error(monkeypatch, capsys):
+    """The README example used a folder that does not exist on the server;
+    the tool printed 'skip ...' and exited 0 as if it had worked."""
+    client = _MissingFolderIMAP([])
+    rc = _run(monkeypatch, client, [], "--move-to", "Trained-Spam")
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "not found" in captured.err
+    assert client.moves == []
+
+
+class _OversizeTrainedIMAP(FolderIMAP):
+    def select_folder(self, folder, readonly=False):
+        info = super().select_folder(folder, readonly)
+        if folder == "Junk/Trained-Spam":
+            self.bodies.pop(2, None)
+            self.sizes[2] = f.MAX_FETCH_BYTES + 1
+        return info
+
+
+def test_all_trained_counts_oversize_as_skipped_not_failed(monkeypatch, capsys):
+    """The live drain archives oversize Train-* mail into Trained-* unlearned
+    on purpose, so a re-feed must not fail because one is there."""
+    one = _OversizeTrainedIMAP({
+        "Junk/Trained-Spam": [1, 2],
+        "Junk/Trained-Ham": [],
+    })
+    two = FolderIMAP({"Junk/Trained-Spam": [], "Junk/Trained-Ham": []})
+    rc, users = _run_all(monkeypatch, {"one": one, "two": two}, ["learned"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "learned=1" in out and "failed=0" in out and "skipped=1" in out
+    assert users == ["bytelord"]

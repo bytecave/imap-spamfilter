@@ -172,8 +172,15 @@ def train_folder(
     for uid, data, oversize in fetch_under_cap(client, uids):
         processed_uids.add(uid)
         if oversize:
-            counts["failed"] += 1
             size = data.get(b"RFC822.SIZE")
+            if readonly and size is not None:
+                # In-place re-feed of Trained-*: the live drain archives
+                # oversize Train-* mail there unlearned on purpose, so it
+                # is expected, not a failure that should fail the run.
+                counts["skipped"] += 1
+                print(f"  skip uid={uid} (over the fetch cap, size={size})")
+                continue
+            counts["failed"] += 1
             print(f"  FAILED uid={uid} (missing/oversize body, size={size})")
             continue
         raw = data.get(b"BODY[]") or data.get(b"BODY.PEEK[]")
@@ -311,7 +318,7 @@ def _run_one_account(args: argparse.Namespace, acc: Any) -> int:
         delim = detect_delimiter(client)
         src = resolve_folder(args.source, delim)
         dst = resolve_folder(args.move_to, delim) if args.move_to else None
-        counts, _skipped = train_folder(
+        counts, skipped = train_folder(
             client, acc,
             src=src, kind=args.kind,
             dry_run=args.dry_run, limit=args.limit,
@@ -319,6 +326,15 @@ def _run_one_account(args: argparse.Namespace, acc: Any) -> int:
             readonly=args.dry_run,
             db=None if args.dry_run else db,
         )
+        if skipped:
+            # The folder the operator named does not exist: nothing was
+            # learned, so this must not look like success.
+            print(
+                f"source folder {src!r} not found (use the full IMAP path, "
+                "e.g. 'Junk Email/...' on Microsoft 365)",
+                file=sys.stderr,
+            )
+            return 1
         return 1 if counts["failed"] else 0
     finally:
         db.close()
