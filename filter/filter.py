@@ -1001,8 +1001,29 @@ def wait_between_scans(
         raise IMAPClientError("idle_done failed")
 
 
+def _load_yaml_config(path: Path) -> Any:
+    """yaml.safe_load(path) with errors mapped to ConfigError.
+
+    PyYAML's error text quotes the offending source line, which in
+    accounts.yml is often a password line. Keep only the position.
+    """
+    try:
+        text = path.read_text()
+    except (OSError, UnicodeDecodeError) as ex:
+        raise ConfigError(f"{path}: cannot read ({type(ex).__name__})") from None
+    try:
+        return yaml.safe_load(text)
+    except yaml.YAMLError as ex:
+        mark = getattr(ex, "problem_mark", None)
+        where = (
+            f" at line {mark.line + 1}, column {mark.column + 1}"
+            if mark is not None else ""
+        )
+        raise ConfigError(f"{path}: invalid YAML{where}") from None
+
+
 def load_accounts(path: Path) -> list[Account]:
-    raw = yaml.safe_load(path.read_text())
+    raw = _load_yaml_config(path)
     if not isinstance(raw, dict) or "accounts" not in raw:
         raise ConfigError(f"{path}: missing 'accounts' key")
     _reject_unknown_keys(raw, ROOT_CONFIG_KEYS, where=str(path))
@@ -1201,7 +1222,7 @@ def yaml_max_list_entries(path: Path) -> int:
     Dashboard list saves are global, so a per-account override on whichever
     account happens to be first must not change the editor cap.
     """
-    raw = yaml.safe_load(path.read_text())
+    raw = _load_yaml_config(path)
     if not isinstance(raw, dict):
         raise ConfigError(f"{path}: missing 'accounts' key")
     defaults = raw.get("defaults") or {}

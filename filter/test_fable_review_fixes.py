@@ -424,3 +424,30 @@ def test_oversize_train_spam_is_still_archived_without_a_copy(tmp_path, monkeypa
     f.drain_train_spam(client, db, LOG, acc, FMAP)
     assert client.copied == []
     assert client.moved == [([7], FMAP["trained_spam"])]
+
+
+# ----- FABLE-CR-013: YAML errors must not echo accounts.yml lines -----------
+
+
+@pytest.mark.parametrize("bad_line", [
+    '    password: "S3cretSentinel\n',       # unclosed quote
+    "    password: S3cretSentinel: x\n",     # mapping value not allowed
+])
+def test_invalid_yaml_does_not_echo_the_password_line(tmp_path, bad_line):
+    path = tmp_path / "accounts.yml"
+    path.write_text(
+        "accounts:\n  - name: a\n    imap_host: h\n" + bad_line
+        + "    user: u@x.com\n    actual_name: A\n"
+    )
+    for loader in (f.load_accounts, f.yaml_max_list_entries):
+        with pytest.raises(f.ConfigError) as info:
+            loader(path)
+        assert "S3cretSentinel" not in str(info.value)
+        assert "invalid YAML at line" in str(info.value)
+        assert info.value.__cause__ is None
+        assert info.value.__suppress_context__
+
+
+def test_unreadable_accounts_file_is_a_config_error(tmp_path):
+    with pytest.raises(f.ConfigError):
+        f.load_accounts(tmp_path / "missing.yml")
