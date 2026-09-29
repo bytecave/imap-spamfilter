@@ -24,6 +24,15 @@ A new agent **must** do all three before exploring code or proposing fixes:
    - `kickstarlaunch.com domain block`
    - `imap-spamfilter shadow dashboard 8099`
    Also `supermemory_list` (recent project memories). After decisions or live deploys, `supermemory_add` with `container=project`.
+   **Supermemory was unreachable for the whole 2026-09-28/29 Claude session (auth failed), so nothing from it was captured.** Add these once it is back:
+   - `expire = 0` enabled rspamd Bayes expiry: ~374k tokens deleted; fixed and the notebook rebuilt 09-29.
+   - Unbound now recurses (Spamhaus works).
+   - `Pass: all` on `/checkv2`.
+   - `flag_untrained_junk` must stay off (Outlook cached-mode conflicts).
+   - `train_settle_seconds` 120.
+   - Trained-* retention: 60 days from arrival.
+   - The 1,186 messages rescued from Deleted Items.
+   - The nightly 03:00 host backup stops all containers.
 
 Also read `/home/bytecave/.claude/CLAUDE.md` (Cursor user rule) and use Agent Mail + graphify as that file and `IMPLEMENTATION_STATUS.md` § Agent onboarding require.
 
@@ -52,6 +61,16 @@ From the live rspamd log (read-only):
 - Tokens already deleted do **not** come back.
 - A plain `--all-trained` re-feed returns 208 ("already") from rspamd's learn cache and restores nothing.
 - Rebuilding the notebook (backup, clear the `bytelord` notebook including its learn cache, re-feed Trained-*) is an **operator decision**.
+
+### Train-* settle time: 2 minutes before learn/archive (live 2026-09-29 14:31 Pacific)
+
+After `flag_untrained_junk` was turned off and the flags were cleared in Outlook, Train-Spam drags still bounced. Each drag added one `Sync Issues/Conflicts` entry. The filter was moving the message Train-Spam → Trained-Spam within about 30 s, before Outlook had finished uploading its own changes to the message it had just moved.
+
+**New setting.** `train_settle_seconds` (default **120**): a message now waits that long in Train-Spam or Train-Ham before it is learned and moved. The timing uses the `trained_arrival` table. **The Train-Ham copy back to the Inbox is not delayed.**
+
+**Verified live** on steve_rjmetalfab: a message dropped into Train-Spam waited about 2.5 minutes, then moved to Trained-Spam and stayed.
+
+`accounts.yml` also now carries a "DON'T ENABLE THIS" comment on `flag_untrained_junk`.
 
 ### `flag_untrained_junk` turned OFF (2026-09-29 12:41 Pacific): it made Outlook bounce mail back to Junk
 
