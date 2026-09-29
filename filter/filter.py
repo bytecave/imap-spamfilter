@@ -3693,6 +3693,11 @@ def _is_train_ham_restore(
         return True
     if not sha:
         return False
+    if any(r["our_action"] == _HAM_RESTORED for r in siblings):
+        # The restore copy already reached the Inbox. A later arrival of
+        # the same bytes (the user dragging it back out of Junk, say) is
+        # ordinary user feedback, not the filter's copy.
+        return False
     return any(
         r["our_action"] == _HAM_INBOX_COPIED and r["body_sha256"] == sha
         for r in siblings
@@ -3766,6 +3771,12 @@ def _scan_inbox_uid_batch(
                     received_at=_internaldate_ts(data), body_sha256=sha,
                 )
 
+            # A Train-Ham restore is the filter's own COPY, not the user
+            # dragging mail out of Junk, even when the same body also has
+            # a Junk row (the usual case: Junk -> Train-Ham). It is scored,
+            # list-checked (a block still junks it) and held below.
+            restore = _is_train_ham_restore(sha, prior, siblings)
+
             # Detect Junk -> Inbox revert via body fingerprint (IMAP MOVE
             # assigns a new UID; Message-ID is not identity). First
             # appearance of this Inbox UID only, so a bookmark retry
@@ -3775,7 +3786,7 @@ def _scan_inbox_uid_batch(
                 if r["current_folder"] == fmap["junk"]
                 or r["our_action"] == "moved_to_junk"
             ]
-            reverted = prior is None and bool(junk_sibs)
+            reverted = prior is None and bool(junk_sibs) and not restore
             if reverted:
                 sib = junk_sibs[0]
                 if NOTJUNK_KEYWORD in flags:
@@ -3874,7 +3885,7 @@ def _scan_inbox_uid_batch(
                     if hit.conflict:
                         db.log_event("list_conflict", msgid, detail=hit_detail)
                 over_threshold = True
-            elif _is_train_ham_restore(sha, prior, siblings):
+            elif restore:
                 # The Inbox copy was made from Train-Ham before this scan.
                 # Keep the stored score, and do not shadow, flag, or queue
                 # a Junk move. A block hit took the branch above.
@@ -4900,7 +4911,6 @@ def _restore_train_ham_to_inbox(
         )
         return
     to_copy: list[int] = []
-    by_uid = {uid: (msgid, sha) for uid, msgid, sha in fetched}
     for uid, msgid, sha in fetched:
         if msgid and sha and (msgid, sha) in present:
             with db.tx():
@@ -4911,24 +4921,17 @@ def _restore_train_ham_to_inbox(
         to_copy.append(uid)
     if not to_copy:
         return
+    # imapclient's UID COPY returns None (imaplib drops the tagged
+    # [COPYUID ...] text), so the new Inbox UID is not known here.
+    # scan_inbox recognises the copy by the body SHA-256 recorded above.
     try:
-        copied = client.copy(to_copy, inbox)
+        client.copy(to_copy, inbox)
     except IMAPClientError as ex:
         log.warning(
             "copy %s -> %s failed: %s",
             folder, inbox, redact_log(str(ex), acc.password),
         )
         return
-    try:
-        inbox_uv = select_with_uidvalidity_check(
-            client, db, inbox, log, readonly=True,
-        )
-    except IMAPClientError as ex:
-        log.warning(
-            "train-ham restore: copied but cannot select %s: %s",
-            inbox, redact_log(str(ex), acc.password),
-        )
-        inbox_uv = None
     with db.tx():
         for uid in to_copy:
             db.update_imap_message(
@@ -4937,23 +4940,6 @@ def _restore_train_ham_to_inbox(
             db.log_event(
                 "ham_inbox_copied", detail=f"uid={uid} -> {inbox}",
             )
-        if inbox_uv is not None and isinstance(copied, dict):
-            for src, dest_uid in copied.items():
-                try:
-                    src_uid = int(src)
-                    new_uid = int(dest_uid)
-                except (TypeError, ValueError):
-                    continue
-                msgid, sha = by_uid.get(src_uid, ("", ""))
-                if not sha:
-                    continue
-                db.upsert_imap_message(
-                    inbox, inbox_uv, new_uid,
-                    message_id=msgid or None, body_sha256=sha,
-                )
-                db.update_imap_message(
-                    inbox, inbox_uv, new_uid, our_action=_HAM_RESTORED,
-                )
     log.info("train-ham restore: copied %d message(s) to %s", len(to_copy), inbox)
 
 

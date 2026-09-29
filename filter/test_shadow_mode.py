@@ -108,7 +108,6 @@ class RecordingIMAP:
         self.subscribed: list[str] = []
         self.moved: list[tuple[list[int], str]] = []
         self.copied: list[tuple[list[int], str]] = []
-        self._next_uid = 1000
         self.flags_added: list[tuple] = []
         self.expunged: list[list[int]] = []
         self.selects: list[tuple[str, bool]] = []
@@ -131,13 +130,10 @@ class RecordingIMAP:
         self.subscribed.append(name)
 
     def copy(self, uids, dest):
-        seq = list(uids)
-        self.copied.append((seq, dest))
-        mapping = {}
-        for uid in seq:
-            self._next_uid += 1
-            mapping[int(uid)] = self._next_uid
-        return mapping
+        # imapclient 3.1.0 returns None for UID COPY: imaplib drops the
+        # tagged [COPYUID ...] text, so callers never learn the new UIDs.
+        self.copied.append((list(uids), dest))
+        return None
 
     def move(self, uids, dest):
         self.moved.append((list(uids), dest))

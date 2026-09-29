@@ -236,3 +236,94 @@ def test_8bit_addresses_scan_over_a_real_http_connection(monkeypatch):
             assert result is not None and result.score == 2.5
     finally:
         srv.shutdown()
+
+
+# ----- FABLE-CR-009: a Train-Ham copy of Junk mail is not a user revert -----
+
+RAW_RESTORE = (
+    b"From: sender@example.com\r\n"
+    b"To: u@example.com\r\n"
+    b"Subject: mis-junked invoice\r\n"
+    b"Message-ID: <restore1@example.com>\r\n"
+    b"\r\n"
+    b"hello\r\n"
+)
+
+
+def _seed_junk_origin_restore(db, *, block=False):
+    sha = f.body_sha256(RAW_RESTORE)
+    with db.tx():
+        db.set_scan_bookmark("INBOX", 1, 0)
+        # poll_junk saw the message in Junk; the user then dragged it to
+        # Train-Ham, whose drain copied it to the Inbox.
+        db.upsert_imap_message(
+            FMAP["junk"], 1, 55, message_id="restore1@example.com", body_sha256=sha,
+        )
+        db.upsert_imap_message(
+            FMAP["ham_train"], 1, 7, message_id="restore1@example.com", body_sha256=sha,
+        )
+        db.update_imap_message(FMAP["ham_train"], 1, 7, our_action="inbox_copied")
+        if block:
+            db.list_upsert_address(
+                "person", "Test User", "block",
+                f.ParsedPattern("sender@example.com", "address"),
+                source="imap", max_entries=1000,
+            )
+
+
+def _scan_one(db, acc, monkeypatch, uid=1, score=9.0):
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail", lambda *a, **k: f.ScanResult(score, (), None),
+    )
+    client = RecordingIMAP(
+        existing=_all_existing(),
+        search_uids=[uid],
+        fetch_by_uid={uid: {b"BODY[]": RAW_RESTORE, b"FLAGS": ()}},
+    )
+    f.scan_inbox(client, db, LOG, acc, FMAP)
+    return db.get_imap_message("INBOX", 1, uid)
+
+
+def _pending_moves(db):
+    return db.conn.execute("SELECT COUNT(*) FROM pending_move").fetchone()[0]
+
+
+def test_junk_origin_restore_is_scored_and_held(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="move", move_grace_seconds=0, actual_name="Test User")
+    _seed_junk_origin_restore(db)
+    row = _scan_one(db, acc, monkeypatch)
+    assert row["our_score"] == 9.0
+    assert row["our_action"] == "ham_restored"
+    assert row["pending_learn"] is None
+    assert _pending_moves(db) == 0
+
+
+def test_junk_origin_restore_blocklist_still_junks(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="move", move_grace_seconds=0, actual_name="Test User")
+    _seed_junk_origin_restore(db, block=True)
+    row = _scan_one(db, acc, monkeypatch)
+    assert row["our_action"] == "pending_move"
+    assert row["pending_learn"] is None
+    assert _pending_moves(db) == 1
+
+
+def test_later_arrival_of_a_restored_body_is_a_user_revert(tmp_path, monkeypatch):
+    """Once the restore copy reached the Inbox, the same bytes coming back
+    from Junk are the user's drag and must still schedule the ham learn."""
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="move", move_grace_seconds=0, actual_name="Test User")
+    _seed_junk_origin_restore(db)
+    sha = f.body_sha256(RAW_RESTORE)
+    with db.tx():
+        db.upsert_imap_message("INBOX", 1, 1, message_id="restore1@example.com", body_sha256=sha)
+        db.update_imap_message("INBOX", 1, 1, our_action="ham_restored", our_score=9.0)
+        db.set_scan_bookmark("INBOX", 1, 1)
+    row = _scan_one(db, acc, monkeypatch, uid=2)
+    assert row["pending_learn"] == "ham"
+    assert row["our_action"] is None
+
+
+def test_fake_copy_matches_imapclient_return_value():
+    assert RecordingIMAP(existing=_all_existing()).copy([1], "INBOX") is None

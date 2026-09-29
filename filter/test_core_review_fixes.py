@@ -1007,9 +1007,13 @@ def test_train_ham_copies_to_inbox_then_archives(tmp_path, monkeypatch):
     assert client.moved == [([7], FMAP["trained_ham"])]
     train = db.get_imap_message(FMAP["ham_train"], 1, 7)
     assert train["our_action"] == "inbox_copied"
-    restored = db.get_imap_message("INBOX", 1, 1001)
-    assert restored["our_action"] == "ham_restored"
-    assert restored["body_sha256"] == f.body_sha256(_raw(7))
+    assert train["body_sha256"] == f.body_sha256(_raw(7))
+    # UID COPY does not report the new Inbox UID (imapclient returns None);
+    # scan_inbox recognises the copy by this body fingerprint instead.
+    inbox_rows = db.conn.execute(
+        "SELECT COUNT(*) FROM messages WHERE folder='INBOX'"
+    ).fetchone()[0]
+    assert inbox_rows == 0
 
 
 def test_train_ham_copy_runs_when_learn_budget_is_spent(tmp_path, monkeypatch):
