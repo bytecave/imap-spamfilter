@@ -104,6 +104,10 @@ services:
       # Dashboard times and per-day buckets use this zone. America/Los_Angeles
       # is US Pacific (covers WA) and switches PST/PDT automatically.
       TZ: America/Los_Angeles
+      # spam.bytelord.net is HTTPS (Caddy), so mark the session cookie
+      # Secure. An SSH tunnel to http://127.0.0.1:8099 still works: browsers
+      # treat loopback as a secure context. (FABLE-CR-030)
+      DASHBOARD_COOKIE_SECURE: "1"
     user: "${SPAMFILTER_UID:-1001}:${SPAMFILTER_GID:-1001}"
     volumes:
       - /opt/bytelord/secrets/imap-spamfilter.env:/run/secrets/imap-spamfilter.env:ro
