@@ -1,6 +1,6 @@
 # Implementation status — imap-spamfilter (ByteLord)
 
-**Last updated:** 2026-09-28 01:34 Pacific (`rich_bytecave` in move mode; Trained-* retention has started)  
+**Last updated:** 2026-09-28 19:22 Pacific (Train-Ham Inbox copy and untrained-Junk follow-up flag are live; next is a full code/security review, then the planned Outlook addon)  
 **Audience:** brand-new agent sessions (Cursor / Claude Code / Codex) with no prior chat memory.  
 **Companion:** [`SESSION_HANDOFF.md`](SESSION_HANDOFF.md) (short “where we left off”; this file is the durable product/deploy/agent map).
 
@@ -20,7 +20,7 @@ Then follow **Agent onboarding** below.
 
 ## Snapshot in one paragraph
 
-Self-hosted IMAP spam filter (Python + Rspamd + Redis + Unbound) on ByteLord. Mailboxes authenticate through sibling **`email-oauth2-proxy`** (XOAUTH2 to M365); this filter speaks plain IMAP `LOGIN` to the proxy. Allow/block lists + one shared Bayes notebook (`defaults.bayes_user: bytelord`) are live. **`rich_bytecave` (rich@bytecave.net) is `mode: move` as of 2026-09-28 01:26 Pacific. The other nine accounts stay `shadow`.** `move_grace_seconds` is 0. Score-based moves do **not** train Bayes. **Retention is no longer skipped for that mailbox:** the first sweep moved **101** old Trained-Spam and **500** old Trained-Ham (the per-pass cap) to Deleted Items. Default `trained_retention_days` is 7. The next sweep is about an hour later. Bayes backup, taken first: Redis `/data/dump.rdb.bak-20260928-before-rich-move` plus `/data/appendonlydir.bak-20260928-before-rich-move`. **Working tree is dirty and uncommitted** (HEAD `c866599`). Subdomain `@host` matching is in the tree only; the running image was not rebuilt. Live rspamd has `url_suspect` `word_dots = false` (Apple “Green Dot Bank” false positive). Neural stays off. **Next: watch this one mailbox; do not promote others; do not wipe Bayes.**
+Self-hosted IMAP spam filter (Python + Rspamd + Redis + Unbound) on ByteLord. Mailboxes authenticate through sibling **`email-oauth2-proxy`** (XOAUTH2 to M365); this filter speaks plain IMAP `LOGIN` to the proxy. Allow/block lists + one shared Bayes notebook (`defaults.bayes_user: bytelord`) are live. **`rich_bytecave` (rich@bytecave.net) is `mode: move` as of 2026-09-28 01:26 Pacific. The other nine accounts stay `shadow`.** `move_grace_seconds` is 0. Score-based moves do **not** train Bayes. **`flag_untrained_junk` is true in the live `accounts.yml` defaults**, so all ten accounts set the follow-up flag on Junk mail that is new since the Junk bookmark and has not been taught. **Train-Ham** copies the message to the Inbox before learning, then still archives the Train-Ham message in Trained-Ham; that Inbox copy is not score-moved to Junk. Subdomain `@host` matching and `url_suspect` `word_dots = false` are committed and in the running image (rebuilt 2026-09-28 19:22 Pacific). `@kickstarlaunch.com` is on the domain block list for all four roster domains (SQLite only; not in git). Neural stays off. Bayes was not wiped. **Next: a full code and security review (`code_review_orientation.md`), then the planned Outlook addon. Do not promote other accounts. Do not wipe Bayes.** The Outlook addon is not in this repo.
 
 ---
 
@@ -45,11 +45,11 @@ Compose **source of truth in git:** `deploy/bytelord-compose.yaml`
 
 ### Per-account loop (mental model)
 
-1. Drain Train-Spam / Train-Ham → learn → Trained-*.
+1. Drain Train-Spam → learn → Trained-Spam. Drain Train-Ham: **copy to Inbox first** (fingerprint only; bytes unchanged), then learn → Trained-Ham. The Inbox copy stays.
 2. Drain Allowlist / Blocklist (person From only) → list upsert/flip → **learn** → MOVE (**Allow→Inbox**, **Block→Junk**).
 3. `scan_inbox`: UIDs above Inbox `scan_bookmark`; score with rspamd (including already-`\Seen`); list hits still score, then override routing; over-threshold (`threshold`, default 8) acts by mode (`shadow` log / `flag` / `move`+grace).
 4. `execute_due_moves` (Inbox→Junk) and `execute_due_rescues` (Junk→Inbox rescues).
-5. `poll_junk` (~`junk_poll_interval`, live **30s**): user Inbox→Junk learns; provider-delivered Junk is **scored** (not learned as spam); score **&lt; `rescue_below`** (default **4**) or allowlisted may be **rescued** in move mode only (mid-band 4–8 stays in Junk).
+5. `poll_junk` (~`junk_poll_interval`, live **30s**): user Inbox→Junk learns; provider-delivered Junk is **scored** (not learned as spam); score **&lt; `rescue_below`** (default **4**) or allowlisted may be **rescued** in move mode only (mid-band 4–8 stays in Junk). When `flag_untrained_junk` is on, a new Junk UID that stays and has not been taught gets `\Flagged`. The Junk scan itself stays read-only; the flag is a second writable select.
 6. Retention / prune when due; IDLE wait (or `poll_interval` if no IDLE).
 
 **Bookmarks:** first sight of a folder/uidvalidity records max UID and **skips historic mail**. That still applies to Inbox and Junk.
@@ -60,7 +60,7 @@ Compose **source of truth in git:** `deploy/bytelord-compose.yaml`
 
 | Mode | Behavior |
 |---|---|
-| `shadow` | Score/log; no auto Inbox/Junk/Trash spam MOVE; Train-* + list drains still MOVE; provider-Junk rescue **logs `would_rescue` only** |
+| `shadow` | Score/log; no auto Inbox/Junk/Trash spam MOVE; Train-* + list drains still MOVE; provider-Junk rescue **logs `would_rescue` only**. `flag_untrained_junk` may still set `\Flagged` on new untrained Junk |
 | `flag` | Shadow + `\Flagged` on over-threshold Inbox |
 | `move` | Flag + after `move_grace_seconds` MOVE Inbox→Junk when score ≥ `threshold`; provider-Junk rescue MOVEs when score &lt; `rescue_below` or allowlisted |
 
@@ -204,8 +204,11 @@ Full plan at `~/.cursor/plans/rspamd_4.2.0_upgrade_and_webui_link_18e83c16.plan.
 |---|---|
 | List vs score | List hit **scores**; list **overrides routing**; list hit alone does **not** Bayes-learn |
 | Headers matched | From + Sender only (not Reply-To) |
-| Precedence | user address → user `@host` → domain address → domain `@host`; `@host` includes subdomains and the longer host wins within that step; allow wins only on true tie. **Coded 2026-09-28, not in the running image** until `spamfilter` is rebuilt. |
-| `URL_OBFUSCATED_TEXT` word-dot *(2026-09-28)* | **Live.** `rspamd/local.d/url_suspect.conf` sets `word_dots = false` so “Green Dot Bank” is not scored as a URL (+9). Other obfuscation patterns stay on. Uncommitted; live file copied by hand. |
+| Precedence | user address → user `@host` → domain address → domain `@host`; `@host` includes subdomains and the longer host wins within that step; allow wins only on true tie. **Live** since the 2026-09-28 image rebuild (`8d310b9` and later). |
+| `URL_OBFUSCATED_TEXT` word-dot *(2026-09-28)* | **Live and committed.** `rspamd/local.d/url_suspect.conf` sets `word_dots = false` so “Green Dot Bank” is not scored as a URL (+9). Other obfuscation patterns stay on. |
+| `flag_untrained_junk` *(2026-09-28 evening)* | Builtin default **false**. Live `accounts.yml` defaults set it **true for all ten accounts**, including shadow. New Junk UIDs above the bookmark that have not been taught get the single `\Flagged` follow-up flag. Mail already at or below the bookmark is left alone. A user Inbox→Junk drag (pending or completed spam learn) is not flagged. Move-mode rescues that are about to leave Junk are not flagged. |
+| Train-Ham restore *(2026-09-28 evening)* | Before ham learn, `COPY` the Train-Ham message to the Inbox and store a SHA-256 fingerprint (`our_action=inbox_copied` on the Train-Ham row; `ham_restored` on the Inbox row). Message bytes are not edited. An identical copy already in the Inbox is not copied again. Successful learn still MOVEs the Train-Ham message to Trained-Ham. `scan_inbox` stores the score but does not shadow, flag, or queue Junk for that Inbox copy. A block-list hit still forces Junk. Older ham teaches that lack `inbox_copied` are not held. Train-Spam is unchanged. The copy runs even when the hourly learn budget is spent; a failed copy leaves the message in Train-Ham and skips the learn that pass. |
+| `@kickstarlaunch.com` *(2026-09-28)* | Domain block on `bytecave.net`, `bytelord.net`, `eizenhoefer.net`, and `rjmetalfab.com` (live SQLite, not git). Covers that host and subdomains. List hit overrides routing and does not Bayes-learn. Move mode sends new mail to Junk; shadow only logs it. Mail already scored before the insert was not re-routed. |
 | Allowlist drag | Upsert/flip + **ham learn** + MOVE → **Inbox** |
 | Blocklist drag | Upsert/flip + **spam learn** + MOVE → **Junk** |
 | Provider Junk | Score; no spam-learn from “landed in Junk”; rescue when score **&lt; `rescue_below`** (default **4**) or allowlisted (**move** only); mid-band stays in Junk. Never train on rescue. *(2026-09-25)* Spoofed allowlisted mail is not rescued (`m365_spoof_verdict`); INTERNALDATE &gt; 3 days → no rescue. User re-junk of a rescued message **is** learned as spam. |
@@ -439,15 +442,17 @@ Ham training **cannot** cancel A/B auth-header symbols when they still fire (unt
 
 ## What’s next (suggested order)
 
-1. **`rich_bytecave` is already in `move`.** First retention sweep (01:26 Pacific) moved 101 Trained-Spam and 500 Trained-Ham older than ~8 days to Deleted Items. Another 500 can go each hour until `trained_retention_days` is changed. Do not promote any other account. CR-014 Inbox→Junk leftover check is still open.
-2. **CR-004 / neural: done and closed.** It stays off. See "Neural: why it stays off" before proposing any change.
-3. **Do not wipe Bayes again** unless asked. Restore point: `dump.rdb.bak-20260928-before-rich-move` and `appendonlydir.bak-20260928-before-rich-move` inside the Redis data volume. Do not run any score-based Trained-* mover.
-4. **Uncommitted, not deployed:** subdomain `@host` matching in `filter/filter.py`. **Live but uncommitted:** `url_suspect` word-dot off. Do not rebuild `spamfilter` unless asked.
-5. **Operator decisions still open:** CR-019 `Rcpt` = mailbox vs first To/Cc; optional `DASHBOARD_TRUSTED_PROXIES`.
-6. **Rspamd 4.2.0 / WebUI-link deploy is done** (2026-09-22). V1–V7 deploy verification is done.
-7. **ChatGPT CR-016 / supply chain** (accepted risk): lock and hash deps, image digests, GHA SHA pins — when prioritized.
-8. More M365 mailboxes only with an Exchange grant + proxy section + YAML. No generic IMAP for `bytelord.net` unless asked.
-9. Optional polish: ChatGPT CR disposition items, and the Low items under "Not fixed" in `CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md`. Not release blockers. Human testing table in SESSION_HANDOFF is still open, now against one live move-mode mailbox.
+1. **Full code and security review.** Start at [`code_review_orientation.md`](code_review_orientation.md). Read-only unless the operator asks for a fix.
+2. **Outlook addon remains planned** and is not in this repository. Do not treat its absence as a dropped requirement or as a defect in the filter. It comes after the review.
+3. **`rich_bytecave` is in `move`.** The first retention sweep (01:26 Pacific) moved 101 Trained-Spam and 500 Trained-Ham older than ~8 days to Deleted Items. Default `trained_retention_days` is 7, so later hourly sweeps of up to 500 may have continued. Do not promote any other account. CR-014 Inbox→Junk leftover check is still open.
+4. **CR-004 / neural: done and closed.** It stays off. See "Neural: why it stays off" before proposing any change.
+5. **Do not wipe Bayes again** unless asked. Restore point: `dump.rdb.bak-20260928-before-rich-move` and `appendonlydir.bak-20260928-before-rich-move` inside the Redis data volume. Do not run any score-based Trained-* mover.
+6. **`@host` subdomain matching and `word_dots = false` are committed and in the running image.** Do not rebuild `spamfilter` unless asked.
+7. **Operator decisions still open:** CR-019 `Rcpt` = mailbox vs first To/Cc; optional `DASHBOARD_TRUSTED_PROXIES`.
+8. **Rspamd 4.2.0 / WebUI-link deploy is done** (2026-09-22). V1–V7 deploy verification is done.
+9. **ChatGPT CR-016 / supply chain** (accepted risk): lock and hash deps, image digests, GHA SHA pins — when prioritized.
+10. More M365 mailboxes only with an Exchange grant + proxy section + YAML. No generic IMAP for `bytelord.net` unless asked.
+11. Optional polish: ChatGPT CR disposition items, and the Low items under "Not fixed" in `CLAUDE_OPUS5.5_EXTRA_CODE_FIXED.md`. Not release blockers. Human testing table in SESSION_HANDOFF is still open, now against one live move-mode mailbox.
 
 ---
 
@@ -456,7 +461,8 @@ Ham training **cannot** cancel A/B auth-header symbols when they still fire (unt
 | File | Why |
 |---|---|
 | `IMPLEMENTATION_STATUS.md` | **Mandatory** — this file |
-| `SESSION_HANDOFF.md` | **Mandatory** — current continue-here note (2026-09-28: `rich_bytecave` move mode, retention sweep, Bayes backup) |
+| `SESSION_HANDOFF.md` | **Mandatory** — current continue-here note (2026-09-28 evening: Train-Ham restore, untrained-Junk flag, review next) |
+| `code_review_orientation.md` | Start here for the planned full code and security review |
 | `README.md` | Operator docs (modes, folders, dashboard, safe-mode) |
 | `CHATGPT_CODE_REVIEW.md` | Prior CR findings + disposition |
 | `CLAUDE_OPUS5.5_EXTRA_CODE_REVIEW.md` | 2026-09-25 review: 29 traced findings (OPUS-CR-001…029) |

@@ -1,6 +1,6 @@
 # Session handoff — imap-spamfilter (ByteLord VPS)
 
-**Last updated:** 2026-09-28 01:34 Pacific — `rich_bytecave` is in **move** mode; retention has started emptying old Trained-*  
+**Last updated:** 2026-09-28 19:22 Pacific — Train-Ham returns a copy to the Inbox; untrained new Junk is flagged; next is a code/security review, then the Outlook addon  
 **Repo:** `/opt/bytelord/projects/imap-spamfilter`  
 **Remote:** `github.com:bytecave/imap-spamfilter.git` (branch `main`)  
 **Upstream fork of:** marcelverdult/imap-spamfilter  
@@ -20,6 +20,8 @@ A new agent **must** do all three before exploring code or proposing fixes:
    - `rich_bytecave move mode trained_retention_days Deleted Items`
    - `Bayes backup dump.rdb.bak-20260928-before-rich-move`
    - `URL_OBFUSCATED_TEXT word_dots Green Dot Bank`
+   - `flag_untrained_junk Train-Ham inbox_copied ham_restored`
+   - `kickstarlaunch.com domain block`
    - `imap-spamfilter shadow dashboard 8099`
    Also `supermemory_list` (recent project memories). After decisions or live deploys, `supermemory_add` with `container=project`.
 
@@ -27,11 +29,31 @@ Also read `/home/bytecave/.claude/CLAUDE.md` (Cursor user rule) and use Agent Ma
 
 ---
 
-## Where we left off (2026-09-28 01:34 Pacific) — CONTINUE HERE
+## Where we left off (2026-09-28 19:22 Pacific) — CONTINUE HERE
 
-`rich@bytecave.net` (`rich_bytecave`) is the only account in **`mode: move`**. The other nine stay **`shadow`**. `move_grace_seconds` is **0**. The spamfilter image was **not** rebuilt (`accounts.yml` is bind-mounted). HEAD is still `c866599`. The working tree is dirty and **not committed**.
+`rich@bytecave.net` (`rich_bytecave`) is the only account in **`mode: move`**. The other nine stay **`shadow`**. `move_grace_seconds` is **0**. The `spamfilter` image was rebuilt from this tree at 19:22 Pacific and the container was recreated. All ten accounts reconnected. Full suite: **429 passed**.
 
-### Urgent: retention is on for this mailbox
+### What landed this evening
+
+1. **Untrained Junk follow-up flag.** `flag_untrained_junk: true` is in the live `accounts.yml` defaults (that file is gitignored). Builtin default remains false. Every account, including shadow, flags Junk that is **new above the Junk bookmark** and has not been taught (`learned_as` or `pending_learn` of spam/ham, on that row or a same-body sibling). Filter-owned Junk and provider Junk that stays are flagged. A user Inbox→Junk drag is not, because that drag is the spam teach. On `rich_bytecave`, provider Junk that is about to be rescued (score under 4, or allow) is not flagged. Mail already in Junk when the setting was turned on was not backfilled. Event: `junk_untrained_flagged`. Exchange exposes only `\Flagged` (the red follow-up flag).
+2. **Train-Ham returns a copy to the Inbox.** On seeing a message in Train-Ham, the filter `COPY`s it to the Inbox before `try_learn`, stores the unchanged body's SHA-256 (`our_action=inbox_copied`), and when UIDPLUS returns the new UID marks that Inbox row `ham_restored`. The learn then still MOVEs the Train-Ham message to Trained-Ham. The Inbox copy stays even when the score is 8 or higher. A block-list hit still sends it to Junk. A byte-identical copy already in the Inbox is not copied a second time. The copy runs even if the hourly learn budget is spent. A failed copy leaves the message in Train-Ham and skips the learn that pass. Older ham (including the accidental Trained-Ham reversal) does **not** hold a new Inbox copy, because those rows have no `inbox_copied` mark. Train-Spam does not copy to the Inbox.
+3. **`@kickstarlaunch.com` domain block** is live in SQLite for `bytecave.net`, `bytelord.net`, `eizenhoefer.net`, and `rjmetalfab.com`. It is not in git. New mail is routed by the list (move mode to Junk, shadow logs only) and is not Bayes-learned from the list hit alone. Copies already scored before the insert were left where they were.
+
+### Still in force from this morning
+
+`@host` list entries match that host and its subdomains (`8d310b9`, in the running image). `url_suspect` `word_dots = false` is committed and live. Neural stays off. Do not wipe Bayes. Do not promote the other nine accounts.
+
+### Next
+
+1. Another agent does a **full code and security review**. Start at [`code_review_orientation.md`](code_review_orientation.md). Do not deploy, rebuild, or change live mail during that review unless the operator asks.
+2. The **Outlook addon is still planned** and is not part of this repository. It waits until after that review.
+3. CR-014 (Inbox→Junk MOVE-as-COPY leftover) is still open. CR-019 `Rcpt` and `DASHBOARD_TRUSTED_PROXIES` are still open.
+
+### Retention is on for the move-mode mailbox
+
+The 01:34 note below is the first sweep. Later hourly sweeps of up to 500 may have continued. Do not set `trained_retention_days` unless the operator asks.
+
+### Urgent: retention is on for this mailbox (01:34 Pacific)
 
 Shadow skips retention. Move mode does not. Default `trained_retention_days` is **7** (not set in `accounts.yml`). The first sweep after the mode change, at 01:26 Pacific, moved mail older than about 8 days to **Deleted Items**:
 
@@ -53,26 +75,21 @@ Host path of that volume: `/opt/bytelord/data/imap-spamfilter/redis/`. Do not `c
 
 Score moves do **not** train Bayes. Provider Junk with score **&lt; 4** is rescued to Inbox with no ham learn. Inbox score **≥ 8** goes to Junk with no spam learn. Mid-band 4–8 stays put. A drag Junk→Inbox schedules ham, and Inbox→Junk schedules spam, after `learn_grace_seconds` **30**. Undo before that drops the pending learn. The Inbox bookmark does **not** go back and re-junk mail already scored in shadow. New UIDs above the bookmark, plus up to 50 never-scored Inbox rows per pass, are acted on.
 
-### Uncommitted work (not all of it is live)
+### Morning items that are now committed and live
 
 | Change | Live? |
 |---|---|
-| `url_suspect` `word_dots = false` (`rspamd/local.d/url_suspect.conf`, copied to the data `local.d`, rspamd reloaded) | **Yes.** Stops “Green Dot Bank” → `URL_OBFUSCATED_TEXT` +9. Other obfuscation patterns stay on. `unraid/bootstrap.version` is **13** so the next bootstrap installs the file; the live stamp was not bumped. |
-| `@host` allow/block matches that host **and subdomains**; longer host wins inside a rank (`filter/filter.py`) | **No.** In the working tree only. Address-list tests passed (30). Running image is still `0b982e9`. |
-| Docs in this file and `IMPLEMENTATION_STATUS.md` | Working tree |
+| `url_suspect` `word_dots = false` | **Yes.** Stops “Green Dot Bank” → `URL_OBFUSCATED_TEXT` +9. Other obfuscation patterns stay on. |
+| `@host` allow/block matches that host **and subdomains**; longer host wins inside a rank | **Yes.** In `8d310b9` and in the image rebuilt 2026-09-28 evening. |
+| Train-Ham Inbox copy and `flag_untrained_junk` | **Yes.** See the continue-here section above. |
 
-Do not rebuild `spamfilter` unless asked: a rebuild would ship the subdomain matcher and any other dirty `filter/` files.
+Do not rebuild `spamfilter` unless asked.
 
 ### Also true from 2026-09-25 (still in force)
 
-Rescue line is `rescue_below` 4; junk line is `threshold` 8. Train-* drain expunges MOVE-as-COPY leftovers after a verified Trained-* copy (`0b982e9`). Retrain3 Bayes was about **940 spam / 1595 ham**. Neural stays off. Fuzzy is the stock rspamd.com rule. Dashboard Class=spam means a filter spam **action** or `learned_as=spam`, not “sitting in Junk.”
+Rescue line is `rescue_below` 4; junk line is `threshold` 8. Train-* drain expunges MOVE-as-COPY leftovers after a verified Trained-* copy (`0b982e9`). Retrain3 Bayes was about **940 spam / 1595 ham**. Neural stays off. Fuzzy is the stock rspamd.com rule. Dashboard Class=spam means a filter spam **action** or `learned_as=spam`, not “sitting in Junk.” A Train-Ham restore is `ham_restored`, which is not in that spam-action set.
 
-### Next for a new agent
-
-1. Tell the operator about the Trained-* retention sweep above before doing anything else that touches folders.
-2. Watch `rich_bytecave` move/rescue logs. Do not promote any other account.
-3. CR-014 (Inbox→Junk MOVE-as-COPY leftover) is still open. CR-019 `Rcpt` and `DASHBOARD_TRUSTED_PROXIES` are still open.
-4. Do not re-run the Opus neural/fuzzy deploy runbook (kept below for reference only). V1–V7 is done.
+The numbered “next for a new agent” that used to sit here is replaced by the continue-here section at the top of this file. Do not re-run the Opus neural/fuzzy deploy runbook (kept below for reference only). V1–V7 is done. The V1 snippet that expects a clean tree and `1d04635` at the top is historical; it is not the current check.
 
 ## Cursor: first job — verify the 2026-09-25 deploy (read-only) — DONE 2026-09-24 night
 
