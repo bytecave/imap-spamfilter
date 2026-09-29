@@ -606,3 +606,67 @@ def test_scan_path_passes_the_account_switch(tmp_path, monkeypatch):
 def test_rescue_spoof_block_needs_m365_trust():
     assert f._rescue_blocker(RAW_M365_SPOOF) == "m365_spoof_verdict"
     assert f._rescue_blocker(RAW_M365_SPOOF, m365_auth_trust=False) is None
+
+
+# ----- Trained-* retention counts from arrival in the folder ----------------
+
+
+class _SearchAwareIMAP(RecordingIMAP):
+    """Answers SEARCH BEFORE with every UID, as if all mail were delivered
+    long ago; SEARCH ALL lists what is in the folder."""
+
+
+def _arrivals(db):
+    return db.conn.execute(
+        "SELECT folder, uid, first_seen FROM trained_arrival ORDER BY folder, uid"
+    ).fetchall()
+
+
+def test_old_mail_newly_in_trained_is_kept_for_the_full_window(tmp_path):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="move", trained_retention_days=60, junk_retention_days=0)
+    client = _SearchAwareIMAP(existing=_all_existing(), search_uids=[5, 6])
+    f.retention_sweep(client, db, LOG, acc, FMAP)
+    assert client.moved == []                     # delivered long ago, but just arrived
+    rows = _arrivals(db)
+    assert {(r[0], r[1]) for r in rows} == {
+        (FMAP["trained_spam"], 5), (FMAP["trained_spam"], 6),
+        (FMAP["trained_ham"], 5), (FMAP["trained_ham"], 6),
+    }
+    with db.tx():  # 59 days later: still kept
+        db.conn.execute("UPDATE trained_arrival SET first_seen=first_seen-?", (59 * 86400,))
+    f.retention_sweep(client, db, LOG, acc, FMAP)
+    assert client.moved == []
+    with db.tx():  # past 60 days in Trained-*: swept
+        db.conn.execute("UPDATE trained_arrival SET first_seen=first_seen-?", (2 * 86400,))
+    f.retention_sweep(client, db, LOG, acc, FMAP)
+    # (The fake shares one UID list across folders, so the first sweep's MOVE
+    # empties it for the second folder.)
+    assert (sorted(client.moved[0][0]), client.moved[0][1]) == ([5, 6], "Trash")
+
+
+def test_first_seen_is_not_reset_and_departed_uids_are_forgotten(tmp_path):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="move", trained_retention_days=60, junk_retention_days=0)
+    client = _SearchAwareIMAP(existing=_all_existing(), search_uids=[5, 6])
+    f.retention_sweep(client, db, LOG, acc, FMAP)
+    first = {(r[0], r[1]): r[2] for r in _arrivals(db)}
+    with db.tx():
+        db.conn.execute("UPDATE trained_arrival SET first_seen=first_seen-100")
+    client.search_uids = [6, 7]                   # 5 left, 7 arrived
+    f.retention_sweep(client, db, LOG, acc, FMAP)
+    after = {(r[0], r[1]): r[2] for r in _arrivals(db)}
+    assert (FMAP["trained_ham"], 5) not in after
+    assert after[(FMAP["trained_ham"], 6)] == first[(FMAP["trained_ham"], 6)] - 100
+    assert (FMAP["trained_ham"], 7) in after
+
+
+def test_junk_retention_still_counts_from_delivery(tmp_path):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="move", junk_retention_days=10, trained_retention_days=0)
+    with db.tx():
+        db.set_scan_bookmark("Junk", 1, 100)
+    client = _SearchAwareIMAP(existing=_all_existing(), search_uids=[5])
+    f.retention_sweep(client, db, LOG, acc, FMAP)
+    assert client.moved == [([5], "Trash")]
+    assert _arrivals(db) == []

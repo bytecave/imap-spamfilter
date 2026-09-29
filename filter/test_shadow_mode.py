@@ -248,6 +248,13 @@ def test_ensure_folders_never_creates_required():
 # ----- retention_sweep ------------------------------------------------------
 
 
+def _age_trained_arrivals(db, *, days):
+    with db.tx():
+        db.conn.execute(
+            "UPDATE trained_arrival SET first_seen=first_seen-?", (days * 86400,)
+        )
+
+
 def test_retention_sweep_shadow_never_moves(tmp_path, caplog):
     db = _mk_db(tmp_path)
     acc = _mk_account(mode="shadow", junk_retention_days=10)
@@ -271,6 +278,9 @@ def test_retention_sweep_flag_moves_to_trash(tmp_path):
         search_uids=[21],
         fetch_by_uid={21: {}},
     )
+    f.retention_sweep(client, db, LOG, acc, FMAP)  # starts the Trained-* clock
+    assert client.moved == []
+    _age_trained_arrivals(db, days=acc.trained_retention_days + 1)
     f.retention_sweep(client, db, LOG, acc, FMAP)
     assert any(dest == "Trash" for _uids, dest in client.moved)
 
@@ -283,6 +293,9 @@ def test_retention_sweep_move_moves_to_trash(tmp_path):
         search_uids=[22],
         fetch_by_uid={22: {}},
     )
+    f.retention_sweep(client, db, LOG, acc, FMAP)  # starts the Trained-* clock
+    assert client.moved == []
+    _age_trained_arrivals(db, days=acc.trained_retention_days + 1)
     f.retention_sweep(client, db, LOG, acc, FMAP)
     assert any(dest == "Trash" for _uids, dest in client.moved)
 

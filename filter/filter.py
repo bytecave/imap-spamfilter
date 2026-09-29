@@ -1481,6 +1481,20 @@ CREATE TABLE IF NOT EXISTS account_heartbeat (
     last_error       INTEGER,
     last_error_event TEXT
 );
+
+-- When the filter first saw each message in a Trained-* folder. Trained-*
+-- retention counts from this, not from the delivery date (INTERNALDATE),
+-- so mail moved into Trained-* long after delivery is kept for the full
+-- trained_retention_days. Entries for UIDs no longer in the folder are
+-- dropped on each sweep.
+CREATE TABLE IF NOT EXISTS trained_arrival (
+    account     TEXT NOT NULL,
+    folder      TEXT NOT NULL,
+    uidvalidity INTEGER NOT NULL,
+    uid         INTEGER NOT NULL,
+    first_seen  INTEGER NOT NULL,
+    PRIMARY KEY (account, folder, uidvalidity, uid)
+);
 """
 
 SCHEMA_INDEXES = """
@@ -2349,6 +2363,50 @@ class Db:
                 last_error_event=excluded.last_error_event
             """,
             (self.account, now, event),
+        )
+
+    # ----- Trained-* arrival (retention clock) -----------------------------
+
+    def record_trained_arrivals(
+        self, folder: str, uidvalidity: int, uids: list[int]
+    ) -> None:
+        """Start the retention clock for UIDs not seen before; forget UIDs
+        that left the folder (or belong to an older UIDVALIDITY)."""
+        now = int(time.time())
+        present = {int(u) for u in uids}
+        known = {
+            (int(r[0]), int(r[1])) for r in self.conn.execute(
+                "SELECT uidvalidity, uid FROM trained_arrival WHERE account=? AND folder=?",
+                (self.account, folder),
+            )
+        }
+        gone = [k for k in known if k[0] != uidvalidity or k[1] not in present]
+        self.conn.executemany(
+            "DELETE FROM trained_arrival WHERE account=? AND folder=? AND uidvalidity=? AND uid=?",
+            [(self.account, folder, uv, uid) for uv, uid in gone],
+        )
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO trained_arrival(account, folder, uidvalidity, uid, first_seen) "
+            "VALUES(?,?,?,?,?)",
+            [(self.account, folder, uidvalidity, uid, now)
+             for uid in present if (uidvalidity, uid) not in known],
+        )
+
+    def trained_arrived_before(
+        self, folder: str, uidvalidity: int, cutoff: int
+    ) -> list[int]:
+        return [int(r[0]) for r in self.conn.execute(
+            "SELECT uid FROM trained_arrival WHERE account=? AND folder=? "
+            "AND uidvalidity=? AND first_seen<=? ORDER BY uid",
+            (self.account, folder, uidvalidity, cutoff),
+        )]
+
+    def drop_trained_arrivals(
+        self, folder: str, uidvalidity: int, uids: list[int]
+    ) -> None:
+        self.conn.executemany(
+            "DELETE FROM trained_arrival WHERE account=? AND folder=? AND uidvalidity=? AND uid=?",
+            [(self.account, folder, uidvalidity, int(u)) for u in uids],
         )
 
     def prune_stale_pending_learn(self, older_than_s: int) -> int:
@@ -5378,10 +5436,12 @@ def retention_sweep(
         _sweep_folder_to_trash(
             client, db, log, acc, fmap,
             src=fmap["trained_spam"], days=acc.trained_retention_days, exclude_learned_ham=False, tag="trained_retention",
+            since_arrival=True,
         )
         _sweep_folder_to_trash(
             client, db, log, acc, fmap,
             src=fmap["trained_ham"], days=acc.trained_retention_days, exclude_learned_ham=False, tag="trained_ham_retention",
+            since_arrival=True,
         )
 
 
@@ -5393,7 +5453,15 @@ _RETENTION_KEEP_JUNK_ACTIONS = frozenset({"allowlisted", "pending_rescue"})
 def _sweep_folder_to_trash(
     client: IMAPClient, db: Db, log: logging.Logger, acc: Account, fmap: dict[str, str],
     *, src: str, days: int, exclude_learned_ham: bool, tag: str,
+    since_arrival: bool = False,
 ) -> None:
+    """MOVE mail older than `days` from `src` to Trash.
+
+    Junk ages by delivery date (IMAP INTERNALDATE, `SEARCH BEFORE`).
+    Trained-* (`since_arrival`) ages by when the filter first saw the
+    message in that folder, so a message trained long after delivery is
+    kept for the full window: that is the corpus a Bayes rebuild needs.
+    """
     if db.in_safe_mode("all"):
         return
     try:
@@ -5412,15 +5480,25 @@ def _sweep_folder_to_trash(
     # server's clock cannot cause us to delete messages slightly too
     # early. Worst case: retention runs one day late, never one day
     # early.
-    cutoff_date = time.strftime(
-        "%d-%b-%Y",
-        time.gmtime(time.time() - (days + 1) * 86400),
-    )
-    try:
-        uids = client.search(["BEFORE", cutoff_date])
-    except IMAPClientError as ex:
-        log.warning("retention: search BEFORE %s failed: %s", cutoff_date, redact_log(str(ex), acc.password))
-        return
+    if since_arrival:
+        try:
+            present = list(client.search(["ALL"]) or [])
+        except IMAPClientError as ex:
+            log.warning("retention: search %s failed: %s", src, redact_log(str(ex), acc.password))
+            return
+        with db.tx():
+            db.record_trained_arrivals(src, uv, present)
+        uids = db.trained_arrived_before(src, uv, int(time.time()) - days * 86400)
+    else:
+        cutoff_date = time.strftime(
+            "%d-%b-%Y",
+            time.gmtime(time.time() - (days + 1) * 86400),
+        )
+        try:
+            uids = client.search(["BEFORE", cutoff_date])
+        except IMAPClientError as ex:
+            log.warning("retention: search BEFORE %s failed: %s", cutoff_date, redact_log(str(ex), acc.password))
+            return
     if not uids:
         return
     # Junk retention only touches UIDs poll_junk has already processed, so a
@@ -5460,6 +5538,8 @@ def _sweep_folder_to_trash(
     try:
         with db.tx():
             db.log_event(tag, detail=f"moved {len(to_move)} from {src} to {fmap['trash']}")
+            if since_arrival:
+                db.drop_trained_arrivals(src, uv, to_move)
             for uid in to_move:
                 db.update_imap_message(
                     src, uv, uid, current_folder=fmap["trash"]

@@ -588,7 +588,7 @@ user's mailbox.
 | Key | Default | Notes |
 | --- | --- | --- |
 | `junk_retention_days` | `10` | Junk -> Trash after N days, `0` disables. Skips mail the Junk poll has not processed yet, pending spam learns, and allowlisted provider-Junk |
-| `trained_retention_days` | `7` | Trained-Spam **and** Trained-Ham -> Trash after N days |
+| `trained_retention_days` | `7` | Trained-Spam **and** Trained-Ham -> Trash N days after the message **arrived in** that folder (the filter records first sight in `trained_arrival`), not N days after delivery. Mail already in Trained-* when this started gets a fresh N days. ByteLord uses 60, to keep the corpus for Bayes rebuilds |
 | `learn_from_moves` | `true` | set `false` to disable all learning (scan-only) |
 
 The `DEFAULT_JUNK_RETENTION_DAYS` and `DEFAULT_TRAINED_RETENTION_DAYS`
