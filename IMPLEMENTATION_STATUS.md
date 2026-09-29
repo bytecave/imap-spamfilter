@@ -1,6 +1,6 @@
 # Implementation status — imap-spamfilter (ByteLord)
 
-**Last updated:** 2026-09-29 02:10 Pacific. The Claude Fable 5.1 review fixes and the second pass are **deployed** (Unbound recursing, rspamd `local.d`, filter image `imap-spamfilter:bytelord`). 18 accounts are configured, 17 connected; `jamie.zinsli_rjmetalfab` is refused by Exchange (see SESSION_HANDOFF). Next: Deleted Items rescue and Bayes rebuild, then the Outlook add-in.  
+**Last updated:** 2026-09-29 03:55 Pacific. The Claude Fable 5.1 review fixes are deployed. The Bayes notebook `bytelord` was rebuilt 2026-09-29: 1,105 spam and 1,655 ham learns, about 213k tokens, with expiry off. 18 accounts are configured, all connected. Next: the Outlook add-in.  
 **Audience:** brand-new agent sessions (Cursor / Claude Code / Codex) with no prior chat memory.  
 **Companion:** [`SESSION_HANDOFF.md`](SESSION_HANDOFF.md) (short “where we left off”; this file is the durable product/deploy/agent map).
 
@@ -164,6 +164,7 @@ Live config: **`rich_bytecave` is `move`**; every other account is **shadow**. `
    - dashboard cookie `Secure`;
    - rspamd hardening.
 5. **Tests:** 429 → **487 passed**. 47 of the new tests fail against the pre-review `f53586a`.
+7. **Bayes rebuild, same night:** Trained-* mail was rescued from Deleted Items, the notebook wiped and relearned, and the dashboard rescored. Details and backups are in SESSION_HANDOFF.
 6. **Second pass, same day (operator-approved):**
    - Unbound recurses itself (FABLE-CR-005). It was forwarding to Cloudflare, which Spamhaus refuses.
    - Blocklist rules cleaned up (FABLE-CR-032):

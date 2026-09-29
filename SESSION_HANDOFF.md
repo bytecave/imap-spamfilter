@@ -1,6 +1,6 @@
 # Session handoff — imap-spamfilter (ByteLord VPS)
 
-**Last updated:** 2026-09-29 02:10 Pacific. The Claude Fable 5.1 review fixes and the second pass are **deployed and verified**. Next: rescue Trained-* mail from Deleted Items and rebuild Bayes, fix `jamie.zinsli_rjmetalfab`'s mailbox access on the Microsoft side, then the Outlook add-in.  
+**Last updated:** 2026-09-29 03:55 Pacific. Review fixes deployed; the Bayes notebook has been rebuilt from Trained-* (including 1,186 messages rescued from Deleted Items), and the dashboard rescored. All 18 accounts connected. Next: the Outlook add-in.  
 **Repo:** `/opt/bytelord/projects/imap-spamfilter`  
 **Remote:** `github.com:bytecave/imap-spamfilter.git` (branch `main`)  
 **Upstream fork of:** marcelverdult/imap-spamfilter  
@@ -53,6 +53,32 @@ From the live rspamd log (read-only):
 - A plain `--all-trained` re-feed returns 208 ("already") from rspamd's learn cache and restores nothing.
 - Rebuilding the notebook (backup, clear the `bytelord` notebook including its learn cache, re-feed Trained-*) is an **operator decision**.
 
+### BAYES REBUILT 2026-09-29 02:29–03:48 Pacific (Claude, at the operator's request)
+
+**Backups first:**
+- SQLite: `state/spamfilter.db.bak-20260929-022922-before-retrain`
+- Redis: `dump.rdb.bak-20260929-022922-before-retrain` and `appendonlydir.bak-20260929-022922-before-retrain` in `/data` of `spamfilter-redis`. AOF is on, so a restore needs both.
+
+`spamfilter` was stopped for the whole job.
+
+1. **Rescue** (rich_bytecave). **1,186** Trained-* messages moved from Deleted Items back where they came from: 1,085 to Trained-Ham, 101 to Trained-Spam.
+   - Matching: 1,018 by body SHA-256, and 174 by a Message-ID that matched one copy or identical copies. 6 were already present.
+   - 28 stayed in Deleted Items: their Message-ID matched several copies that were not identical.
+   - The move record is `state/bayes-rescue-20260929-023312.json`.
+2. **Wipe.** `RSbytelord`, `RSbytelord_*` and the `learned_ids` learn cache were deleted, then rspamd restarted. Fuzzy and every other key were left alone.
+3. **Learn.** Every account's Trained-Spam and Trained-Ham were learned in place, plus the 48 earlier Inbox↔Junk and Allowlist/Blocklist drag learns (verified by SHA; 3 no longer exist).
+   - Results: 2,760 learned, 75 already (same body in two mailboxes), 42 list-contradiction skips.
+   - 173 were declined by rspamd for having fewer than 11 tokens. Those are short messages; that is expected.
+   - **Bayes now: 1,105 spam and 1,655 ham learns, about 213,000 token keys** (13,797 before, when expiry was deleting them).
+4. **Rescore.** All 3,000 live Trained-* messages were rescanned with the new Bayes, using the production scan parameters. `our_score` and `score_detail` were written directly, with no `scan` events. Same-body Train-*/Trained-* origin rows got the same score.
+5. **Database tidy:**
+   - Removed 1,190 rich_bytecave rows that still said "Deleted Items" for mail now back in Trained-*.
+   - Removed 524 rows (487 of them rich_rjmetalfab) for mail no longer in any Trained-* folder, left over from the 09-24 shuffle. `inbox_copied` / `ham_restored` rows were not touched.
+
+**Interruption.** The host's nightly `bytelord-backup.timer` (03:02, `server_backup create`) stops every container and restarts only those it stopped. It interrupted the rich_bytecave rescore, which was then finished after the backup. The backup therefore contains the new Bayes. **Don't schedule long maintenance across 03:00 Pacific.**
+
+**Afterwards.** `spamfilter` was started, with no rebuild needed. **18/18 accounts connected**, including `jamie.zinsli_rjmetalfab` (the Exchange permission fix worked), which created its six folders. The dashboard's Messages → Trained Spam/Ham views show the new scores; `RECEIVED_SPAMHAUS_*` now appears on spam.
+
 ### DEPLOYED 2026-09-29 02:00–02:02 Pacific (Claude Fable 5.1, at the operator's request)
 
 The whole bundle ran in order. Redis was never touched.
@@ -72,7 +98,7 @@ The whole bundle ran in order. Redis was never touched.
 
 **New accounts:** 7 of the 8 added on 2026-09-29 connected, and each got all six folders, created and subscribed and confirmed by a read-only `LIST`/`LSUB`: aiden_eizenhoefer, matt, cad, foreman, shop, matta and mike (all `_rjmetalfab` except aiden).
 
-**`jamie.zinsli_rjmetalfab` does not connect.** Exchange answers LOGIN with `User is authenticated but not connected.`, so the proxy's OAuth token works but that mailbox cannot be opened. It has never connected, and no folders exist yet. The usual causes are on the Microsoft side:
+**`jamie.zinsli_rjmetalfab` did not connect at first** *(fixed on the Exchange side, and connected at 03:48 the same day)*. Exchange answers LOGIN with `User is authenticated but not connected.`, so the proxy's OAuth token works but that mailbox cannot be opened. It has never connected, and no folders exist yet. The usual causes are on the Microsoft side:
 - the app's service principal lacks `FullAccess` on that mailbox (`Add-MailboxPermission`);
 - IMAP is disabled (`Get-CASMailbox … ImapEnabled`);
 - the address in the proxy section or `accounts.yml` is not the mailbox's primary SMTP address, or the mailbox is unlicensed.
