@@ -36,16 +36,36 @@ from filter import (
 )
 
 
-def _fetch_body(client, folder: str, uid: int) -> bytes | None:
+def _fetch_body(
+    client, folder: str, uid: int, expect_uidvalidity: int | None = None,
+) -> bytes | None:
     try:
-        client.select_folder(folder, readonly=True)
+        info = client.select_folder(folder, readonly=True)
     except IMAPClientError as ex:
         print(f"select {folder!r} failed: {ex}", file=sys.stderr)
         return None
+    if expect_uidvalidity is not None:
+        # A UID only names a message within one UIDVALIDITY. After a reset
+        # the same number can be a different message.
+        try:
+            uv = int(info[b"UIDVALIDITY"])
+        except (KeyError, TypeError, ValueError):
+            uv = None
+        if uv != expect_uidvalidity:
+            print(
+                f"{folder!r} UIDVALIDITY is {uv}, but the database row is "
+                f"from {expect_uidvalidity}; uid {uid} may be another "
+                "message now, so it is not scanned",
+                file=sys.stderr,
+            )
+            return None
     rows = list(fetch_under_cap(client, [uid]))
     if not rows:
         return None
     _got_uid, data, oversize = rows[0]
+    if not data:
+        print(f"uid {uid} is not in {folder!r} (moved or deleted)", file=sys.stderr)
+        return None
     if oversize:
         size = data.get(b"RFC822.SIZE")
         print(
@@ -57,7 +77,13 @@ def _fetch_body(client, folder: str, uid: int) -> bytes | None:
     return raw if raw else None
 
 
-def _lookup_uid_by_msgid(account: str, msgid: str) -> tuple[str, int] | None:
+_AMBIGUOUS = "ambiguous"
+
+
+def _lookup_uid_by_msgid(
+    account: str, msgid: str,
+) -> tuple[str, int, int, str] | str | None:
+    """(folder, uidvalidity, uid, current_folder), _AMBIGUOUS, or None."""
     init_db()
     db = Db(account)
     try:
@@ -81,9 +107,12 @@ def _lookup_uid_by_msgid(account: str, msgid: str) -> tuple[str, int] | None:
                     f"current_folder={r['current_folder']!r}",
                     file=sys.stderr,
                 )
-            return None
+            return _AMBIGUOUS
         r = rows[0]
-        return str(r["folder"]), int(r["uid"])
+        return (
+            str(r["folder"]), int(r["uidvalidity"]), int(r["uid"]),
+            str(r["current_folder"]),
+        )
     finally:
         db.close()
 
@@ -120,13 +149,24 @@ def main(argv: list[str] | None = None) -> int:
 
     folder: str | None = args.folder
     uid: int | None = args.uid
+    expect_uv: int | None = None
     if args.message_id:
         found = _lookup_uid_by_msgid(acc.name, args.message_id)
+        if found == _AMBIGUOUS:
+            return 2
         if found is None:
             print(f"message-id not in DB: {args.message_id}", file=sys.stderr)
             return 2
-        folder, uid = found
-        print(f"resolved message-id -> folder={folder!r} uid={uid}")
+        folder, expect_uv, uid, current = found
+        print(
+            f"resolved message-id -> folder={folder!r} "
+            f"uidvalidity={expect_uv} uid={uid}"
+        )
+        if current != folder:
+            print(
+                f"note: the database last saw it move to {current!r}",
+                file=sys.stderr,
+            )
 
     assert uid is not None
 
@@ -141,7 +181,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             folder = resolve_folder(folder, delim)
 
-        raw = _fetch_body(client, folder, uid)
+        raw = _fetch_body(client, folder, uid, expect_uidvalidity=expect_uv)
         if not raw:
             print(f"no body for uid={uid} in {folder!r}", file=sys.stderr)
             return 1

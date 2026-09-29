@@ -186,3 +186,61 @@ def test_explain_ambiguous_message_id_prints_candidates(tmp_path, monkeypatch, c
     assert "ambiguous" in err
     assert "uid=10" in err
     assert "uid=11" in err
+
+
+# ----- FABLE-CR-022 -----------------------------------------------------------
+
+
+class _UVIMAP(FakeIMAP):
+    def __init__(self, raw, uidvalidity, **kw):
+        super().__init__(raw, **kw)
+        self.uidvalidity = uidvalidity
+
+    def select_folder(self, folder, readonly=False):
+        info = super().select_folder(folder, readonly)
+        info[b"UIDVALIDITY"] = self.uidvalidity
+        return info
+
+
+def _msgid_setup(tmp_path, monkeypatch, client):
+    f.DB_PATH = tmp_path / "spamfilter.db"
+    f.init_db()
+    db = f.Db("acct")
+    with db.tx():
+        db.upsert_imap_message("INBOX", 1, 10, message_id="one@id")
+    db.close()
+    monkeypatch.setattr(es, "load_accounts", lambda _p: [_account()])
+    monkeypatch.setattr(es, "connect_imap", lambda _a: client)
+    monkeypatch.setattr(es, "detect_delimiter", lambda _c: "/")
+    monkeypatch.setattr(es, "apply_special_use_remap", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        es, "rspamd_scan_detail",
+        lambda *a, **k: f.ScanResult(score=1.0, action="no action", symbols=()),
+    )
+
+
+def test_explain_message_id_refuses_a_uidvalidity_mismatch(tmp_path, monkeypatch, capsys):
+    client = _UVIMAP(_raw(), uidvalidity=2)
+    _msgid_setup(tmp_path, monkeypatch, client)
+    rc = es.main(["acct", "--message-id", "<one@id>"])
+    assert rc == 1
+    assert "UIDVALIDITY is 2" in capsys.readouterr().err
+    assert client.fetch_calls == []
+
+
+def test_explain_message_id_matching_uidvalidity_scans(tmp_path, monkeypatch, capsys):
+    client = _UVIMAP(_raw(), uidvalidity=1)
+    _msgid_setup(tmp_path, monkeypatch, client)
+    assert es.main(["acct", "--message-id", "<one@id>"]) == 0
+
+
+def test_explain_missing_uid_is_not_reported_as_oversize(monkeypatch, capsys):
+    client = FakeIMAP(_raw(), missing=True)
+    monkeypatch.setattr(es, "load_accounts", lambda _p: [_account()])
+    monkeypatch.setattr(es, "connect_imap", lambda _a: client)
+    monkeypatch.setattr(es, "detect_delimiter", lambda _c: "/")
+    monkeypatch.setattr(es, "apply_special_use_remap", lambda *_a, **_k: None)
+    assert es.main(["acct", "--uid", "7"]) == 1
+    err = capsys.readouterr().err
+    assert "not in 'INBOX'" in err
+    assert "5 MiB" not in err
