@@ -1616,3 +1616,74 @@ def test_rspamd_stats_do_not_follow_redirects(monkeypatch):
     monkeypatch.setattr(d.requests, "get", fake_get)
     assert d._rspamd_stats() is None
     assert seen["allow_redirects"] is False
+
+
+def test_post_logout_clears_the_session(monkeypatch):
+    """FABLE-CR-025: only 'GET /logout is 405' was covered."""
+    monkeypatch.setenv("DASHBOARD_USER", "admin")
+    monkeypatch.setenv("DASHBOARD_PASSWORD", "pw")
+    monkeypatch.setattr(d, "_spend_auth_cost", lambda _password: None)
+    client = d.app.test_client()
+    assert client.post(
+        "/login", data={"username": "admin", "password": "pw"},
+    ).status_code == 302
+    resp = client.post("/logout", follow_redirects=False)
+    assert resp.status_code in (302, 303)
+    with client.session_transaction() as sess:
+        assert "user" not in sess
+    assert client.get("/", follow_redirects=False).status_code == 302
+
+
+def test_messages_page_escapes_attacker_controlled_mail_fields(dashboard_db, monkeypatch):
+    """FABLE-CR-025: subject, sender and score_detail symbols come from mail."""
+    now = int(time.time())
+    conn = sqlite3.connect(dashboard_db)
+    conn.execute(
+        """
+        INSERT INTO messages(
+            account, folder, uidvalidity, uid, message_id, body_sha256,
+            first_seen, last_seen, current_folder, our_score, score_detail,
+            our_action, sender, subject, received_at
+        ) VALUES ('acct-alpha', 'INBOX', 1, 99, 'x@id', 'evil-body', ?, ?,
+                  'INBOX', 3.0, ?, NULL, ?, ?, ?)
+        """,
+        (
+            now, now,
+            '{"score":3.0,"symbols":[{"n":"<b>SYM</b>","s":3.0,"d":"<i>d</i>"}]}',
+            '"><img src=x onerror=alert(1)>@evil.example',
+            "<script>alert(1)</script>",
+            now,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    html = client.get("/messages").data
+    assert b"<script>alert(1)</script>" not in html
+    assert b"&lt;script&gt;" in html
+    assert b"<img src=x" not in html
+    assert b"<b>SYM</b>" not in html
+
+
+def test_list_save_logs_a_dashboard_event_with_the_actor(dashboard_db, tmp_path, monkeypatch):
+    """FABLE-CR-025: slice 12's list_dashboard_save event was never asserted."""
+    monkeypatch.setattr(d, "CONFIG_PATH", _list_yaml(tmp_path))
+    user = d._User("admin", "plain:stable", True, frozenset())
+    client = _authenticated_client(monkeypatch, user)
+    client.get("/lists/domains")
+    with client.session_transaction() as sess:
+        token = sess["csrf"]
+    assert client.post("/lists/domains", data={
+        "csrf_token": token, "scope": "rjmetalfab.com", "kind": "block",
+        "body": "@spam.example\n",
+    }).status_code == 302
+    conn = sqlite3.connect(dashboard_db)
+    rows = conn.execute(
+        "SELECT account, detail FROM events WHERE event='list_dashboard_save'"
+    ).fetchall()
+    conn.close()
+    assert rows == [(
+        "_dashboard",
+        "scope=domain:rjmetalfab.com kind=block n=1 flipped=0 actor=admin",
+    )]
