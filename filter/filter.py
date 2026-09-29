@@ -5026,6 +5026,25 @@ def _move_clearing_source(
 # to find a genuine leftover copy, and anything unverified is MOVEd.
 _IDENTICAL_COPY_MAX_CANDIDATES = 20
 
+# imapclient sends a SEARCH argument as a bare atom unless it contains a
+# space, '"' or '\'. The Message-ID is sender-controlled: `{5}` at the end
+# of the line is an IMAP literal marker (the server waits for 5 bytes and
+# the session hangs until the socket timeout), CR/LF splits the command,
+# and 8-bit text raises UnicodeEncodeError. None of those is an
+# IMAPClientError, so each would abort the account pass on every retry.
+_SEARCH_UNSAFE_MSGID_CHARS = frozenset('"\\{}()')
+
+
+def _search_safe_msgid(msgid: str) -> bool:
+    """True when `msgid` can be sent as an IMAP SEARCH HEADER value."""
+    return bool(
+        msgid
+        and msgid.isascii()
+        and msgid.isprintable()
+        and not any(ch.isspace() for ch in msgid)
+        and not (set(msgid) & _SEARCH_UNSAFE_MSGID_CHARS)
+    )
+
 
 def _identical_copies_in_folder(
     client: IMAPClient,
@@ -5042,7 +5061,20 @@ def _identical_copies_in_folder(
     must never justify expunging the dragged message: a different message
     that merely shares the Message-ID would make the drag delete mail. Only
     a candidate whose fetched body hashes to the same SHA-256 counts.
+
+    A Message-ID that is not safe to put in a SEARCH command is never sent
+    to the server; that pair simply has no verified copy, which every
+    caller already treats as the safe outcome.
     """
+    unsafe = {pair for pair in wanted if not _search_safe_msgid(pair[0])}
+    if unsafe:
+        log.info(
+            "%d Message-ID(s) not safe to search in %s; treating as "
+            "unverified: %s",
+            len(unsafe), folder,
+            ", ".join(repr(m[:80]) for m, _s in sorted(unsafe)[:3]),
+        )
+        wanted = wanted - unsafe
     if not wanted:
         return set()
     try:
