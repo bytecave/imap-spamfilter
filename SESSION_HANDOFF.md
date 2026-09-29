@@ -53,6 +53,12 @@ From the live rspamd log (read-only):
 - A plain `--all-trained` re-feed returns 208 ("already") from rspamd's learn cache and restores nothing.
 - Rebuilding the notebook (backup, clear the `bytelord` notebook including its learn cache, re-feed Trained-*) is an **operator decision**.
 
+### Trained-* retention: 60 days from arrival (live 2026-09-29 10:39 Pacific)
+
+`defaults.trained_retention_days: 60` is in the live `accounts.yml`. rich_bytecave's temporary `0` was removed. Trained-* ages now count from when the filter first saw the message in that folder (new `trained_arrival` table), not from delivery. Without that, 60 days would have swept ~311 of the just-rescued messages at once.
+
+The clock started 2026-09-29 10:39 for 1,097 Trained-Ham and 118 Trained-Spam in rich_bytecave. The first possible sweep is 2026-11-28. The filter was rebuilt and recreated, and 18/18 accounts are connected.
+
 ### BAYES REBUILT 2026-09-29 02:29–03:48 Pacific (Claude, at the operator's request)
 
 **Backups first:**
