@@ -965,7 +965,60 @@ def connect_imap(acc: Account, timeout: int = 60) -> IMAPClient:
     if acc.tls_mode == "starttls":
         client.starttls(ssl_context=ssl_ctx)
     client.login(acc.user, acc.password)
+    _install_imap_audit(client, logging.getLogger(acc.name))
     return client
+
+
+# IMAP commands that change a mailbox. Every one the filter sends is logged
+# as `imap_audit <command> in=<selected folder> <args>`, so a question like
+# "did the filter move this?" is answered by the log, not by inference.
+_IMAP_AUDIT_OPS = frozenset({
+    "STORE", "COPY", "MOVE", "EXPUNGE", "APPEND", "CREATE", "DELETE",
+    "RENAME", "SUBSCRIBE", "UNSUBSCRIBE",
+})
+
+
+def _audit_arg(value: Any) -> str:
+    text = value.decode("utf-8", "replace") if isinstance(value, (bytes, bytearray)) else str(value)
+    return text if len(text) <= 300 else text[:300] + "..."
+
+
+def _install_imap_audit(client: IMAPClient, log: logging.Logger) -> None:
+    """Log every mailbox-changing IMAP command this client sends.
+
+    Wraps imaplib's single command entry point, so nothing the filter (or
+    imapclient on its behalf) sends can bypass it. SELECT/EXAMINE are
+    tracked to say which folder a UID command applied to; they are logged
+    too when IMAP_AUDIT=verbose. LOGIN is never logged.
+    """
+    imap = getattr(client, "_imap", None)
+    if imap is None or getattr(imap, "_filter_audit", False):
+        return
+    original = imap._command
+    verbose = os.environ.get("IMAP_AUDIT", "").strip().lower() == "verbose"
+    state = {"folder": None, "readonly": False}
+
+    def _command(name: str, *args: Any) -> Any:
+        verb = str(name).upper()
+        uid = verb == "UID" and bool(args)
+        op = str(args[0]).upper() if uid else verb
+        rest = args[1:] if uid else args
+        if op in ("SELECT", "EXAMINE") and rest:
+            state["folder"] = _audit_arg(rest[0])
+            state["readonly"] = op == "EXAMINE"
+            if verbose:
+                log.info("imap_audit %s %s", op, state["folder"])
+        elif op in _IMAP_AUDIT_OPS:
+            shown = [_audit_arg(a) for a in (rest[:1] if op == "APPEND" else rest)]
+            log.info(
+                "imap_audit %s%s in=%s%s %s",
+                "UID " if uid else "", op, state["folder"],
+                " (read-only)" if state["readonly"] else "", " ".join(shown),
+            )
+        return original(name, *args)
+
+    imap._command = _command
+    imap._filter_audit = True
 
 
 def wait_between_scans(

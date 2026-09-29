@@ -670,3 +670,40 @@ def test_junk_retention_still_counts_from_delivery(tmp_path):
     f.retention_sweep(client, db, LOG, acc, FMAP)
     assert client.moved == [([5], "Trash")]
     assert _arrivals(db) == []
+
+
+# ----- IMAP audit log (debugging the Junk bounce, 2026-09-29) ---------------
+
+
+class _FakeImaplib:
+    def __init__(self):
+        self.sent = []
+
+    def _command(self, name, *args):
+        self.sent.append((name, args))
+        return "tag"
+
+
+def test_imap_audit_logs_mutations_with_the_selected_folder(caplog):
+    client = SimpleNamespaceClient()
+    f._install_imap_audit(client, logging.getLogger("acct"))
+    caplog.set_level(logging.INFO)
+    imap = client._imap
+    imap._command("LOGIN", "user", '"secret"')
+    imap._command("SELECT", '"Junk Email"')
+    imap._command("UID", "STORE", "199912", "+FLAGS", "(\\Flagged)")
+    imap._command("UID", "MOVE", "5,6", '"INBOX"')
+    imap._command("EXAMINE", "INBOX")
+    imap._command("UID", "FETCH", "7", "(BODY.PEEK[])")
+    text = caplog.text
+    assert 'imap_audit UID STORE in="Junk Email" 199912 +FLAGS (\\Flagged)' in text
+    assert 'imap_audit UID MOVE in="Junk Email" 5,6 "INBOX"' in text
+    assert "FETCH" not in text and "secret" not in text and "LOGIN" not in text
+    assert len(imap._inner.sent) == 6          # every command still reaches the server
+
+
+class SimpleNamespaceClient:
+    def __init__(self):
+        inner = _FakeImaplib()
+        self._imap = inner
+        inner._inner = inner
