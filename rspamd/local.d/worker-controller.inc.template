@@ -10,3 +10,6 @@ enable_password = "${RSPAMD_PASSWORD}";
 # here: that would grant password-free privileged controller access to
 # any container on the network.
 secure_ip = "127.0.0.1";
+# Neither the filter nor the dashboard asks rspamd to read local files or
+# shared memory; a password does not gate that feature, so turn it off.
+allow_file_and_shm_inputs = false;

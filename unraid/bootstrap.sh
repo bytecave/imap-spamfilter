@@ -273,12 +273,14 @@ RSPAMD_FILES=(
   redis.conf.template
   classifier-bayes.conf
   worker-normal.inc
+  worker-proxy.inc
   worker-controller.inc.template
   options.inc
   actions.conf
   fuzzy_check.conf
   neural.conf
   rbl.conf
+  rbl_group.conf
   hfilter_group.conf
   url_suspect.conf
 )
