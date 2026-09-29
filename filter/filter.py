@@ -2760,7 +2760,10 @@ def parse_envelope(raw: bytes) -> tuple[str | None, str, str]:
     """Return (message_id, subject, sender_address). Never raises."""
     try:
         msg = email.message_from_bytes(raw, policy=email.policy.compat32)
-        msgid = msg.get("Message-ID", "").strip()
+        # compat32 returns an email.header.Header (not a str) when the raw
+        # value has 8-bit bytes; .strip() on it would raise and drop the
+        # Subject and From as well.
+        msgid = str(msg.get("Message-ID", "") or "").strip()
         if msgid:
             m = re.search(r"<([^>]+)>", msgid)
             if m:

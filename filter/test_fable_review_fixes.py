@@ -327,3 +327,38 @@ def test_later_arrival_of_a_restored_body_is_a_user_revert(tmp_path, monkeypatch
 
 def test_fake_copy_matches_imapclient_return_value():
     assert RecordingIMAP(existing=_all_existing()).copy([1], "INBOX") is None
+
+
+# ----- FABLE-CR-012: an 8-bit Message-ID must not erase Subject and From ----
+
+
+def test_parse_envelope_keeps_subject_and_from_with_8bit_message_id():
+    raw = (
+        b"From: Sender <sender@example.com>\r\n"
+        b"Subject: hello\r\n"
+        b"Message-ID: <abc\xc3\xa4@example.de>\r\n"
+        b"\r\nbody\r\n"
+    )
+    msgid, subject, sender = f.parse_envelope(raw)
+    assert subject == "hello"
+    assert sender == "sender@example.com"
+    assert msgid and msgid.endswith("@example.de")
+    # Such an ID is stored for display but never sent to an IMAP SEARCH.
+    assert not f._search_safe_msgid(msgid)
+
+
+def test_list_drag_of_8bit_message_id_mail_still_records_the_sender(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(actual_name="Test User")
+    monkeypatch.setattr(f, "rspamd_learn", lambda *a, **k: "learned")
+    raw = (
+        b"From: friend@example.com\r\nSubject: hi\r\n"
+        b"Message-ID: <x\xc3\xa4@example.de>\r\n\r\nbody\r\n"
+    )
+    client = RecordingIMAP(
+        existing=_all_existing(), search_uids=[3],
+        fetch_by_uid={3: {b"BODY[]": raw, b"FLAGS": ()}},
+    )
+    f.drain_list_allow(client, db, LOG, acc, FMAP)
+    assert db.list_get("person", "Test User", "allow") == ["friend@example.com"]
+    assert client.moved == [([3], FMAP["inbox"])]
