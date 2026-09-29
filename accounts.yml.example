@@ -105,6 +105,8 @@ accounts:
 #   threshold: 9.0          # Inbox → Junk when score >= this
 #   rescue_below: 4.0       # provider Junk → Inbox only when score < this
 #   flag_untrained_junk: false  # follow-up flag on new, untaught Junk mail
+#   m365_auth_trust: true   # trust Microsoft 365's Authentication-Results;
+#                           # set false for a non-Microsoft 365 mailbox
 #   junk_retention_days: 30
 #   flip_flop_cooldown_seconds: 1   # 0 disables; default 600
 #   max_list_per_run: 100           # IMAP list-folder drain cap (slice 11)

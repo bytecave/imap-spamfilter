@@ -198,6 +198,7 @@ def main(argv: list[str] | None = None) -> int:
         result = rspamd_scan_detail(
             raw, recipient, acc.reject_score_above,
             bayes_user=acc.bayes_user or acc.user,
+            m365_auth_trust=getattr(acc, "m365_auth_trust", True),
         )
         if result is None:
             print("scan failed (rspamd unreachable or invalid score)", file=sys.stderr)

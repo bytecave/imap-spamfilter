@@ -569,6 +569,13 @@ class Account:
     # default. Does not revisit UIDs already at or below the Junk bookmark.
     flag_untrained_junk: bool = False
 
+    # Bucket B: believe the outermost Authentication-Results header when it
+    # is Microsoft 365's stamp. Only safe for a mailbox Microsoft delivers
+    # to (Microsoft always adds its own header on top). Set false for any
+    # other mailbox: there a sender's forged "mx.microsoft.com" header
+    # would be the outermost one.
+    m365_auth_trust: bool = True
+
     # Shared immutable roster from YAML; empty if list_domains omitted.
     list_roster: ListRoster = field(default_factory=ListRoster)
 
@@ -616,6 +623,9 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "threshold": 8.0,
     "rescue_below": 4.0,
     "flag_untrained_junk": False,
+    # True: every live mailbox is Microsoft 365. Set false per account for
+    # any mailbox that is not delivered by Microsoft (see Account).
+    "m365_auth_trust": True,
     "min_threshold_allowed": 5.0,
     "reject_score_above": 100.0,
     "move_grace_seconds": 60,
@@ -1125,6 +1135,11 @@ def load_accounts(path: Path) -> list[Account]:
                 flag_untrained_junk=_parse_bool(
                     merged["flag_untrained_junk"],
                     key="flag_untrained_junk",
+                    account=name,
+                ),
+                m365_auth_trust=_parse_bool(
+                    merged["m365_auth_trust"],
+                    key="m365_auth_trust",
                     account=name,
                 ),
                 move_grace_seconds=_parse_int(
@@ -2422,7 +2437,8 @@ class Db:
 
 
 def rspamd_scan_detail(
-    raw: bytes, recipient: str, max_score: float, bayes_user: str | None = None
+    raw: bytes, recipient: str, max_score: float, bayes_user: str | None = None,
+    *, m365_auth_trust: bool = True,
 ) -> ScanResult | None:
     """POST to /checkv2. Return score + symbol breakdown, or None on error.
 
@@ -2489,14 +2505,14 @@ def rspamd_scan_detail(
         action = data.get("action")
         if not isinstance(action, str):
             action = None
-        return apply_m365_auth_trust(
-            raw,
-            ScanResult(
-                score=score,
-                symbols=parse_scan_symbols(data),
-                action=action,
-            ),
+        result = ScanResult(
+            score=score,
+            symbols=parse_scan_symbols(data),
+            action=action,
         )
+        if not m365_auth_trust:
+            return result
+        return apply_m365_auth_trust(raw, result)
     except (requests.RequestException, TypeError, ValueError, OverflowError):
         return None
 
@@ -3367,6 +3383,7 @@ def _score_and_store(
     scan_detail = rspamd_scan_detail(
         raw, recipient, acc.reject_score_above,
         bayes_user=acc.bayes_user or acc.user,
+        m365_auth_trust=acc.m365_auth_trust,
     )
     if scan_detail is None:
         log.warning(
@@ -3889,7 +3906,9 @@ def _scan_inbox_uid_batch(
                     # The allow hit came from spoofable From/Sender headers.
                     # If Microsoft's trusted AR says the message is spoofed,
                     # keep it in Inbox (allow wins) but warn the user.
-                    spoof_suspect = m365_spoof_verdict(raw) and (
+                    spoof_suspect = (
+                        acc.m365_auth_trust and m365_spoof_verdict(raw)
+                    ) and (
                         prior is None or prior["our_action"] != "allowlisted"
                     )
                     with db.tx():
@@ -4173,7 +4192,9 @@ def execute_due_moves(client: IMAPClient, db: Db, log: logging.Logger, acc: Acco
     log.info("moved %d message(s) inbox->junk", len(to_move))
 
 
-def _rescue_blocker(raw: bytes, *, received_at: int | None = None) -> str | None:
+def _rescue_blocker(
+    raw: bytes, *, received_at: int | None = None, m365_auth_trust: bool = True,
+) -> str | None:
     """Reason a Junk message must not be rescued to Inbox, or None.
 
     Rescue overrides the provider's Junk decision, and allow hits match the
@@ -4182,7 +4203,7 @@ def _rescue_blocker(raw: bytes, *, received_at: int | None = None) -> str | None
     (INTERNALDATE) is given, refuse messages older than RESCUE_MAX_AGE_S:
     those were moved into Junk by the user, not delivered there.
     """
-    if m365_spoof_verdict(raw):
+    if m365_auth_trust and m365_spoof_verdict(raw):
         return "m365_spoof_verdict"
     if received_at is not None and time.time() - received_at > RESCUE_MAX_AGE_S:
         return "old_internaldate"
@@ -4253,7 +4274,7 @@ def execute_due_rescues(
                 detail=f"uid={uid} oversize={oversize}",
             )
             continue
-        blocked = _rescue_blocker(raw)
+        blocked = _rescue_blocker(raw, m365_auth_trust=acc.m365_auth_trust)
         if blocked is not None:
             with db.tx():
                 db.drop_pending_move(junk, uv, uid)
@@ -4504,6 +4525,7 @@ def poll_junk(
                     if hit is not None or score < acc.rescue_below:
                         blocked = _rescue_blocker(
                             raw, received_at=_internaldate_ts(data),
+                            m365_auth_trust=acc.m365_auth_trust,
                         )
                         if blocked is not None:
                             detail = (

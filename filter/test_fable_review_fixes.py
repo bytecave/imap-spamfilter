@@ -528,3 +528,81 @@ def test_already_learned_404_ends_the_train_retry_loop(tmp_path, monkeypatch):
     f.drain_train_spam(client, db, LOG, acc, FMAP)
     assert client.moved == [([7], FMAP["trained_spam"])]
     assert db.get_imap_message(FMAP["spam_train"], 1, 7)["learned_as"] == "spam"
+
+
+# ----- FABLE-CR-011: per-mailbox trust in Microsoft's auth verdict ----------
+
+from test_connection import _write_accounts  # noqa: E402
+
+# A forged "Microsoft" stamp, exactly what a sender could put at the top of a
+# message delivered to a mailbox Microsoft does not host.
+RAW_FORGED_M365_AR = (
+    b"Authentication-Results: mx.microsoft.com; spf=pass; dkim=pass; "
+    b"dmarc=pass; compauth=pass\r\n"
+    b"From: ceo@bank.example\r\nTo: u@example.com\r\nSubject: wire\r\n"
+    b"Message-ID: <w1@bank.example>\r\n\r\nbody\r\n"
+)
+RAW_M365_SPOOF = (
+    b"Authentication-Results: mx.microsoft.com; spf=fail; dkim=none; "
+    b"dmarc=fail; compauth=fail reason=000\r\n"
+    b"From: friend@example.com\r\nTo: u@example.com\r\nSubject: hi\r\n\r\nb\r\n"
+)
+
+
+def test_m365_auth_trust_defaults_on_and_parses(tmp_path):
+    assert f.load_accounts(_write_accounts(tmp_path, ""))[0].m365_auth_trust is True
+    path = _write_accounts(tmp_path, "    m365_auth_trust: false\n")
+    assert f.load_accounts(path)[0].m365_auth_trust is False
+    path = _write_accounts(tmp_path, '    m365_auth_trust: "sometimes"\n')
+    with pytest.raises(f.ConfigError, match="m365_auth_trust"):
+        f.load_accounts(path)
+
+
+def _checkv2_with_auth_failures(monkeypatch):
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"score": 9.0, "action": "add header", "symbols": {
+                "R_DKIM_REJECT": {"score": 1.0},
+                "BLACKLIST_DMARC": {"score": 6.0},
+                "BAYES_SPAM": {"score": 2.0},
+            }}
+
+    monkeypatch.setattr(f.requests, "post", lambda *a, **k: _Resp())
+
+
+def test_trusting_mailbox_drops_auth_failure_weight(monkeypatch):
+    _checkv2_with_auth_failures(monkeypatch)
+    result = f.rspamd_scan_detail(RAW_FORGED_M365_AR, "u@example.com", 100.0)
+    assert result.score == pytest.approx(2.0)
+
+
+def test_untrusting_mailbox_keeps_auth_failure_weight(monkeypatch):
+    _checkv2_with_auth_failures(monkeypatch)
+    result = f.rspamd_scan_detail(
+        RAW_FORGED_M365_AR, "u@example.com", 100.0, m365_auth_trust=False,
+    )
+    assert result.score == pytest.approx(9.0)
+
+
+def test_scan_path_passes_the_account_switch(tmp_path, monkeypatch):
+    db = _mk_db(tmp_path)
+    acc = _mk_account(m365_auth_trust=False)
+    seen = {}
+
+    def fake_detail(*a, **k):
+        seen.update(k)
+        return f.ScanResult(1.0, (), None)
+
+    monkeypatch.setattr(f, "rspamd_scan_detail", fake_detail)
+    with db.tx():
+        db.upsert_imap_message("INBOX", 1, 1)
+    f._score_and_store(db, LOG, acc, None, "INBOX", 1, 1, RAW_FORGED_M365_AR, None)
+    assert seen["m365_auth_trust"] is False
+
+
+def test_rescue_spoof_block_needs_m365_trust():
+    assert f._rescue_blocker(RAW_M365_SPOOF) == "m365_spoof_verdict"
+    assert f._rescue_blocker(RAW_M365_SPOOF, m365_auth_trust=False) is None
