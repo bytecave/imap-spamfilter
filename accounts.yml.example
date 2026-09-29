@@ -7,9 +7,12 @@
 # Full list of overridable keys: see "Configuration reference" in README.md.
 
 # Operating modes (set per-account or in `defaults:`):
-#   shadow - scan + log only. No writes to Inbox, Junk, or Trash.
-#            Train-* folders may still be created and drained so Bayes
-#            can be bootstrapped during evaluation.          <- start here
+#   shadow - scan + log only: no score moves, flags, rescues, or
+#            retention.                                    <- start here
+#            Folders the user drags mail into still act: Train-* are
+#            drained (Train-Ham also copies back to the Inbox), and
+#            Allowlist/Blocklist MOVE to Inbox/Junk. flag_untrained_junk,
+#            when on, flags new untrained Junk in every mode.
 #   flag   - shadow + sets \Flagged on suspect Inbox mail; retention on
 #   move   - flag + MOVEs Inbox to Junk after move_grace_seconds
 # Promote shadow -> flag -> move once you trust the scores.

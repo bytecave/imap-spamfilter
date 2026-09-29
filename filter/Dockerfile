@@ -22,8 +22,10 @@ RUN pip install -r requirements.txt
 
 COPY filter.py bootstrap_train.py explain_score.py dashboard.py lists.js favicon.png ./
 
-# Read-only web dashboard; disabled by default. Operator opts in by
-# setting DASHBOARD_USER + DASHBOARD_PASSWORD.
+# Optional web dashboard (read-only pages; admins can edit allow/block
+# lists). Starts only once a user exists: state/dashboard_users (added with
+# `python dashboard.py`), DASHBOARD_USERS, or legacy DASHBOARD_USER +
+# DASHBOARD_PASSWORD.
 EXPOSE 8099
 
 RUN mkdir -p /state && chown -R 99:100 /app /state

@@ -2,10 +2,11 @@
 
 Hard rules enforced in this file:
   * Never EXPUNGE, never set \\Deleted, never IMAP DELETE, except to
-    finish a list-folder MOVE whose server left the source copy
-    (Exchange IMAP commonly implements UID MOVE as COPY). That
-    expunge is only the leftover Allowlist/Blocklist UID; Inbox
-    already has the live message.
+    finish a MOVE out of a filter-owned folder (Allowlist/Blocklist or
+    Train-*) whose server left the source copy (Exchange IMAP commonly
+    implements UID MOVE as COPY). Only that leftover UID is expunged,
+    and only once the destination holds the message (a verified
+    byte-identical copy for older leftovers).
   * "Remove" means IMAP MOVE to another folder. Trash retention is the
     mail provider's responsibility.
   * Fail closed: on any uncertainty (rspamd unreachable, parse error,
@@ -5625,7 +5626,8 @@ def main() -> int:
     init_db()
     install_signal_handlers()
 
-    # Optional read-only dashboard (Flask + waitress). Disabled unless
+    # Optional dashboard (Flask + waitress): read-only pages plus admin
+    # allow/block list editing. Disabled unless
     # at least one dashboard user is configured - via the
     # state/dashboard_users file, the DASHBOARD_USERS env var, or the
     # legacy DASHBOARD_USER + DASHBOARD_PASSWORD pair. dashboard.start()

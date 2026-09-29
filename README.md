@@ -18,11 +18,14 @@ Four containers on a shared `spamnet` Docker network:
 | spamfilter         | this repo (custom)     | Python service. One thread per account, IDLE on Inbox, polls Junk, scores, moves, learns. |
 
 Per-account operating modes (set in `accounts.yml`, promoted manually):
-- **shadow**  - scan + log only. No writes to Inbox, Junk, or Trash.
-  Train-* folders may still be created and drained so Bayes can be
-  bootstrapped during evaluation. `INBOX/Allowlist` and `INBOX/Blocklist`
-  may also be created and drained (person-list the From address; Allowlist
-  MOVEs to Inbox, Blocklist MOVEs to Junk). Inbox/Junk/Trash are not
+- **shadow**  - scan + log only: no score moves, no rescues, no
+  score flags, no retention. Folders the user drags mail into still act.
+  Train-* folders may be created and drained so Bayes can be
+  bootstrapped during evaluation, and Train-Ham copies each message back
+  to the Inbox. `INBOX/Allowlist` and `INBOX/Blocklist` may also be
+  created and drained (person-list the From address; Allowlist MOVEs to
+  Inbox, Blocklist MOVEs to Junk). With `flag_untrained_junk: true`, new
+  untrained Junk also gets `\Flagged`. Inbox/Junk/Trash are not
   auto-junked or auto-rescued in shadow.
 - **flag**    - shadow + sets `\Flagged` on suspect Inbox mail; retention on
 - **move**    - flag + after `move_grace_seconds`, MOVEs Inbox → Junk.
@@ -308,11 +311,22 @@ another folder leaves the original there as well.
 
 **b) bootstrap_train.py CLI (faster for one-off bulk runs)**
 
+Point it at a folder of your own (here `Bulk-Spam` / `Bulk-Ham`), not at
+the live `Train-Spam` / `Train-Ham`. The running filter drains those
+itself, and Train-Ham also copies each message back to the Inbox, which
+the CLI does not do. Folder names are full IMAP paths: single-account
+mode does no SPECIAL-USE remap, so on Microsoft 365 the junk parent is
+`Junk Email`. A source folder that does not exist is an error (exit 1).
+
 ```bash
-docker exec -it spamfilter python bootstrap_train.py your_name Train-Spam spam --dry-run
-docker exec -it spamfilter python bootstrap_train.py your_name Train-Spam spam --move-to Trained-Spam
-docker exec -it spamfilter python bootstrap_train.py your_name Train-Ham  ham  --move-to Trained-Ham
+docker exec -it spamfilter python bootstrap_train.py your_name Bulk-Spam spam --dry-run
+docker exec -it spamfilter python bootstrap_train.py your_name Bulk-Spam spam --move-to "Junk/Trained-Spam"
+docker exec -it spamfilter python bootstrap_train.py your_name Bulk-Ham  ham
 ```
+
+Without `--move-to` the messages are learned in place and stay where
+they are. Anything moved into `Trained-*` is swept to Trash by retention
+in `flag`/`move` mode.
 
 To re-feed every mailbox's existing **Trained-Spam / Trained-Ham** into a
 shared `bayes_user` notebook (in place, no MOVE; SPECIAL-USE remaps
@@ -538,7 +552,7 @@ user's mailbox.
 
 | Key | Default | Notes |
 | --- | --- | --- |
-| `mode` | `shadow` | `shadow` (no Inbox/Junk/Trash writes; Train-* drain allowed) \| `flag` \| `move` |
+| `mode` | `shadow` | `shadow` (no score moves, flags, rescues or retention; Train-*, list drags and `flag_untrained_junk` still act) \| `flag` \| `move` |
 | `threshold` | `8.0` | Inbox score >= this is moved to Junk in move mode |
 | `rescue_below` | `4.0` | provider Junk is moved to Inbox only when the first score is below this |
 | `flag_untrained_junk` | `false` | on mail newly arrived in Junk that has not been taught spam or ham, set Outlook's follow-up flag (`\Flagged`). Mail already in Junk is left alone. A user Inbox→Junk drag, and provider Junk that move mode is about to rescue, are not flagged |
