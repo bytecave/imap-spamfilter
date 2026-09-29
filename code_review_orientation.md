@@ -2,7 +2,7 @@
 
 **Written:** 2026-09-28 evening Pacific  
 **For:** the next agent doing a full code and security review of this filter  
-**Then:** the Outlook addon, which is still planned and is not in this repository
+**Then:** the Outlook add-in. Its requirements are in `outlook-addin/`; the add-in itself is not built yet.
 
 Read [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) and [`SESSION_HANDOFF.md`](SESSION_HANDOFF.md) before this file if you have not already. Those two are the product map. This file only says how to review.
 
@@ -10,7 +10,7 @@ Read [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) and [`SESSION_HANDOF
 
 A read-only pass over the filter as it runs on ByteLord: Python IMAP worker, dashboard, rspamd local config, and the deploy files that put them there. Report defects, unsafe defaults, and places where the code does not match the policy in `IMPLEMENTATION_STATUS.md`. Do not fix them in the same pass unless the operator asks.
 
-The Outlook addon is the work that comes **after** this review. It is not checked in here. A missing addon, a missing Outlook manifest, or the lack of an in-client button is not a finding. Do not start that addon during the review.
+The Outlook add-in is the work that comes **after** this review. `outlook-addin/outlook_spam_addin_requirements.md` describes a classic-Outlook VSTO ribbon that only moves or copies messages into the existing Train-*, Allowlist, and Blocklist folders. It does not call this filter. There is no add-in project, manifest, or installer in the tree yet. A missing binary is not a finding. Do not start the add-in during the review, and do not review those notes as if they were running code.
 
 ## Do not do these things
 

@@ -46,7 +46,7 @@ Also read `/home/bytecave/.claude/CLAUDE.md` (Cursor user rule) and use Agent Ma
 ### Next
 
 1. Another agent does a **full code and security review**. Start at [`code_review_orientation.md`](code_review_orientation.md). Do not deploy, rebuild, or change live mail during that review unless the operator asks.
-2. The **Outlook addon is still planned** and is not part of this repository. It waits until after that review.
+2. The **Outlook add-in is still planned.** `outlook-addin/` holds the requirements and setup notes (`d988d40`). Building it waits until after the review.
 3. CR-014 (Inbox→Junk MOVE-as-COPY leftover) is still open. CR-019 `Rcpt` and `DASHBOARD_TRUSTED_PROXIES` are still open.
 
 ### Retention is on for the move-mode mailbox
