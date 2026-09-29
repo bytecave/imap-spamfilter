@@ -70,6 +70,10 @@ services:
     container_name: spamfilter
     restart: unless-stopped
     logging: *log-rotate
+    # Time Docker waits after asking the filter to stop before killing it.
+    # The default 10 s can cut a MOVE off before its database update is
+    # written; account threads need up to ~30 s per step plus logout.
+    stop_grace_period: 90s
     depends_on: [spamfilter-rspamd]
     user: "${SPAMFILTER_UID:-99}:${SPAMFILTER_GID:-100}"
     volumes:

@@ -6,7 +6,10 @@ rspamd/local.d/redis.conf
 
 # Per-host data (Unraid appdata)
 state/
+secrets/
 redis-config/
+.bootstrap.version
+.bootstrap-stage.*/
 # redis/ holds the appdata data dir; the checked-in server config
 # template must stay tracked.
 redis/*
