@@ -82,7 +82,7 @@ docker run --rm -v "$PWD":/src:ro -w /src/filter python:3.12-slim \
   sh -c 'pip install -q -r requirements.txt pytest==8.4.2 && python -m pytest -q -p no:cacheprovider'
 ```
 
-Last full run: **487 passed** (2026-09-29, after the Fable 5.1 fixes; 429 before them). Re-run the suite after your fixes.
+Last full run: **501 passed** (2026-09-29, after the Fable 5.1 fixes and second pass; 429 before them). Re-run the suite after your fixes.
 
 ## Fixes are part of the review
 

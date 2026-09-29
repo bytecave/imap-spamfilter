@@ -164,6 +164,20 @@ Live config: **`rich_bytecave` is `move`**; every other account is **shadow**. `
    - dashboard cookie `Secure`;
    - rspamd hardening.
 5. **Tests:** 429 → **487 passed**. 47 of the new tests fail against the pre-review `f53586a`.
+6. **Second pass, same day (operator-approved):**
+   - Unbound recurses itself (FABLE-CR-005). It was forwarding to Cloudflare, which Spamhaus refuses.
+   - Blocklist rules cleaned up (FABLE-CR-032):
+     - the local duplicate Spamhaus rule is removed (the stock rule does it properly);
+     - Abusix is removed (it needs a key);
+     - SpamCop is weighted 1.5.
+   - `allow_file_and_shm_inputs = false` on the normal, controller and proxy workers.
+   - rspamd's "already learned" 404 counts as `already`.
+   - Per-account `m365_auth_trust` switch, default true (FABLE-CR-011).
+   - Dashboard cookie `Secure` on ByteLord (FABLE-CR-030).
+   - Tests: **501 passed**.
+   - DB backed up (`spamfilter.db.bak-20260929-013308-before-bayes-rescue`).
+   - Deleted Items rescue confirmed feasible, read-only (SESSION_HANDOFF).
+   - **Standing rule from the operator: never change rspamd code, only `local.d` configuration.**
 
 ### 2026-09-25 session (Claude Opus 5.5 extra code review — cloud session, no VPS access)
 
@@ -244,6 +258,9 @@ Full plan at `~/.cursor/plans/rspamd_4.2.0_upgrade_and_webui_link_18e83c16.plan.
 | Rspamd neural *(2026-09-25)* | `autotrain = false`; neural Redis keys deleted during deploy → no `NEURAL_*` score. **Stays off by decision** (next section). |
 | Caps | `max_list_per_run=100`, `max_list_entries=1000` |
 | Bayes token lifetime *(2026-09-29)* | Tokens never expire. `classifier-bayes.conf` must not set `expire`: any number turns on rspamd's `bayes_expiry`, and `0` deletes rare tokens (FABLE-CR-001; `test_config_files.py` guards it). **Not deployed yet.** |
+| DNS for blocklists *(2026-09-29)* | Unbound resolves from the root servers (`unbound/forward-records.conf` mounted over the image's Cloudflare forwarder). Stock Spamhaus ZEN/DBL, SURBL and URIBL rules score. Local `rbl.conf` adds only SpamCop (`Received:` hops, weight 1.5 in `rbl_group.conf`) (FABLE-CR-005/032). **Not deployed yet.** |
+| Microsoft auth trust *(2026-09-29)* | Per-account `m365_auth_trust`, default `true`. Set it `false` for any mailbox Microsoft 365 does not deliver to; that account then ignores `Authentication-Results` (no bucket B, no spoof verdict) (FABLE-CR-011). |
+| rspamd changes *(2026-09-29)* | **Configuration only (`rspamd/local.d/`); never patch rspamd code.** File/shm inputs are off on every worker. |
 | rspamd evaluation *(2026-09-29)* | `/checkv2` sends `Pass: all`, so every rule runs even past `reject = 15`. `actions.conf` is then truly cosmetic (FABLE-CR-004). **Not deployed yet.** |
 | Dashboard list Save *(2026-09-29)* | Writes only the (scope, kind) the page loaded (hidden fields). If the list or its sibling changed since the page was opened, it returns 409 and writes nothing (FABLE-CR-006/007). **Not deployed yet.** |
 
@@ -429,7 +446,7 @@ docker run --rm -v /opt/bytelord/projects/imap-spamfilter:/src -w /src/filter \
   "pip install -q -r requirements.txt pytest==8.4.2 && python -m pytest -q --tb=short"
 ```
 
-**Last known:** **487 passed** (2026-09-29, after the Fable 5.1 fixes; 429 before). Mount the whole repository as above: tests read `README.md`, `unraid/` and `rspamd/local.d/`.
+**Last known:** **501 passed** (2026-09-29, after the Fable 5.1 fixes and second pass; 429 before). Mount the whole repository as above: tests read `README.md`, `unraid/` and `rspamd/local.d/`.
 
 ### 5. Rafter / secrets
 

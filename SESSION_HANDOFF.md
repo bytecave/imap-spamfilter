@@ -1,6 +1,6 @@
 # Session handoff — imap-spamfilter (ByteLord VPS)
 
-**Last updated:** 2026-09-29 Pacific — the Claude Fable 5.1 code and security review is done, and its fixes are committed and pushed but **not deployed**. Deploy the Bayes-expiry fix first. Then comes the Outlook add-in.  
+**Last updated:** 2026-09-29 Pacific. The Claude Fable 5.1 code and security review is done. Its fixes, plus a second operator-approved pass (Unbound recursion, blocklist rules, the Microsoft-trust switch, the Secure cookie, rspamd file inputs off, the "already learned" 404), are committed and pushed but **not deployed**. Next: deploy the bundle, then rescue Trained-* mail from Deleted Items and rebuild Bayes, then the Outlook add-in.  
 **Repo:** `/opt/bytelord/projects/imap-spamfilter`  
 **Remote:** `github.com:bytecave/imap-spamfilter.git` (branch `main`)  
 **Upstream fork of:** marcelverdult/imap-spamfilter  
@@ -53,13 +53,43 @@ From the live rspamd log (read-only):
 - A plain `--all-trained` re-feed returns 208 ("already") from rspamd's learn cache and restores nothing.
 - Rebuilding the notebook (backup, clear the `bytelord` notebook including its learn cache, re-feed Trained-*) is an **operator decision**.
 
-### Then rebuild `spamfilter`
+### The deploy bundle (operator runs it; nothing has been run)
 
-1. Diff, back up and copy `deploy/bytelord-compose.yaml` to the live compose. The filter image is now tagged `imap-spamfilter:bytelord` (FABLE-CR-010), not the upstream author's registry name.
-2. Build and recreate `spamfilter` with `SPAMFILTER_UID=1001 SPAMFILTER_GID=1001`, as in the runbooks below.
-3. Leave Redis alone.
+The ordered, copy-paste steps are in [`CLAUDE_FABLE5.1_CODE_FIXED.md`](CLAUDE_FABLE5.1_CODE_FIXED.md) § "Deploying these fixes":
+1. Sync the compose file (Unbound mount, Secure cookie, image `imap-spamfilter:bytelord`).
+2. Recreate Unbound and check Spamhaus answers.
+3. Copy the rspamd `local.d` files, append one line to the rendered `worker-controller.inc`, run configtest, restart rspamd.
+4. Rebuild and recreate `spamfilter`.
 
-**Scores will change for high-scoring mail.** Scans now send `Pass: all` (FABLE-CR-004), so rspamd no longer stops evaluating at `reject = 15`.
+Redis is never touched.
+
+**Scores will move.**
+- Spamhaus, SpamCop and the URI blocklists start adding points (FABLE-CR-005/032).
+- Scans send `Pass: all`, so rspamd no longer stops at `reject = 15` (FABLE-CR-004).
+
+The operator chose to deploy without a watch period.
+
+### Bayes rescue from Deleted Items: feasibility confirmed (2026-09-29, read-only)
+
+**Database backup** (before any rescue): `/opt/bytelord/data/imap-spamfilter/state/spamfilter.db.bak-20260929-013308-before-bayes-rescue`. Taken with SQLite's online backup, `integrity_check` ok, 10,454 message rows, mode 0600.
+
+**Only `rich_bytecave` is affected.** It is the only move-mode mailbox, and retention is off in shadow. Retention moved **1,120 Trained-Ham + 103 Trained-Spam** to Deleted Items (events at 01:26, 02:07, 03:17 and 17:30 on 09-28). The database recorded, per moved message, the folder it came from:
+- **915 ham + 103 spam** rows carry a body SHA-256;
+- **202 ham** rows carry only a Message-ID;
+- **3 ham** were moved without a database row, so they can't be identified.
+
+Deleted Items holds 1,759 messages in all. A read-only sample (EXAMINE, nothing moved) matched every one it looked for:
+- 12/12 ham and 8/8 spam with a SHA were **byte-identical**;
+- 8/8 Message-ID-only ham were found; 6 matched exactly one message, 2 had duplicate copies.
+
+**Rescue rules** (tool to be written with the operator):
+- A Deleted Items message goes back to the Trained-* folder its row names only when its SHA matches.
+- For the 202 Message-ID-only rows: only when exactly one Deleted Items message has that ID, or when all copies are byte-identical.
+- Anything else stays in Deleted Items. That covers the ~536 messages retention did not put there.
+
+**Before moving anything back, stop Trained-* retention on `rich_bytecave`.** Set `trained_retention_days: 0` on that account in `accounts.yml` and restart `spamfilter`. Retention goes by the original delivery date, so otherwise the hourly sweep moves the rescued mail straight back to Deleted Items.
+
+The rebuild itself (clear the `bytelord` notebook **and** its learn cache, then `bootstrap_train.py --all-trained`) is still to be discussed.
 
 ### Test these first (human + Cursor), highest risk first
 
@@ -72,14 +102,23 @@ From the live rspamd log (read-only):
 | 5 | **FABLE-CR-008** oversize Train-Ham | Drop a message **over 5 MiB** into Train-Ham. A copy appears in the Inbox, and the Train-Ham message moves to Trained-Ham. |
 | 6 | **FABLE-CR-002 / 003** hostile headers | Nothing to trigger live. `scan_failed` / `scan_giveup` stay at 0. An occasional `not safe to search` info line in `docker logs spamfilter` is expected and harmless. |
 | 7 | **FABLE-CR-010** image name | After the deploy, `docker inspect -f '{{.Config.Image}}' spamfilter` → `imap-spamfilter:bytelord`. |
+| 7a | **FABLE-CR-005 / 032** blocklists | After the deploy, new mail's `score_detail` / `explain_score.py` show no more `RBL_SPAMHAUS_BLOCKED_OPENRESOLVER` / `URIBL_BLOCKED`. Real listings appear as `RBL_SPAMHAUS_*`, `RECEIVED_SPAMHAUS_*`, `DBL_*`, `URIBL_*`, `SURBL_*` or `RBL_SPAMCOP`. Report legitimate mail pushed over 8 by one of them. |
+| 7b | **FABLE-CR-030** Secure cookie | Log in at `https://spam.bytelord.net` and through the SSH tunnel at `http://127.0.0.1:8099`. Both must still work. |
+| 7c | **FABLE-CR-032** file inputs | `docker exec spamfilter-rspamd rspamadm configdump worker \| grep -c "allow_file_and_shm_inputs = false"` → **3**. Scans and learns still work. |
 | 8 | Tools | `bootstrap_train.py rich_bytecave NoSuchFolder spam --dry-run` exits **1**. `explain_score.py <acct> --message-id '<id>'` still explains a known message. |
 
 ### Operator decisions from this review (not changed in code)
 
 - Rebuilding the Bayes notebook after the FABLE-CR-001 deploy (see above).
-- **FABLE-CR-005:** Unbound forwards all DNS to Cloudflare, so Spamhaus and URIBL refuse the queries (`*_BLOCKED*` on 237 of 370 recent scans). Real recursion would turn those blocklists on, which is a scoring change. The steps are in the review.
-- **FABLE-CR-011:** trust in Microsoft `Authentication-Results` is global. Make it per account before adding any non-M365 mailbox.
-- **FABLE-CR-030** `DASHBOARD_COOKIE_SECURE`, **OPUS-CR-023** `DASHBOARD_TRUSTED_PROXIES`, and **FABLE-CR-032** rspamd hardening (`allow_file_and_shm_inputs = false`, a separate controller enable password).
+- FABLE-CR-005, 011 and 030, and the file-input and blocklist parts of 032, are **done** in the second pass (see the fix log).
+- **Won't fix, by operator decision:**
+  - `DASHBOARD_TRUSTED_PROXIES` (OPUS-CR-023);
+  - a separate controller enable password;
+  - a per-account healthcheck;
+  - CI token scope;
+  - image file ownership.
+- **Standing rule: never change rspamd code.** It is replaced on every upstream update. `local.d` configuration is fine.
+- **`m365_auth_trust`** defaults to true. Set `m365_auth_trust: false` on any future mailbox that Microsoft 365 does not deliver to.
 - Still open from before: CR-014 and CR-019.
 
 ### Supermemory

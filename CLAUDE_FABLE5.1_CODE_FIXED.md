@@ -2,12 +2,13 @@
 
 **Date:** 2026-09-29 (Pacific)
 **Review:** [`CLAUDE_FABLE5.1_CODE_REVIEW.md`](CLAUDE_FABLE5.1_CODE_REVIEW.md), written against `main` at `f53586a`
-**Result:** 32 findings. **25 were fixed in the tree**, each with regression tests or a config check. 7 are left as recommendations or operator decisions (see [Not fixed](#not-fixed--recommendations-and-operator-decisions)).
+**Result:** 32 findings. **25 were fixed in the review pass**, and on the operator's go-ahead **4 more (005, 011, 030, part of 032) in a second pass the same day**, each with tests or a config check. The rest are left as recommendations or won't-fix decisions (see [Not fixed](#not-fixed--recommendations-and-operator-decisions)).
 **Nothing is deployed.** The live containers still run the 2026-09-28 19:22 image and the old rspamd config. See [Deploying these fixes](#deploying-these-fixes).
 
 ## Contents
 
 - [Fixes](#fixes)
+- [Second pass: operator-approved follow-ups](#second-pass-operator-approved-follow-ups)
 - [Not fixed — recommendations and operator decisions](#not-fixed--recommendations-and-operator-decisions)
 - [Deploying these fixes](#deploying-these-fixes)
 - [What to test first](#what-to-test-first)
@@ -44,37 +45,79 @@ Ordered by severity, as in the review. Each row gives the commit and the tests t
 | FABLE-CR-025 | Low | Added the missing dashboard tests: wrong CSRF token, an authenticated Save over 16 KiB, POST `/logout`, `/messages` escaping of mail fields, and the `list_dashboard_save` event. | `0afa484`, `1473c14` | `test_dashboard.py` |
 | FABLE-CR-026 / 027 | Low | The orientation test command now mounts the whole repository. Stale docs were corrected: shadow "no writes", the "read-only" dashboard, and the hard-rules docstring. | `75c9fb9` and the docs commit | docs |
 
+## Second pass: operator-approved follow-ups
+
+After reading the plain-language summary of the open items, the operator asked for these to be fixed and bundled with the rest. Also on 2026-09-29:
+
+| ID | What changed | Commit | Tests / checks |
+|---|---|---|---|
+| FABLE-CR-005 | Both compose files mount `unbound/forward-records.conf`, which has no `forward-zone`, over the image's Cloudflare forwarder. Unbound now resolves from the root servers, so Spamhaus, URIBL and SURBL answer. Checked on this VPS with a throwaway container: ZEN returns its test codes `127.0.0.2/.4/.10` after a few seconds of cache warm-up, DBL returns `127.0.1.2`, and SpamCop, URIBL and SURBL all answer. The live forwarder returns `127.255.255.254` ("public resolver refused") for Spamhaus. No Spamhaus key is needed. | `75909a1` | `docker compose config`; live comparison |
+| FABLE-CR-011 | New per-account `m365_auth_trust` (default **true**, so the ten Microsoft 365 accounts are unchanged). When false, the account ignores `Authentication-Results` entirely: no bucket-B cancellation, and no Microsoft spoof verdict for rescue or the allowlist flag. Set it false for any future mailbox Microsoft 365 does not deliver to. | `2239d6c` | `test_fable_review_fixes.py` (config, scan both ways, scan path, rescue) |
+| FABLE-CR-030 | `DASHBOARD_COOKIE_SECURE: "1"` in the ByteLord compose. | `8b82a17` | `docker compose config` |
+| FABLE-CR-032 (part) | Configuration only; no rspamd code touched. `allow_file_and_shm_inputs = false` on the normal, controller and proxy workers (the proxy on `*:11332` is also reachable from spamnet). In `rbl.conf`, the unweighted duplicate Spamhaus ZEN rule is removed: the stock rule has per-listing symbols and weights and now works. Abusix is removed because it needs an account key; the comment says how to add it back. SpamCop is kept, checks `Received:` hops, and gets weight **1.5** in the new `rbl_group.conf`. Bootstrap installs the two new files. Validated with `rspamadm configtest` in a throwaway rspamd 4.2.0. | `2acdc08` | `test_config_files.py` (workers, RBL rules, weights, bootstrap file list) |
+| FABLE-CR-032 (part) | `rspamd_learn` treats rspamd 4.2's `404 "… has been already learned as …"` (from its learn cache) as `already`, so that message is no longer retried forever. Other 404s are still errors. | `1ff0efb` | `test_fable_review_fixes.py` |
+
+**Won't fix (operator decision):** the separate controller `enable_password`, a per-account healthcheck, CI token scope, image file ownership (all FABLE-CR-032), and `DASHBOARD_TRUSTED_PROXIES` (OPUS-CR-023). The operator's rule for this project: **never change rspamd code**, because it is replaced on every upstream update. Configuration in `local.d` is fine.
+
 ## Not fixed — recommendations and operator decisions
 
 | ID | Why it was left | Recommendation |
 |---|---|---|
 | FABLE-CR-001 (recovery) | Restoring the deleted tokens means rebuilding the shared `bytelord` notebook. That is an operator decision, and the orientation forbids wiping Bayes during the review. | After deploying the config fix, decide whether to rebuild: back up Redis, clear the `bytelord` notebook **including its learn cache**, then run `bootstrap_train.py --all-trained`. A plain re-feed returns 208 and restores nothing. Retention has already moved older `rich_bytecave` Trained-* mail to Deleted Items, so move it back into Trained-* first if you want it relearned. |
-| FABLE-CR-005 | Real Unbound recursion turns on Spamhaus/URIBL scoring on a live move-mode mailbox. That is a scoring change to schedule and watch. | Mount a recursion-only `forward-records.conf`, recreate Unbound, restart rspamd, and check `drill 2.0.0.127.zen.spamhaus.org`. Exact steps are in the review. |
-| FABLE-CR-011 | This is a configuration-surface change, and every live account is M365. | Add a per-account `m365_auth_trust` (default true) before adding any non-M365 mailbox. |
 | FABLE-CR-028 | Oversize mail skipping list routing is documented behaviour. | FETCH headers only for oversize UIDs and apply block/allow routing. |
 | FABLE-CR-029 | Noise only; recovery already works. | Classify token-expiry reconnects as `conn_recycled`. |
-| FABLE-CR-030 | Deploy change. | Set `DASHBOARD_COOKIE_SECURE: "1"` in the ByteLord compose. |
 | FABLE-CR-031 | Policy/UX items. | Let a correct password bypass the per-user lockout, and reserve the account name `admin`. |
-| FABLE-CR-032 | Hardening that needs rspamd/CI changes and a deploy. | Set `allow_file_and_shm_inputs = false`, use a separate controller `enable_password`, clean up `rbl.conf`, add a real per-account healthcheck, scope CI `packages: write`, keep the code root-owned in the image, and map a learn 404 to `already`. |
+| FABLE-CR-032 (rest) | Won't fix, by operator decision (see the second pass above). | — |
 
 The generic `docker-compose.yml` still tags its build with the upstream name, because that file is the upstream-style install path. Only the ByteLord compose was changed (FABLE-CR-010).
 
 ## Deploying these fixes
 
-Nothing below has been run. The operator decides when. Use the existing runbook pattern in `SESSION_HANDOFF.md`: diff first, back up, then check.
+Nothing below has been run; the operator decides when. It follows the runbook pattern in `SESSION_HANDOFF.md`: diff first, back up, then check. Run it from `/opt/bytelord/projects/imap-spamfilter` after `git pull`. Redis is never restarted.
 
-1. **Bayes expiry (FABLE-CR-001), most urgent.** Every hour it stays live deletes newly learned rare tokens.
+1. **Sync the compose file.** This carries the Unbound mount, the Secure cookie and the new image name.
    ```bash
-   cd /opt/bytelord/projects/imap-spamfilter
-   LIVE=/opt/bytelord/data/imap-spamfilter/rspamd/local.d
-   cp "$LIVE/classifier-bayes.conf" "$LIVE/classifier-bayes.conf.bak.$(date +%Y%m%d-%H%M%S)"
-   cp rspamd/local.d/classifier-bayes.conf "$LIVE/classifier-bayes.conf"
-   docker exec spamfilter-rspamd rspamadm configtest
-   docker restart spamfilter-rspamd
+   C=/opt/bytelord/compose/imap-spamfilter/compose.yaml
+   diff -u "$C" deploy/bytelord-compose.yaml     # expect only those three changes
+   cp "$C" "$C.bak.$(date +%Y%m%d-%H%M%S)" && cp deploy/bytelord-compose.yaml "$C"
+   docker compose -f "$C" config >/dev/null && echo OK
    ```
-   **Expect:** `syntax OK`; after the restart, `docker logs --since 10m spamfilter-rspamd 2>&1 | grep -c "finished expiry"` shows **0**, because the module is off. Redis is not touched.
-2. **Filter and dashboard code** (FABLE-CR-002…004, 006…009, 012…023): rebuild and recreate `spamfilter` only.
-3. **Compose image name (FABLE-CR-010):** sync `deploy/bytelord-compose.yaml` to `/opt/bytelord/compose/imap-spamfilter/compose.yaml` (diff, back up, `cp`, `config`) before the rebuild in step 2. The build then produces `imap-spamfilter:bytelord`. The old `ghcr.io/marcelverdult/imap-spamfilter:latest` tag can be removed with `docker image rm` once the new container is healthy.
+2. **Recreate Unbound** (FABLE-CR-005) and check that Spamhaus answers.
+   ```bash
+   docker compose -f "$C" up -d --force-recreate --no-deps spamfilter-unbound
+   sleep 10; docker exec spamfilter-unbound drill 2.0.0.127.zen.spamhaus.org @127.0.0.1 | grep -A4 "ANSWER SECTION"
+   ```
+   **Expect:** `127.0.0.2`, `127.0.0.4`, `127.0.0.10`. The first query or two can SERVFAIL while the cache warms; repeat. `127.255.255.254` means Spamhaus still sees a public resolver; stop and report.
+3. **Install the rspamd config** (FABLE-CR-001 and 032). The live stamp is `9`, because earlier updates were copied by hand, so copy by hand again.
+   ```bash
+   LIVE=/opt/bytelord/data/imap-spamfilter/rspamd/local.d
+   cp -a "$LIVE" "$LIVE.bak.$(date +%Y%m%d-%H%M%S)"
+   for f in classifier-bayes.conf rbl.conf rbl_group.conf worker-normal.inc worker-proxy.inc \
+            actions.conf worker-controller.inc.template; do
+     cp "rspamd/local.d/$f" "$LIVE/$f"; chmod 644 "$LIVE/$f"
+   done
+   grep -q '^allow_file_and_shm_inputs' "$LIVE/worker-controller.inc" \
+     || echo 'allow_file_and_shm_inputs = false;' >> "$LIVE/worker-controller.inc"
+   docker exec spamfilter-rspamd rspamadm configtest      # expect: syntax OK
+   docker restart spamfilter-rspamd                       # also picks up the new Unbound address
+   ```
+   `worker-controller.inc` holds the rendered password, so append the one line as shown; do not print or copy the file.
+   (`actions.conf` differs from the repo only in comments, and the `.template` file is not read by rspamd. Both are copied so the live folder matches the repo afterwards.)
+   **Expect** after a few minutes:
+   - `docker logs --since 10m spamfilter-rspamd 2>&1 | grep -c "finished expiry"` → **0**;
+   - `docker exec spamfilter-rspamd rspamadm configdump worker | grep -c "allow_file_and_shm_inputs = false"` → **3**.
+
+   *Alternative:* `bash deploy/vps-bootstrap.sh` refreshes every `local.d` file and re-renders the secret configs, because the stamp goes 9 → 14. Use it only if you want bootstrap to own these files again.
+4. **Rebuild and recreate the filter.** This carries every `filter/` fix, including `Pass: all` and the "already learned" 404.
+   ```bash
+   export SPAMFILTER_UID=1001 SPAMFILTER_GID=1001
+   docker compose -f "$C" build spamfilter
+   docker compose -f "$C" up -d --force-recreate --no-deps spamfilter
+   docker inspect -f '{{.Config.Image}}' spamfilter   # imap-spamfilter:bytelord
+   ```
+   Once it is healthy, the old tag can go: `docker image rm ghcr.io/marcelverdult/imap-spamfilter:latest`.
+
+**Scores will move after steps 2–4.** Spamhaus, SpamCop and the URI blocklists start adding points, and `Pass: all` lets every rule run. The operator chose to deploy without a watch period. The dashboard's Messages page (score bands `8-19` and `≥20`) and `explain_score.py` show which symbols changed.
 
 ## What to test first
 
@@ -88,7 +131,7 @@ See the matching table in `SESSION_HANDOFF.md`. In short:
 
 ## Validation
 
-- Docker `python:3.12-slim` with the whole repository mounted: **487 passed** (baseline 429).
+- Docker `python:3.12-slim` with the whole repository mounted: **487 passed** after the review pass and **501 passed** after the second pass (baseline 429).
 - **47 of the new tests fail against the original `f53586a` code** (checked in a separate worktree) and pass now. The remaining new tests are controls or coverage for behaviour that was already correct: ordinary Train-Ham COPY failure, oversize Train-Spam, wrong ASCII CSRF, the 16 KiB Save, logout, escaping, and the audit event.
 - The High findings were reproduced before fixing:
   - Bayes expiry: from the live rspamd log.
