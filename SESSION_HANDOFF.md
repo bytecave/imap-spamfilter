@@ -34,7 +34,7 @@ A new agent **must** do all three before exploring code or proposing fixes:
    - The 1,186 messages rescued from Deleted Items.
    - The nightly 03:00 host backup stops all containers.
 
-Also read `/home/bytecave/.claude/CLAUDE.md` (Cursor user rule) and use Agent Mail + graphify as that file and `IMPLEMENTATION_STATUS.md` § Agent onboarding require.
+Also read `/home/bytecave/.claude/AGENTS.md` (Cursor user rule) and use Agent Mail + graphify as that file and `IMPLEMENTATION_STATUS.md` § Agent onboarding require.
 
 ---
 
@@ -691,5 +691,5 @@ Recreate filter with `SPAMFILTER_UID=1001 SPAMFILTER_GID=1001`. **Do not** `comp
 ## Agent protocol (short)
 
 - Agent Mail project key: `/opt/bytelord/projects/imap-spamfilter`. Reserve files before edits; only the main session commits.
-- Graphify before broad explore: `graphify explain` / `path`, or `graphify query "…" --dfs --budget 3333`. `graphify update .` after doc/code batches. Project `.cursor/rules/graphify.mdc` was **removed** (2026-09-23, commit `15cc5f8`); mandates live in `~/.claude/CLAUDE.md` and `~/.cursor/rules/`.
+- Graphify before broad explore: `graphify explain` / `path`, or `graphify query "…" --dfs --budget 3333`. `graphify update .` after doc/code batches. Project `.cursor/rules/graphify.mdc` was **removed** (2026-09-23, commit `15cc5f8`); mandates live in `~/.claude/AGENTS.md` and `~/.cursor/rules/`.
 - Commit/push **only when asked**. No secrets, no force-push, no `--no-verify`.

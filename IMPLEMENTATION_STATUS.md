@@ -215,7 +215,7 @@ Live config: **`rich_bytecave` is `move`**; every other account is **shadow**. `
 4. **List hits:** still override routing; now **run `/checkv2`** so scores appear on the dashboard.
 5. **Provider Junk:** score new Junk above Junk bookmark; **do not** Bayes-learn from Microsoft’s junking; in **move** mode rescue under-threshold or allowlisted to Inbox after `move_grace_seconds`; blocklisted never rescued; shadow/flag → `would_rescue` only.
 6. **Allow/Block drags:** Allowlist → person-allow + **ham learn** + MOVE **Inbox**; Blocklist → person-block + **spam learn** + MOVE **Junk** (learn failure leaves mail in the list folder for retry).
-7. **Agent tooling:** ByteLord default `graphify query "…" --dfs --budget 3333` (project `.cursor/rules/graphify.mdc` + `~/.claude/CLAUDE.md` + graphify skill).
+7. **Agent tooling:** ByteLord default `graphify query "…" --dfs --budget 3333` (project `.cursor/rules/graphify.mdc` + `~/.claude/AGENTS.md` + graphify skill).
 8. **Tests:** Docker pytest **334 passed**; live `spamfilter` rebuilt/recreated healthy.
 
 ### 2026-09-22 session (Rspamd 4.2.0 + WebUI link)
@@ -395,7 +395,7 @@ Notable defaults (verify in file — operators edit live YAML):
 2. Read **`SESSION_HANDOFF.md`** (where the last session stopped).
 3. Call **`supermemory_search`** (`container=project`) and skim **`supermemory_list`**. Skipping Supermemory because the docs “already say it” is a rule violation.
 
-Also read **`/home/bytecave/.claude/CLAUDE.md`** (Cursor user rule). It covers Agent Mail, subagent limits (≤2; main session commits), graphify-first research (`graphify query "…" --dfs --budget 3333`), and mandatory Supermemory recall/capture. Machine-local copies: `~/.cursor/rules/graphify.mdc` and `~/.cursor/rules/supermemory.mdc`. There is **no** project `.cursor/rules/graphify.mdc` (removed 2026-09-23).
+Also read **`/home/bytecave/.claude/AGENTS.md`** (Cursor user rule). It covers Agent Mail, subagent limits (≤2; main session commits), graphify-first research (`graphify query "…" --dfs --budget 3333`), and mandatory Supermemory recall/capture. Machine-local copies: `~/.cursor/rules/graphify.mdc` and `~/.cursor/rules/supermemory.mdc`. There is **no** project `.cursor/rules/graphify.mdc` (removed 2026-09-23).
 
 ### 1. Agent Mail (MCP `user-mcp-agent-mail`)
 
@@ -413,7 +413,7 @@ Project key = absolute repo root:
 6. Subagents do **not** register; reserve their files under **your** name.
 7. After commit: `release_file_reservations`.
 
-Full semantics live in CLAUDE.md — do not invent a parallel protocol.
+Full semantics live in AGENTS.md — do not invent a parallel protocol.
 
 ### 2. Graphify (mandatory before broad explore)
 
@@ -426,7 +426,7 @@ graphify path "<A>" "<B>"
 graphify update .
 ```
 
-Prefer `explain` / `path` for specific symbols; use `query --dfs --budget 3333` for broad architecture. Graph artifacts under `graphify-out/` are **gitignored**. If `graphify-out/needs_update` exists, refresh before trusting doc-derived graph context (see CLAUDE.md).
+Prefer `explain` / `path` for specific symbols; use `query --dfs --budget 3333` for broad architecture. Graph artifacts under `graphify-out/` are **gitignored**. If `graphify-out/needs_update` exists, refresh before trusting doc-derived graph context (see AGENTS.md).
 
 ### 3. Supermemory (mandatory — MCP `plugin-cursor-supermemory-supermemory`)
 
@@ -522,7 +522,7 @@ Ham training **cannot** cancel A/B auth-header symbols when they still fire (unt
 | `filter/bootstrap_train.py` / `explain_score.py` | Ops tools |
 | `filter/test_*.py` | Regression suite |
 | `deploy/bytelord-compose.yaml` | Compose source of truth |
-| `/home/bytecave/.claude/CLAUDE.md` | ByteLord-wide agent protocol (graphify + supermemory mandatory) |
+| `/home/bytecave/.claude/AGENTS.md` | ByteLord-wide agent protocol (graphify + supermemory mandatory) |
 | `/home/bytecave/.cursor/rules/*.mdc` | Machine-local Cursor globals (graphify, supermemory) |
 
 Sibling project: `/opt/bytelord/projects/email-oauth2-proxy` (OAuth / M365 IMAP bridge).
