@@ -1,0 +1,11 @@
+{
+	"folders": [
+		{
+			"path": "../../../../opt/bytelord/projects/imap-spamfilter"
+		},
+		{
+			"path": "../../../../opt/bytelord/projects/email-oauth2-proxy"
+		}
+	],
+	"settings": {}
+}
