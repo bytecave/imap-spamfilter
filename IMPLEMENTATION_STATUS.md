@@ -1,6 +1,6 @@
 # Implementation status — imap-spamfilter (ByteLord)
 
-**Last updated:** 2026-09-29 ~14:45 Pacific. The Fable 5.1 review fixes, the Bayes rebuild, 60-day arrival-based Trained-* retention and the 2-minute Train-* settle are all **live**. `flag_untrained_junk` is **off** for good (Outlook sync conflicts). 18 accounts are connected. **Next: investigate the IMAP connection errors, then the Outlook add-in.**  
+**Last updated:** 2026-09-29 ~21:30 Pacific. The Fable 5.1 review fixes, the Bayes rebuild, 60-day arrival-based Trained-* retention and the 2-minute Train-* settle are all **live**. `flag_untrained_junk` is **off** for good (Outlook sync conflicts). 18 accounts are connected. **Next: fix and catch up Supermemory, then investigate the IMAP connection errors, then the Outlook add-in.**  
 **Audience:** brand-new agent sessions (Cursor / Claude Code / Codex) with no prior chat memory.  
 **Companion:** [`SESSION_HANDOFF.md`](SESSION_HANDOFF.md) (short “where we left off”; this file is the durable product/deploy/agent map).
 
@@ -486,8 +486,8 @@ Ham training **cannot** cancel A/B auth-header symbols when they still fire (unt
 
 ## What’s next (suggested order)
 
-1. **IMAP connection errors.** About 270 `conn_error` events a day ("idle_done failed", plus hourly `AccessTokenExpired`). The starting analysis and commands are in SESSION_HANDOFF § "Connection errors: what is known". Mail is not being lost; the loop reconnects. The goal is to tell expected session recycling apart from real faults, and to stop needless re-logins (FABLE-CR-029).
-2. **Reconnect Supermemory** and add the 2026-09-28/29 facts listed in SESSION_HANDOFF.
+1. **Supermemory (first, operator's order as of 2026-09-29 evening).** Find out why Claude Code's Supermemory plugin stopped authenticating early on 2026-09-29, fix it, check `supermemory-repo-supervisor` for the flaws fixed in the graphify supervisor, then add the 2026-09-28/29 facts. Details are in SESSION_HANDOFF § Supermemory and `/opt/bytelord/scripts/BYTELORD_HANDOFF.md`.
+2. **IMAP connection errors.** About 270 `conn_error` events a day ("idle_done failed", plus hourly `AccessTokenExpired`). The starting analysis and commands are in SESSION_HANDOFF § "Connection errors: what is known". Mail is not being lost; the loop reconnects. The goal is to tell expected session recycling apart from real faults, and to stop needless re-logins (FABLE-CR-029).
 3. **Steve's Outlook:** confirm Train-Spam drags now stay in Trained-Spam. The 2-minute settle is live; `flag_untrained_junk` stays off. Optionally de-duplicate the bounced copies left in his Junk.
 4. **Outlook add-in.** Requirements and setup notes are in `outlook-addin/`; there is no code yet. It is built on the Windows desktop clone, not on ByteLord.
 5. **Do not wipe Bayes** unless asked. Latest restore point, taken just before the 2026-09-29 rebuild: `dump.rdb.bak-20260929-022922-before-retrain` + `appendonlydir.bak-20260929-022922-before-retrain` in the Redis `/data`, and SQLite `spamfilter.db.bak-20260929-022922-before-retrain`. Do not run any score-based Trained-* mover.

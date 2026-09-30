@@ -1,6 +1,6 @@
 # Session handoff — imap-spamfilter (ByteLord VPS)
 
-**Last updated:** 2026-09-29 ~14:45 Pacific. Next session: investigate the IMAP **connection errors** (`conn_error`) in the log, and reconnect **Supermemory**. Everything below is live, committed and pushed (`main` at `f14ae92` or later).  
+**Last updated:** 2026-09-29 ~21:30 Pacific. Next session: **Supermemory first** (investigate and fix, then capture the backlog), **then** the IMAP **connection errors** (`conn_error`). The operator set that order on 2026-09-29 evening. Everything below is live, committed and pushed.  
 **Repo:** `/opt/bytelord/projects/imap-spamfilter`  
 **Remote:** `github.com:bytecave/imap-spamfilter.git` (branch `main`)  
 **Upstream fork of:** marcelverdult/imap-spamfilter  
@@ -38,7 +38,14 @@ Also read `/home/bytecave/.claude/CLAUDE.md` (Cursor user rule) and use Agent Ma
 
 ---
 
-## CONTINUE HERE (2026-09-29 ~14:45 Pacific): next job is the connection errors
+## CONTINUE HERE (2026-09-29 ~21:30 Pacific): Supermemory, then the connection errors
+
+**Order (operator's decision, 2026-09-29 evening):**
+1. **Supermemory:** investigate and fix, then add the backlog. Details in [§ Supermemory](#supermemory) below.
+2. **IMAP connection errors:** everything known so far is in § "Connection errors: what is known" below.
+
+Machine-wide follow-ups from the 2026-09-29 evening session are in
+**`/opt/bytelord/scripts/BYTELORD_HANDOFF.md`**. They cover the Agent Mail edit gate (now live for Claude Code; Codex and Cursor still open), graphify's supervisor and 4k-chunk rebuild, and Supermemory's supervisor. That session changed nothing in this repo's code, and nothing was redeployed. Its only changes here: it removed graphify's git hooks (the supervisor refreshes the graph instead), deleted `.gitattributes` (it held only graphify's merge-driver line), and updated these two docs.
 
 ### Current live state (all committed, pushed and deployed)
 
@@ -99,7 +106,18 @@ The review's 7-day count was 1,561 "idle_done failed" (FABLE-CR-029).
 
 ### Supermemory
 
-It was unreachable for this entire Claude session (the plugin failed to authenticate), so nothing was captured. The facts to add once it works are listed under "Mandatory before doing anything else" above.
+**First job next session.** The operator reports Supermemory was working well until very early on 2026-09-29. Every Claude Code session since then started with the Supermemory plugin reporting "Authentication failed", and its MCP server (`plugin:supermemory:supermemory`) never connected, so nothing was recalled or captured. To do:
+
+1. **Find out why Claude Code's Supermemory plugin stopped authenticating** and fix it. The hook message pointed at `https://console.supermemory.ai/auth/connect` or the `SUPERMEMORY_CC_API_KEY` environment variable. Check whether Cursor and Codex still reach it; the Codex hooks are in `~/.codex/hooks.json`. Never print or store the key.
+2. **Check `supermemory-repo-supervisor.service`** (`/opt/bytelord/scripts/supermemory_repo_supervisor.sh`) for the flaws just fixed in the graphify supervisor:
+   - retries every quiet period, forever, after a failure;
+   - one `git` process per file per scan (the graphify one used 16 h of CPU in 19 h);
+   - no alert when authentication fails.
+
+   The fixes and the alert mechanism are described in `/opt/bytelord/scripts/BYTELORD_HANDOFF.md`.
+3. **Capture the backlog** with `supermemory_add` (`container=project`):
+   - the imap-spamfilter facts listed under "Mandatory before doing anything else" above;
+   - the machine-wide 2026-09-29 decisions listed in `/opt/bytelord/scripts/BYTELORD_HANDOFF.md`.
 
 ## Earlier on 2026-09-29: review, deploy, Bayes rebuild (history)
 
