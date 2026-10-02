@@ -253,6 +253,7 @@ _SCAN_SYMBOL_KEEP_PREFIXES = (
 SCORE_DETAIL_TOP_N = 15
 SCORE_DETAIL_MAX_BYTES = 4096
 SCORE_EXPLAIN_LOG_MIN = 15.0
+MULTI_TRAIN_SYMBOL = "MULTI_TRAIN"
 
 
 def _keep_scan_symbol(name: str, score: float) -> bool:
@@ -300,22 +301,31 @@ def _clip_detail_text(value: Any, limit: int) -> str | None:
     return encoded[:limit].decode("utf-8", errors="ignore")
 
 
-def score_detail_json(result: ScanResult, *, top_n: int = SCORE_DETAIL_TOP_N) -> str:
+def score_detail_json(
+    result: ScanResult,
+    *,
+    top_n: int = SCORE_DETAIL_TOP_N,
+    multi_train_force: bool = False,
+) -> str:
     """Compact JSON for messages.score_detail (top symbols, size-capped)."""
     action = _clip_detail_text(result.action, SCORE_DETAIL_ACTION_MAX)
+    pinned = [s for s in result.symbols if s.name == MULTI_TRAIN_SYMBOL]
+    rest = [s for s in result.symbols if s.name != MULTI_TRAIN_SYMBOL]
     symbols = [
         {
             "n": _clip_detail_text(s.name, 80) or "",
             "s": round(s.score, 3),
             "d": (_clip_detail_text(s.description, 80) or ""),
         }
-        for s in result.symbols[:top_n]
+        for s in (pinned + rest)[:top_n]
     ]
     payload: dict[str, Any] = {
         "score": result.score,
         "action": action,
         "symbols": symbols,
     }
+    if multi_train_force:
+        payload["multi_train"] = "force"
     text = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
     if len(text.encode("utf-8")) > SCORE_DETAIL_MAX_BYTES:
         payload["symbols"] = [
@@ -601,8 +611,8 @@ def inbox_select_readonly(acc: Account) -> bool:
 
 
 def mode_allows_retention(acc: Account) -> bool:
-    """Junk / Trained-* → Trash. Blocked in shadow so a 10-day default
-    cannot empty Junk during evaluation."""
+    """Trained-* → Trash. Blocked in shadow. Junk is never swept;
+    Microsoft 365 keeps that folder."""
     return acc.mode in ("flag", "move")
 
 
@@ -3494,6 +3504,143 @@ def _score_log(score: float | None) -> str:
     return f"{score:.2f}"
 
 
+def _train_identity(message_id: str | None, body_sha256: str | None) -> str | None:
+    """Distinct-message key: Message-ID when present, otherwise the body hash."""
+    mid = (message_id or "").strip()
+    if mid:
+        return "m:" + mid
+    digest = (body_sha256 or "").strip()
+    if digest:
+        return "b:" + digest
+    return None
+
+
+def multi_train_gate(acc: Account) -> float:
+    """Raw rspamd scores at or below this skip MULTI_TRAIN. Half of rescue_below."""
+    return acc.rescue_below / 2.0
+
+
+@dataclass(frozen=True)
+class MultiTrainAdjustment:
+    """points is added to the score. force routes like a block-list hit."""
+    points: float
+    force: bool
+
+
+def multi_train_for_count(count: int) -> MultiTrainAdjustment:
+    """1 prior spam train adds 1, 2 add 2, 3 add 4. 4 or more force Junk routing."""
+    if count >= 4:
+        return MultiTrainAdjustment(0.0, True)
+    if count == 3:
+        return MultiTrainAdjustment(4.0, False)
+    if count == 2:
+        return MultiTrainAdjustment(2.0, False)
+    if count == 1:
+        return MultiTrainAdjustment(1.0, False)
+    return MultiTrainAdjustment(0.0, False)
+
+
+def spam_train_count(
+    db: Db,
+    sender: str,
+    *,
+    message_id: str | None,
+    body_sha256: str | None,
+) -> int:
+    """Distinct spam learns of this exact From address in this mailbox.
+
+    The message being scored is left out, so its own learn does not boost it.
+    """
+    key = (sender or "").strip().lower()
+    if not key:
+        return 0
+    ident = _train_identity(message_id, body_sha256)
+    params: list[Any] = [db.account, key]
+    exclude = ""
+    if ident is not None:
+        exclude = "WHERE ident != ?"
+        params.append(ident)
+    row = db.conn.execute(
+        f"""
+        SELECT COUNT(*) AS n FROM (
+            SELECT DISTINCT
+                CASE
+                    WHEN message_id IS NOT NULL AND message_id != ''
+                    THEN 'm:' || message_id
+                    ELSE 'b:' || body_sha256
+                END AS ident
+            FROM messages
+            WHERE account=?
+              AND learned_as='spam'
+              AND sender IS NOT NULL
+              AND lower(sender)=?
+              AND (
+                    (message_id IS NOT NULL AND message_id != '')
+                 OR (body_sha256 IS NOT NULL AND body_sha256 != '')
+              )
+        ) AS trained
+        {exclude}
+        """,
+        params,
+    ).fetchone()
+    return int(row["n"] if row is not None else 0)
+
+
+def multi_train_forced(detail_json: str | None) -> bool:
+    """True when a stored score_detail says four or more trains forced routing."""
+    if not detail_json:
+        return False
+    try:
+        data = json.loads(detail_json)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(data, dict) and data.get("multi_train") == "force"
+
+
+def apply_multi_train(
+    db: Db,
+    acc: Account,
+    result: ScanResult,
+    *,
+    sender: str,
+    message_id: str | None,
+    body_sha256: str | None,
+) -> tuple[ScanResult, bool]:
+    """Add MULTI_TRAIN, or flag a force, when the raw score is above the gate.
+
+    Returns the result to store and whether routing should treat it as a block.
+    A score at or below the gate is returned unchanged. This does not learn.
+    """
+    raw = result.score
+    if not math.isfinite(raw) or raw <= multi_train_gate(acc):
+        return result, False
+    count = spam_train_count(
+        db, sender, message_id=message_id, body_sha256=body_sha256,
+    )
+    adj = multi_train_for_count(count)
+    if adj.force:
+        symbol = ScanSymbol(
+            MULTI_TRAIN_SYMBOL, 0.0,
+            f"{count} prior spam trains; forced spam",
+        )
+        return ScanResult(
+            score=result.score,
+            symbols=result.symbols + (symbol,),
+            action=result.action,
+        ), True
+    if adj.points <= 0:
+        return result, False
+    symbol = ScanSymbol(
+        MULTI_TRAIN_SYMBOL, adj.points,
+        f"{count} prior spam trains from this sender",
+    )
+    return ScanResult(
+        score=result.score + adj.points,
+        symbols=result.symbols + (symbol,),
+        action=result.action,
+    ), False
+
+
 def _score_and_store(
     db: Db,
     log: logging.Logger,
@@ -3540,8 +3687,25 @@ def _score_and_store(
         state.scan_fail_streak = 0
     if state is not None:
         state.scan_failures.pop((folder, uv, uid), None)
+    sender = parse_envelope(raw)[2]
+    scan_detail, force = apply_multi_train(
+        db, acc, scan_detail,
+        sender=sender,
+        message_id=msgid,
+        body_sha256=body_sha256(raw),
+    )
     score = scan_detail.score
-    detail_json = score_detail_json(scan_detail)
+    detail_json = score_detail_json(scan_detail, multi_train_force=force)
+    scan_detail_text = f"score={score:.2f} mode={acc.mode}"
+    if force:
+        scan_detail_text += " multi_train=force"
+    else:
+        added = next(
+            (s.score for s in scan_detail.symbols if s.name == MULTI_TRAIN_SYMBOL),
+            None,
+        )
+        if added:
+            scan_detail_text += f" multi_train=+{added:.0f}"
     with db.tx():
         db.update_imap_message(
             folder, uv, uid,
@@ -3550,7 +3714,7 @@ def _score_and_store(
         )
         db.log_event(
             "scan", msgid,
-            detail=f"score={score:.2f} mode={acc.mode}",
+            detail=scan_detail_text,
         )
     log.debug("scored %s = %.2f", msgid, score)
     explain_floor = max(float(acc.threshold), SCORE_EXPLAIN_LOG_MIN)
@@ -4001,6 +4165,7 @@ def _scan_inbox_uid_batch(
             stored_raw = prior["our_score"] if prior is not None else None
             score: float | None = None
             over_threshold = False
+            forced = False
 
             if stored_raw is not None:
                 score = _finite_score(stored_raw)
@@ -4012,6 +4177,7 @@ def _scan_inbox_uid_batch(
                     db.log_event("invalid_stored_score", msgid, detail=f"uid={uid}")
                     halted = True
                     break
+                forced = multi_train_forced(prior["score_detail"])
             else:
                 score = _score_and_store(
                     db, log, acc, state, fmap["inbox"], uv, uid, raw, msgid,
@@ -4025,6 +4191,10 @@ def _scan_inbox_uid_batch(
                         continue
                     halted = True
                     break
+                stored = db.get_imap_message(fmap["inbox"], uv, uid)
+                forced = multi_train_forced(
+                    stored["score_detail"] if stored is not None else None
+                )
 
             if hit is not None:
                 hit_detail = _list_hit_event_detail(hit, score)
@@ -4077,7 +4247,7 @@ def _scan_inbox_uid_batch(
                         detail=f"score={_score_log(score)}",
                     )
             else:
-                over_threshold = score >= acc.threshold
+                over_threshold = score >= acc.threshold or forced
 
             if not over_threshold:
                 last_terminal = uid
@@ -4600,6 +4770,7 @@ def poll_junk(
                     continue
 
                 stored = prior["our_score"] if prior is not None else None
+                forced = False
                 if stored is not None:
                     score = _finite_score(stored)
                     if score is None:
@@ -4612,6 +4783,7 @@ def poll_junk(
                         )
                         halted = True
                         break
+                    forced = multi_train_forced(prior["score_detail"])
                 else:
                     score = _score_and_store(
                         db, log, acc, state, junk, uv, uid, raw, msgid,
@@ -4625,6 +4797,10 @@ def poll_junk(
                             continue
                         halted = True
                         break
+                    stored_row = db.get_imap_message(junk, uv, uid)
+                    forced = multi_train_forced(
+                        stored_row["score_detail"] if stored_row is not None else None
+                    )
                 hit = classify_list_hit(acc, db, iter_list_header_addrs(raw))
                 leaving_junk = False
                 if hit is not None:
@@ -4645,11 +4821,13 @@ def poll_junk(
                             )
                 # Allow hit, or unlisted and under rescue_below: a rescue
                 # candidate, unless evidence says it must stay in Junk.
-                # A block hit stays. Inbox → Junk uses acc.threshold, which
-                # is higher, so a mid-band score stays in whichever folder
-                # it arrived in.
+                # A block hit stays. Four or more spam trains of this From
+                # address also keep it in Junk when the raw score cleared
+                # the MULTI_TRAIN gate. Inbox → Junk uses acc.threshold,
+                # which is higher, so a mid-band score stays in whichever
+                # folder it arrived in.
                 if hit is None or hit.decision != "block":
-                    if hit is not None or score < acc.rescue_below:
+                    if hit is not None or (not forced and score < acc.rescue_below):
                         blocked = _rescue_blocker(
                             raw, received_at=_internaldate_ts(data),
                             m365_auth_trust=acc.m365_auth_trust,
@@ -5510,15 +5688,12 @@ def retention_sweep(
 ) -> None:
     if not mode_allows_retention(acc):
         log.info(
-            "retention_sweep skipped (mode=%s; Junk/Trained-* not moved to Trash)",
+            "retention_sweep skipped (mode=%s; Trained-* not moved to Trash)",
             acc.mode,
         )
         return
-    if acc.junk_retention_days > 0:
-        _sweep_folder_to_trash(
-            client, db, log, acc, fmap,
-            src=fmap["junk"], days=acc.junk_retention_days, exclude_learned_ham=True, tag="junk_retention",
-        )
+    # Junk stays where Microsoft put it. junk_retention_days is still
+    # parsed so old accounts.yml files load, and it has no effect.
     if acc.trained_retention_days > 0:
         _sweep_folder_to_trash(
             client, db, log, acc, fmap,
@@ -5544,11 +5719,13 @@ def _sweep_folder_to_trash(
 ) -> None:
     """MOVE mail older than `days` from `src` to Trash.
 
-    Junk ages by delivery date (IMAP INTERNALDATE, `SEARCH BEFORE`).
+    Junk is refused. Microsoft 365 retention owns that folder.
     Trained-* (`since_arrival`) ages by when the filter first saw the
     message in that folder, so a message trained long after delivery is
     kept for the full window: that is the corpus a Bayes rebuild needs.
     """
+    if src == fmap["junk"]:
+        return
     if db.in_safe_mode("all"):
         return
     try:

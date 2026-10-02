@@ -372,27 +372,13 @@ def _sweep_junk(db, acc, uids):
     return [u for batch, dest in client.moved if dest == "Trash" for u in batch]
 
 
-def test_junk_retention_waits_for_poll_junk_bookmark(tmp_path):
+def test_junk_folder_is_never_swept_to_trash(tmp_path):
     db = _mk_db(tmp_path)
-    acc = _mk_account(mode="flag")
-    assert _sweep_junk(db, acc, [5, 6]) == []  # no bookmark yet
-    with db.tx():
-        db.set_scan_bookmark("Junk", 1, 5)
-    assert _sweep_junk(db, acc, [5, 6]) == [5]  # 6 not yet seen by poll_junk
-
-
-def test_junk_retention_skips_pending_allowlisted_and_rescue_rows(tmp_path):
-    db = _mk_db(tmp_path)
-    acc = _mk_account(mode="flag")
+    acc = _mk_account(mode="move", junk_retention_days=10)
     with db.tx():
         db.set_scan_bookmark("Junk", 1, 20)
-        for uid in (11, 12, 13, 14, 15):
-            db.upsert_imap_message("Junk", 1, uid, message_id=f"r{uid}@x")
-        db.update_imap_message("Junk", 1, 11, pending_learn="spam", pending_learn_at=1)
-        db.update_imap_message("Junk", 1, 12, our_action="allowlisted")
-        db.update_imap_message("Junk", 1, 13, our_action="pending_rescue")
-        db.update_imap_message("Junk", 1, 14, learned_as="ham")
-    assert _sweep_junk(db, acc, [11, 12, 13, 14, 15, 16]) == [15, 16]
+        db.upsert_imap_message("Junk", 1, 15, message_id="old@x")
+    assert _sweep_junk(db, acc, [15, 16]) == []
 
 
 def test_poll_junk_marks_allowlisted_provider_junk(tmp_path, monkeypatch):

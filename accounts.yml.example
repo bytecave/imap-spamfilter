@@ -13,12 +13,10 @@
 #            drained (Train-Ham also copies back to the Inbox), and
 #            Allowlist/Blocklist MOVE to Inbox/Junk. flag_untrained_junk,
 #            when on, flags new untrained Junk in every mode.
-#   flag   - shadow + sets \Flagged on suspect Inbox mail; retention on
+#   flag   - shadow + sets \Flagged on suspect Inbox mail; Trained-* retention on
 #   move   - flag + MOVEs Inbox to Junk after move_grace_seconds
 # Promote shadow -> flag -> move once you trust the scores.
-# Retention (Junk/Trained-* -> Trash) starts when you leave shadow.
-#   # junk_retention_days: 0   # set before promoting out of shadow if you
-#   #                          # do not want aged Junk moved to Trash
+# Trained-* retention starts when you leave shadow. Junk is never swept.
 #
 # Folder discovery (see README "Folder discovery and naming"):
 #   - Hierarchy delimiter is auto-detected on connect (/ vs . vs other).

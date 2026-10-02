@@ -38,6 +38,14 @@ Per-account operating modes (set in `accounts.yml`, promoted manually):
   message as spoofed (`compauth=fail`, or `dmarc=fail` without compauth),
   and when its INTERNALDATE is more than 3 days old (the user moved old
   mail into Junk; it was not delivered there).
+- **MULTI_TRAIN** counts distinct messages this mailbox has already
+  learned as spam from the exact From address. It applies only when the
+  raw rspamd score is above half of `rescue_below` (2 when rescue is 4).
+  One prior train adds 1, two add 2, three add 4. Four or more force Junk
+  routing the way a block-list hit does, without changing the rspamd
+  number and without teaching Bayes. A score at or below the gate is
+  left alone. An allow-list hit still keeps the message. Mail already
+  scored is not scanned again.
 
 Move-based training (no special folders needed in daily use):
 - Inbox -> Junk = learn as spam (after `learn_grace_seconds`, default 300s)
@@ -356,11 +364,8 @@ After another week, promote to `move`. Promote each family member
 independently. Modify the file by hand any time - changes take effect on
 container restart.
 
-Retention (Junk → Trash, and Trained-* → Trash) starts when you leave
-`shadow`. A mailbox that has sat in shadow for weeks may have old Junk;
-the first `flag`/`move` retention pass will honour `junk_retention_days`
-(default 10). If that is too aggressive, set `junk_retention_days: 0`
-(or a larger number) **before** promoting.
+Trained-* → Trash retention starts when you leave `shadow`. The filter
+does not remove mail from Junk; Microsoft 365 retention owns that folder.
 
 ---
 
@@ -588,7 +593,7 @@ user's mailbox.
 
 | Key | Default | Notes |
 | --- | --- | --- |
-| `junk_retention_days` | `10` | Junk -> Trash after N days, `0` disables. Skips mail the Junk poll has not processed yet, pending spam learns, and allowlisted provider-Junk |
+| `junk_retention_days` | `10` | Ignored. The filter does not remove mail from Junk. Microsoft 365 retention owns that folder. The key remains so older `accounts.yml` files still load |
 | `trained_retention_days` | `7` | Trained-Spam **and** Trained-Ham -> Trash N days after the message **arrived in** that folder (the filter records first sight in `trained_arrival`), not N days after delivery. Mail already in Trained-* when this started gets a fresh N days. ByteLord uses 60, to keep the corpus for Bayes rebuilds |
 | `learn_from_moves` | `true` | set `false` to disable all learning (scan-only) |
 

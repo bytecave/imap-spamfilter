@@ -661,14 +661,14 @@ def test_first_seen_is_not_reset_and_departed_uids_are_forgotten(tmp_path):
     assert (FMAP["trained_ham"], 7) in after
 
 
-def test_junk_retention_still_counts_from_delivery(tmp_path):
+def test_retention_sweep_never_moves_junk(tmp_path):
     db = _mk_db(tmp_path)
     acc = _mk_account(mode="move", junk_retention_days=10, trained_retention_days=0)
     with db.tx():
         db.set_scan_bookmark("Junk", 1, 100)
     client = _SearchAwareIMAP(existing=_all_existing(), search_uids=[5])
     f.retention_sweep(client, db, LOG, acc, FMAP)
-    assert client.moved == [([5], "Trash")]
+    assert client.moved == []
     assert _arrivals(db) == []
 
 
