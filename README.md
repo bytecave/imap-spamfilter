@@ -27,7 +27,7 @@ Per-account operating modes (set in `accounts.yml`, promoted manually):
   Inbox, Blocklist MOVEs to Junk). With `flag_untrained_junk: true`, new
   untrained Junk also gets `\Flagged`. Inbox/Junk/Trash are not
   auto-junked or auto-rescued in shadow.
-- **flag**    - shadow + sets `\Flagged` on suspect Inbox mail; retention on
+- **flag**    - shadow + sets `\Flagged` on suspect Inbox mail; Trained-* retention on. Junk is never swept.
 - **move**    - flag + after `move_grace_seconds`, MOVEs Inbox → Junk.
   Provider-delivered Junk (never seen in Inbox) is scored the first time;
   mail under `rescue_below` (default 4), or allowlisted mail, is MOVEd

@@ -1,6 +1,6 @@
 # Session handoff — imap-spamfilter (ByteLord VPS)
 
-**Last updated:** 2026-09-29 ~21:30 Pacific. Next session: **Supermemory first** (investigate and fix, then capture the backlog), **then** the IMAP **connection errors** (`conn_error`). The operator set that order on 2026-09-29 evening. Everything below is live, committed and pushed.  
+**Last updated:** 2026-10-01 ~23:10 Pacific. MULTI_TRAIN and the stop on Junk sweeps are live, committed, and pushed (`31c55d9`). Next session: the IMAP **connection errors** (`conn_error`), then the Outlook add-in.  
 **Repo:** `/opt/bytelord/projects/imap-spamfilter`  
 **Remote:** `github.com:bytecave/imap-spamfilter.git` (branch `main`)  
 **Upstream fork of:** marcelverdult/imap-spamfilter  
@@ -38,7 +38,28 @@ Also read `/home/bytecave/.claude/AGENTS.md` (Cursor user rule) and use Agent Ma
 
 ---
 
-## CONTINUE HERE (2026-09-29 ~21:30 Pacific): Supermemory, then the connection errors
+## CONTINUE HERE (2026-10-01 ~23:10 Pacific)
+
+Done and on `origin/main` as `31c55d9`. The `spamfilter` image was rebuilt about 23:09 Pacific. All 18 accounts reconnected. Full suite before that rebuild: **514 passed**.
+
+- **MULTI_TRAIN** is live. Exact From address, this mailbox only. A raw rspamd score at or below half of `rescue_below` (2 while rescue is 4) is unchanged. Above that, 1/2/3 prior distinct spam learns add +1/+2/+4. Four or more force Junk routing like a block-list hit, store the rspamd number unchanged, and do not teach Bayes. An allow-list hit still keeps the message. Mail already scored is not scanned again. The policy row is in `IMPLEMENTATION_STATUS.md`.
+- **Junk is never swept.** `junk_retention_days` is parsed and ignored. Trained-* retention is unchanged (60 days from arrival in the folder).
+- Promoting `steve_rjmetalfab` to `move` on 2026-10-01 ran the old Junk sweep first: **500** Junk messages older than 62 days went to Deleted Items. They stay there. Do not move them back unless the operator asks. `shon_bytecave`'s promotion did not log a Junk sweep.
+
+### Current live state
+
+- **Accounts:** 18 connected. `mode: move` for `rich_bytecave`, `steve_rjmetalfab`, and `shon_bytecave`. Everyone else is `shadow`, including `shon_eizenhoefer`.
+- **`flag_untrained_junk`:** OFF, and it must stay off.
+- **Train-* settle:** `train_settle_seconds: 120`.
+- **Bayes** was not wiped. Neural stays off. Do not promote more accounts unless asked.
+
+### Next
+
+1. **IMAP connection errors.** The 2026-09-29 counts and commands are in the section below. Mail is not being lost; the loop reconnects.
+2. **Outlook add-in.** Requirements are in `outlook-addin/`. There is no code yet. It is built on the Windows desktop clone, not on ByteLord.
+3. **Supermemory on Claude Code** was not re-checked. Cursor captured project memories on 2026-10-01. The 2026-09-29 authentication failure is still described under § Supermemory.
+
+## Previously (2026-09-29 ~21:30 Pacific): Supermemory, then the connection errors
 
 **Order (operator's decision, 2026-09-29 evening):**
 1. **Supermemory:** investigate and fix, then add the backlog. Details in [§ Supermemory](#supermemory) below.
@@ -47,7 +68,7 @@ Also read `/home/bytecave/.claude/AGENTS.md` (Cursor user rule) and use Agent Ma
 Machine-wide follow-ups from the 2026-09-29 evening session are in
 **`/opt/bytelord/scripts/BYTELORD_HANDOFF.md`**. They cover the Agent Mail edit gate (now live for Claude Code; Codex and Cursor still open), graphify's supervisor and 4k-chunk rebuild, and Supermemory's supervisor. That session changed nothing in this repo's code, and nothing was redeployed. Its only changes here: it removed graphify's git hooks (the supervisor refreshes the graph instead), deleted `.gitattributes` (it held only graphify's merge-driver line), and updated these two docs.
 
-### Current live state (all committed, pushed and deployed)
+### Live state as of that evening (superseded by the 2026-10-01 section above)
 
 - **Accounts:** 18 connected. `rich_bytecave` is `mode: move`; the other 17 are `shadow`. That includes 8 added 2026-09-29, among them `jamie.zinsli_rjmetalfab`, which connected at 03:48 after the operator's Exchange permission fix.
 - **Filter image:** `imap-spamfilter:bytelord`, recreated 14:31 Pacific; the running code matches the repo.
@@ -648,7 +669,7 @@ Messages tab reads SQLite `our_score` / `score_detail`. Inbox and top-level Junk
 
 ## Project in one breath (verify details in IMPLEMENTATION_STATUS.md)
 
-Self-hosted IMAP spam filter: Python (`filter/filter.py`) + Rspamd **4.2.0** + Redis Bayes + Unbound, Docker network **`spamnet`**. Sibling **`email-oauth2-proxy`** does XOAUTH2 to M365; this filter uses plain IMAP `LOGIN`. Shared Bayes user **`bytelord`**. **List hits are scored** then override routing. Allow drag → ham + Inbox; block drag → spam + Junk. Provider Junk is scored, **not** learned as spam; rescue only in `move` mode. Dashboard `https://spam.bytelord.net` (loopback **8099**); Rspamd WebUI link `https://spam.bytelord.net/rspamd/` when `RSPAMD_WEBUI_URL` is set.
+Self-hosted IMAP spam filter: Python (`filter/filter.py`) + Rspamd **4.2.0** + Redis Bayes + Unbound, Docker network **`spamnet`**. Sibling **`email-oauth2-proxy`** does XOAUTH2 to M365; this filter uses plain IMAP `LOGIN`. Shared Bayes user **`bytelord`**. **List hits are scored** then override routing. Allow drag → ham + Inbox; block drag → spam + Junk. Provider Junk is scored, **not** learned as spam; rescue only in `move` mode. The filter does not remove Junk mail. MULTI_TRAIN can raise or force later mail from a From address this mailbox has trained as spam. Dashboard `https://spam.bytelord.net` (loopback **8099**); Rspamd WebUI link `https://spam.bytelord.net/rspamd/` when `RSPAMD_WEBUI_URL` is set.
 
 ---
 

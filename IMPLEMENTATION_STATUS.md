@@ -1,6 +1,6 @@
 # Implementation status — imap-spamfilter (ByteLord)
 
-**Last updated:** 2026-09-29 ~21:30 Pacific. The Fable 5.1 review fixes, the Bayes rebuild, 60-day arrival-based Trained-* retention and the 2-minute Train-* settle are all **live**. `flag_untrained_junk` is **off** for good (Outlook sync conflicts). 18 accounts are connected. **Next: fix and catch up Supermemory, then investigate the IMAP connection errors, then the Outlook add-in.**  
+**Last updated:** 2026-10-01 ~23:10 Pacific. MULTI_TRAIN and the stop on Junk sweeps are **live** and on `origin/main` (`31c55d9`). The image was rebuilt about 23:09 Pacific; 514 tests passed; all 18 accounts reconnected. `flag_untrained_junk` stays **off**. `rich_bytecave`, `steve_rjmetalfab`, and `shon_bytecave` are `mode: move`. **Next: the IMAP connection errors, then the Outlook add-in.**  
 **Audience:** brand-new agent sessions (Cursor / Claude Code / Codex) with no prior chat memory.  
 **Companion:** [`SESSION_HANDOFF.md`](SESSION_HANDOFF.md) (short “where we left off”; this file is the durable product/deploy/agent map).
 
@@ -20,7 +20,7 @@ Then follow **Agent onboarding** below.
 
 ## Snapshot in one paragraph
 
-Self-hosted IMAP spam filter (Python + Rspamd + Redis + Unbound) on ByteLord. Mailboxes authenticate through sibling **`email-oauth2-proxy`** (XOAUTH2 to M365); this filter speaks plain IMAP `LOGIN` to the proxy. Allow/block lists + one shared Bayes notebook (`defaults.bayes_user: bytelord`) are live. **`rich_bytecave` (rich@bytecave.net) is `mode: move` as of 2026-09-28 01:26 Pacific. The other nine accounts stay `shadow`.** `move_grace_seconds` is 0. Score-based moves do **not** train Bayes. **`flag_untrained_junk` is true in the live `accounts.yml` defaults**, so all ten accounts set the follow-up flag on Junk mail that is new since the Junk bookmark and has not been taught. **Train-Ham** copies the message to the Inbox before learning, then still archives the Train-Ham message in Trained-Ham; that Inbox copy is not score-moved to Junk. Subdomain `@host` matching and `url_suspect` `word_dots = false` are committed and in the running image (rebuilt 2026-09-28 19:22 Pacific). `@kickstarlaunch.com` is on the domain block list for all four roster domains (SQLite only; not in git). Neural stays off. Bayes was not wiped. **The full code and security review is done (2026-09-29, `CLAUDE_FABLE5.1_CODE_REVIEW.md` / `CLAUDE_FABLE5.1_CODE_FIXED.md`), and its fixes are committed but not deployed.** The most important finding: `expire = 0` in `classifier-bayes.conf` had switched rspamd's Bayes expiry *on*, deleting about 374,700 rare tokens since 2026-09-23. **Next: deploy that config fix and rebuild `spamfilter` (SESSION_HANDOFF "continue here"), decide whether to rebuild the Bayes notebook, then the planned Outlook add-in. Do not promote other accounts. Do not wipe Bayes without that decision.** The add-in is specified in `outlook-addin/` and has no code yet.
+Self-hosted IMAP spam filter (Python + Rspamd + Redis + Unbound) on ByteLord. Mailboxes authenticate through sibling **`email-oauth2-proxy`** (XOAUTH2 to M365); this filter speaks plain IMAP `LOGIN` to the proxy. Allow/block lists and one shared Bayes notebook (`defaults.bayes_user: bytelord`) are live. **As of 2026-10-01, `rich_bytecave`, `steve_rjmetalfab`, and `shon_bytecave` are `mode: move`.** The other 15 accounts, including `shon_eizenhoefer`, stay `shadow`. `move_grace_seconds` is 0. Score-based moves do **not** train Bayes. **`flag_untrained_junk` is off** and must stay off while anyone uses classic Outlook in Cached Exchange Mode. **Train-Ham** copies the message to the Inbox before learning; that Inbox copy is not score-moved to Junk. **The filter does not remove mail from Junk.** Trained-* retention is 60 days from first sight in that folder. **MULTI_TRAIN** (commit `31c55d9`) adds +1, +2, or +4 after 1, 2, or 3 distinct spam learns of the exact From address in that mailbox, and at 4 or more forces Junk routing without teaching Bayes. It applies only when the raw rspamd score is above half of `rescue_below` (2 while rescue is 4). Mail already scored is not scanned again. `@kickstarlaunch.com` is on the domain block list for all four roster domains (SQLite only; not in git). Neural stays off. Do not wipe Bayes. Do not promote more accounts unless asked. The Fable 5.1 review fixes and the 2026-09-29 Bayes rebuild are already deployed. The Outlook add-in is specified in `outlook-addin/` and has no code yet.
 
 ---
 
@@ -47,10 +47,10 @@ Compose **source of truth in git:** `deploy/bytelord-compose.yaml`
 
 1. Drain Train-Spam → learn → Trained-Spam. Drain Train-Ham: **copy to Inbox first** (fingerprint only; bytes unchanged), then learn → Trained-Ham. The Inbox copy stays.
 2. Drain Allowlist / Blocklist (person From only) → list upsert/flip → **learn** → MOVE (**Allow→Inbox**, **Block→Junk**).
-3. `scan_inbox`: UIDs above Inbox `scan_bookmark`; score with rspamd (including already-`\Seen`); list hits still score, then override routing; over-threshold (`threshold`, default 8) acts by mode (`shadow` log / `flag` / `move`+grace).
+3. `scan_inbox`: UIDs above Inbox `scan_bookmark`; score with rspamd (including already-`\Seen`); MULTI_TRAIN may add to that score or force the route before it is stored; list hits still score, then override routing; over-threshold (`threshold`, default 8) acts by mode (`shadow` log / `flag` / `move`+grace).
 4. `execute_due_moves` (Inbox→Junk) and `execute_due_rescues` (Junk→Inbox rescues).
 5. `poll_junk` (~`junk_poll_interval`, live **30s**): user Inbox→Junk learns; provider-delivered Junk is **scored** (not learned as spam); score **&lt; `rescue_below`** (default **4**) or allowlisted may be **rescued** in move mode only (mid-band 4–8 stays in Junk). When `flag_untrained_junk` is on, a new Junk UID that stays and has not been taught gets `\Flagged`. The Junk scan itself stays read-only; the flag is a second writable select.
-6. Retention / prune when due; IDLE wait (or `poll_interval` if no IDLE).
+6. Trained-* retention / prune when due. Junk is never swept. Then IDLE wait (or `poll_interval` if no IDLE).
 
 **Bookmarks:** first sight of a folder/uidvalidity records max UID and **skips historic mail**. That still applies to Inbox and Junk.
 
@@ -64,7 +64,7 @@ Compose **source of truth in git:** `deploy/bytelord-compose.yaml`
 | `flag` | Shadow + `\Flagged` on over-threshold Inbox |
 | `move` | Flag + after `move_grace_seconds` MOVE Inbox→Junk when score ≥ `threshold`; provider-Junk rescue MOVEs when score &lt; `rescue_below` or allowlisted |
 
-Live config: **`rich_bytecave` is `move`**; every other account is **shadow**. `learn_grace_seconds: 30`. `move_grace_seconds: 0`. **`accounts.yml` is loaded once at process start — restart `spamfilter` after YAML changes.** The image does not need a rebuild for a mode change (`accounts.yml` is bind-mounted). Move and flag modes run retention; shadow does not.
+Live config: **`rich_bytecave`, `steve_rjmetalfab`, and `shon_bytecave` are `move`**; every other account is **shadow** (`shon_eizenhoefer` stays shadow). `learn_grace_seconds: 30`. `move_grace_seconds: 0`. **`accounts.yml` is loaded once at process start — restart `spamfilter` after YAML changes.** The image does not need a rebuild for a mode change (`accounts.yml` is bind-mounted). Move and flag modes run Trained-* retention only; shadow does not. Junk is never swept.
 
 ### Dashboard
 
@@ -358,7 +358,7 @@ ssh -L 8099:127.0.0.1:8099 bytecave@bytelord
 
 ## Live accounts (`accounts.yml`, gitignored)
 
-All accounts use proxy LOGIN with `password: "Dummy"`, `imap_host: email-oauth2-proxy`, port **1993**, `tls_mode: none`, `allow_insecure_tls: true`. **`rich_bytecave` is `mode: move` (2026-09-28). The other nine are `shadow`.**
+All accounts use proxy LOGIN with `password: "Dummy"`, `imap_host: email-oauth2-proxy`, port **1993**, `tls_mode: none`, `allow_insecure_tls: true`. **`rich_bytecave`, `steve_rjmetalfab`, and `shon_bytecave` are `mode: move` (steve and shon@bytecave.net since 2026-10-01). The other 15 are `shadow`.**
 
 Notable defaults (verify in file — operators edit live YAML):
 
@@ -487,10 +487,12 @@ Ham training **cannot** cancel A/B auth-header symbols when they still fire (unt
 
 ## What’s next (suggested order)
 
-1. **Supermemory (first, operator's order as of 2026-09-29 evening).** Find out why Claude Code's Supermemory plugin stopped authenticating early on 2026-09-29, fix it, check `supermemory-repo-supervisor` for the flaws fixed in the graphify supervisor, then add the 2026-09-28/29 facts. Details are in SESSION_HANDOFF § Supermemory and `/opt/bytelord/scripts/BYTELORD_HANDOFF.md`.
-2. **IMAP connection errors.** About 270 `conn_error` events a day ("idle_done failed", plus hourly `AccessTokenExpired`). The starting analysis and commands are in SESSION_HANDOFF § "Connection errors: what is known". Mail is not being lost; the loop reconnects. The goal is to tell expected session recycling apart from real faults, and to stop needless re-logins (FABLE-CR-029).
+Done on 2026-10-01 and not to be redone: MULTI_TRAIN, and stopping Junk sweeps. When `steve_rjmetalfab` was promoted, the old Junk sweep moved **500** Junk messages to Deleted Items before that code change. They stay there. Do not move them back unless asked.
+
+1. **IMAP connection errors.** About 270 `conn_error` events a day ("idle_done failed", plus hourly `AccessTokenExpired`), counted on 2026-09-29. The starting analysis and commands are in SESSION_HANDOFF § "Connection errors: what is known". Mail is not being lost; the loop reconnects. The goal is to tell expected session recycling apart from real faults, and to stop needless re-logins (FABLE-CR-029).
+2. **Outlook add-in.** Requirements and setup notes are in `outlook-addin/`; there is no code yet. It is built on the Windows desktop clone, not on ByteLord.
 3. **Steve's Outlook:** confirm Train-Spam drags now stay in Trained-Spam. The 2-minute settle is live; `flag_untrained_junk` stays off. Optionally de-duplicate the bounced copies left in his Junk.
-4. **Outlook add-in.** Requirements and setup notes are in `outlook-addin/`; there is no code yet. It is built on the Windows desktop clone, not on ByteLord.
+4. **Supermemory on Claude Code.** Cursor captured project memories on 2026-10-01. The Claude Code plugin's authentication failure from early 2026-09-29 was not re-checked. Details are in SESSION_HANDOFF § Supermemory and `/opt/bytelord/scripts/BYTELORD_HANDOFF.md`.
 5. **Do not wipe Bayes** unless asked. Latest restore point, taken just before the 2026-09-29 rebuild: `dump.rdb.bak-20260929-022922-before-retrain` + `appendonlydir.bak-20260929-022922-before-retrain` in the Redis `/data`, and SQLite `spamfilter.db.bak-20260929-022922-before-retrain`. Do not run any score-based Trained-* mover.
 6. **Operator decisions still open:**
    - CR-014, the Inbox→Junk MOVE-as-COPY leftover;
@@ -505,7 +507,7 @@ Ham training **cannot** cancel A/B auth-header symbols when they still fire (unt
 | File | Why |
 |---|---|
 | `IMPLEMENTATION_STATUS.md` | **Mandatory** — this file |
-| `SESSION_HANDOFF.md` | **Mandatory** — current continue-here note (2026-09-28 evening: Train-Ham restore, untrained-Junk flag, review next) |
+| `SESSION_HANDOFF.md` | **Mandatory** — current continue-here note (2026-10-01: MULTI_TRAIN live; next is the IMAP connection errors) |
 | `code_review_orientation.md` | How to run a code review here (the 2026-09-29 one is done) |
 | `CLAUDE_FABLE5.1_CODE_REVIEW.md` | 2026-09-29 review: 32 traced findings (FABLE-CR-001…032) |
 | `CLAUDE_FABLE5.1_CODE_FIXED.md` | 2026-09-29 fixes (25), deferrals, deploy steps, validation |
