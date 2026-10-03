@@ -326,6 +326,50 @@ def test_scan_identity_precedes_message_delivered_to(monkeypatch):
     assert captured["headers"]["Rcpt"] == "u@example.com"
 
 
+def test_greylist_try_again_is_not_a_score(monkeypatch):
+    """A greylist tempfail is score 0 with only GREYLIST. That is not ham."""
+    _capture_post(
+        monkeypatch,
+        score=0.0,
+        action="soft reject",
+        symbols={
+            "GREYLIST": {
+                "score": 0.0,
+                "description": "greylisted; too early",
+            },
+        },
+    )
+    result = f.rspamd_scan_detail(RAW_WITH_FROM, "u@example.com", 100.0)
+    assert result is not None
+    assert result.deferred == "greylist"
+    assert f.rspamd_scan(RAW_WITH_FROM, "u@example.com", 100.0) is None
+
+
+def test_scored_soft_reject_is_not_a_greylist_deferral(monkeypatch):
+    """actions.conf names scores from 4 up 'soft reject'. That score stands."""
+    _capture_post(
+        monkeypatch,
+        score=12.49,
+        action="soft reject",
+        symbols={
+            "DBL_SPAM": {"score": 6.5, "description": "acharya.ac.in"},
+            "GREYLIST": {"score": 0.0, "description": "greylisted; new record"},
+        },
+    )
+    result = f.rspamd_scan_detail(RAW_WITH_FROM, "u@example.com", 100.0)
+    assert result is not None
+    assert result.deferred is None
+    assert result.score == 12.49
+
+
+def test_clean_zero_is_not_a_greylist_deferral(monkeypatch):
+    _capture_post(monkeypatch, score=0.0, action="no action", symbols={})
+    result = f.rspamd_scan_detail(RAW_WITH_FROM, "u@example.com", 100.0)
+    assert result is not None
+    assert result.deferred is None
+    assert result.score == 0.0
+
+
 def test_scan_without_bayes_user_prefixes_recipient_identity(monkeypatch):
     captured = _capture_post(monkeypatch)
     f.rspamd_scan(RAW_WITH_FROM, "u@example.com", 100.0)

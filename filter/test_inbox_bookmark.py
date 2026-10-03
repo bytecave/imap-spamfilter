@@ -120,3 +120,33 @@ def test_missing_body_does_not_advance_bookmark(tmp_path, monkeypatch):
 
     assert db.get_scan_bookmark("INBOX", 1) == 1
     assert db.get_imap_message("INBOX", 1, 2) is None
+
+
+def test_greylist_deferral_stays_in_junk_and_is_retried(tmp_path, monkeypatch):
+    """Score 0 from a greylist tempfail must not be rescued to the Inbox."""
+    db = _mk_db(tmp_path)
+    acc = _mk_account(mode="move", move_grace_seconds=0)
+    with db.tx():
+        db.set_scan_bookmark("Junk", 1, 0)
+    monkeypatch.setattr(
+        f, "rspamd_scan_detail",
+        lambda *a, **k: f.ScanResult(0.0, (), "soft reject", deferred="greylist"),
+    )
+    client = CapIMAP(
+        existing=_all_existing(),
+        uids=[1],
+        bodies={1: _raw(1)},
+    )
+
+    f.poll_junk(client, db, LOG, acc, FMAP)
+
+    row = db.get_imap_message("Junk", 1, 1)
+    assert row is not None
+    assert row["our_score"] is None
+    assert row["our_action"] is None
+    assert db.get_scan_bookmark("Junk", 1) == 0
+    events = _events(db)
+    assert "scan_deferred" in events
+    assert "pending_rescue" not in events
+    assert "rescued_to_inbox" not in events
+    assert "scan_failed" not in events

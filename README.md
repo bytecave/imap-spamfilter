@@ -944,7 +944,14 @@ Restore is the reverse: stop the four containers, extract the tar over
   in that same header plus an outermost `Received-SPF` receiver of
   `protection.outlook.com`, and that method is a clean pass. A later
   header, any other authserv, or a fail/softfail keeps the rspamd weight.
-  `BROKEN_HEADERS` is still scored.
+  `BROKEN_HEADERS` is still scored. Rspamd's greylist module is off
+  (`rspamd/local.d/greylist.conf`). It is an SMTP "try again later", and
+  there is no sending server left to retry once the message is in IMAP.
+  While it was on, a second message from the same sender inside that
+  window came back as score 0 with no symbols, and move mode rescued it
+  to the Inbox. A reply that is still a greylist deferral (score about 0,
+  action soft reject, only `GREYLIST`) is not stored and is not rescued;
+  the next pass scans it again.
   To dump the symbol table for one message:
 
   ```bash

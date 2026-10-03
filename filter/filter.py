@@ -243,6 +243,9 @@ class ScanResult:
     score: float
     symbols: tuple[ScanSymbol, ...]
     action: str | None = None
+    # Set when rspamd deferred the scan (greylist "try again later") instead
+    # of scoring it. The score is not a classification and must not be stored.
+    deferred: str | None = None
 
 
 # Always keep these families even when score ≈ 0 (diagnostic / ops).
@@ -2573,6 +2576,40 @@ class Db:
 # ---------------------------------------------------------------------------
 
 
+def _greylist_deferred(data: Mapping[str, Any]) -> bool:
+    """True when /checkv2 is a greylist tempfail, not a classification.
+
+    Rspamd's greylist module is an SMTP "try again later". The first message
+    from a triplet is still scored. A later message inside that window is
+    not scanned: the reply is action ``soft reject``, score 0, and only
+    ``GREYLIST``. That 0 is not "clean". A real score of 0 uses action
+    ``no action``. A message that was fully scored and also greylisted
+    keeps its weighted symbols, so it is not a deferral.
+    """
+    action = data.get("action")
+    if action not in {"soft reject", "greylist"}:
+        return False
+    score = data.get("score")
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        return False
+    score_f = float(score)
+    if not math.isfinite(score_f) or abs(score_f) >= 0.05:
+        return False
+    symbols = data.get("symbols")
+    if not isinstance(symbols, Mapping) or "GREYLIST" not in symbols:
+        return False
+    for name, meta in symbols.items():
+        if name == "GREYLIST" or not isinstance(meta, Mapping):
+            continue
+        raw_score = meta.get("score", 0)
+        if isinstance(raw_score, bool) or not isinstance(raw_score, (int, float)):
+            continue
+        sym_score = float(raw_score)
+        if math.isfinite(sym_score) and abs(sym_score) >= 0.05:
+            return False
+    return True
+
+
 def rspamd_scan_detail(
     raw: bytes, recipient: str, max_score: float, bayes_user: str | None = None,
     *, m365_auth_trust: bool = True,
@@ -2647,6 +2684,13 @@ def rspamd_scan_detail(
             symbols=parse_scan_symbols(data),
             action=action,
         )
+        if _greylist_deferred(data):
+            return ScanResult(
+                score=result.score,
+                symbols=result.symbols,
+                action=result.action,
+                deferred="greylist",
+            )
         if not m365_auth_trust:
             return result
         return apply_m365_auth_trust(raw, result)
@@ -2659,7 +2703,9 @@ def rspamd_scan(
 ) -> float | None:
     """POST to /checkv2. Return numeric score or None on any error."""
     result = rspamd_scan_detail(raw, recipient, max_score, bayes_user=bayes_user)
-    return None if result is None else result.score
+    if result is None or result.deferred:
+        return None
+    return result.score
 
 
 def rspamd_learn(raw: bytes, kind: str, user: str) -> str:
@@ -3659,6 +3705,15 @@ def _score_and_store(
         bayes_user=acc.bayes_user or acc.user,
         m365_auth_trust=acc.m365_auth_trust,
     )
+    if scan_detail is not None and scan_detail.deferred:
+        # Not a score and not an outage. Leave our_score unset so the next
+        # pass retries. Callers treat None as "halt here" and do not rescue.
+        log.info(
+            "scan deferred for %s (uid=%s) in %s: %s",
+            msgid, uid, folder, scan_detail.deferred,
+        )
+        db.log_event("scan_deferred", msgid, detail=scan_detail.deferred)
+        return None
     if scan_detail is None:
         log.warning(
             "scan failed for %s (uid=%s) - keeping in %s", msgid, uid, folder,
